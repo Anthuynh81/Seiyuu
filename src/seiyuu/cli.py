@@ -168,6 +168,36 @@ def render(
     click.echo(f"manifest: {result.manifest_path}")
 
 
+def _pause_options(fn):
+    """Pause-tuning flags shared by `assemble` and `convert` (seconds)."""
+    for name, help_text in reversed(
+        [
+            ("--pause-paragraph", "Silence between paragraphs."),
+            ("--pause-after-heading", "Silence after a chapter heading."),
+            ("--pause-scene-break", "Silence at a scene break (replaces the paragraph gap)."),
+            ("--pause-lead-in", "Silence at the start of each chapter."),
+            ("--pause-lead-out", "Silence at the end of each chapter."),
+        ]
+    ):
+        fn = click.option(name, type=float, default=None, help=f"{help_text} [default: see SPEC]")(
+            fn
+        )
+    return fn
+
+
+def _build_pauses(**overrides):
+    from seiyuu.assemble import PauseProfile
+
+    defaults = PauseProfile()
+    return PauseProfile(
+        paragraph=overrides.get("pause_paragraph") or defaults.paragraph,
+        after_heading=overrides.get("pause_after_heading") or defaults.after_heading,
+        scene_break=overrides.get("pause_scene_break") or defaults.scene_break,
+        chapter_lead_in=overrides.get("pause_lead_in") or defaults.chapter_lead_in,
+        chapter_lead_out=overrides.get("pause_lead_out") or defaults.chapter_lead_out,
+    )
+
+
 @main.command()
 @click.argument("book_id")
 @click.option(
@@ -176,7 +206,8 @@ def render(
     default=None,
     help="Render output root (default: settings.output_dir).",
 )
-def assemble(book_id: str, output_dir: Path | None) -> None:
+@_pause_options
+def assemble(book_id: str, output_dir: Path | None, **pause_overrides) -> None:
     """Assemble rendered segments into per-chapter MP3s (output/{book}/chapters/)."""
     from seiyuu.assemble import AssembleError, assemble_book
     from seiyuu.render import MANIFEST_NAME
@@ -187,12 +218,117 @@ def assemble(book_id: str, output_dir: Path | None) -> None:
         output_dir or cfg.output_dir, book_id, MANIFEST_NAME, "Run `seiyuu render` first."
     )
     try:
-        result = assemble_book(book_dir, progress=click.echo)
+        result = assemble_book(
+            book_dir, pauses=_build_pauses(**pause_overrides), progress=click.echo
+        )
     except AssembleError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"done: {len(result.mp3_paths)} chapter MP3s, "
         f"{result.total_seconds / 60:.1f} min total -> {book_dir / 'chapters'}"
+    )
+
+
+# A full-book render is a long GPU job; above this many segments, confirm.
+FULL_RENDER_CONFIRM_BLOCKS = 300
+
+
+@main.command()
+@click.argument("epub_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--engine", "engine_id", default=None, help="TTS engine (default from settings).")
+@click.option("--voice", default=None, help="Voice/preset id (default from settings).")
+@click.option(
+    "--chapter",
+    "chapter_indices",
+    multiple=True,
+    type=int,
+    help="Convert only these 1-based chapters (repeatable). Default: all.",
+)
+@click.option("--speed", default=1.0, show_default=True, help="Speech speed multiplier.")
+@click.option("--seed", default=41172, show_default=True, help="Synthesis seed.")
+@click.option("--yes", "-y", is_flag=True, help="Skip the full-book render confirmation.")
+@click.option(
+    "--books-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Normalized books root (default: settings.books_dir).",
+)  # fmt: skip
+@click.option(
+    "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Render output root (default: settings.output_dir).",
+)  # fmt: skip
+@_pause_options
+def convert(
+    epub_path: Path,
+    engine_id: str | None,
+    voice: str | None,
+    chapter_indices: tuple[int, ...],
+    speed: float,
+    seed: int,
+    yes: bool,
+    books_dir: Path | None,
+    output_dir: Path | None,
+    **pause_overrides,
+) -> None:
+    """Full pipeline: EPUB -> normalized JSON -> single-voice render -> chapter MP3s."""
+    from seiyuu.assemble import AssembleError, assemble_book
+    from seiyuu.engines import get_engine
+    from seiyuu.ingest import IngestError, parse_epub, write_normalized
+    from seiyuu.render import RenderError, render_book
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+
+    click.echo("== ingest ==")
+    try:
+        ingest_result = parse_epub(epub_path)
+    except IngestError as exc:
+        raise click.ClickException(str(exc)) from exc
+    book = ingest_result.book
+    write_normalized(book, books_dir or cfg.books_dir)
+    click.echo(f"{book.book_meta.book_id}: {len(book.chapters)} chapters")
+
+    wanted = set(chapter_indices)
+    speakable = sum(
+        1
+        for ci, c in enumerate(book.chapters, start=1)
+        for b in c.blocks
+        if b.is_speakable and (not wanted or ci in wanted)
+    )
+    if not chapter_indices and speakable > FULL_RENDER_CONFIRM_BLOCKS and not yes:
+        words = sum(len(b.text.split()) for c in book.chapters for b in c.blocks)
+        click.confirm(
+            f"Full-book render: {speakable} segments, roughly {words / 150 / 60:.1f} hours "
+            f"of audio to synthesize. Continue?",
+            abort=True,
+        )
+
+    click.echo("== render ==")
+    book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
+    try:
+        engine = get_engine(engine_id or cfg.tts_engine)
+        render_result = render_book(
+            book,
+            engine,
+            voice or cfg.kokoro_default_voice,
+            book_dir,
+            settings={"speed": speed},
+            seed=seed,
+            chapters=chapter_indices,
+            progress=click.echo,
+        )
+    except (RenderError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache")
+
+    click.echo("== assemble ==")
+    try:
+        assemble_result = assemble_book(
+            book_dir, pauses=_build_pauses(**pause_overrides), progress=click.echo
+        )
+    except AssembleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"done: {len(assemble_result.mp3_paths)} chapter MP3s, "
+        f"{assemble_result.total_seconds / 60:.1f} min total -> {book_dir / 'chapters'}"
     )
 
 
