@@ -112,6 +112,7 @@ def render_book(
 
     manifest = RenderManifest(
         book_id=book.book_meta.book_id,
+        book_title=book.book_meta.title,
         engine=engine.engine_id,
         engine_model_version=engine.model_version,
         voice_id=voice_id,

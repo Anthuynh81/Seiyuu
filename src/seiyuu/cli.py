@@ -75,21 +75,23 @@ def ingest(
     click.echo(f"wrote: {out_path}")
 
 
-def _resolve_book_dir(books_dir: Path, book_id: str) -> Path:
-    """Accept a full book_id or an unambiguous prefix of one."""
-    exact = books_dir / book_id
-    if (exact / "normalized.json").is_file():
+def _resolve_book_dir(root: Path, book_id: str, marker: str, hint: str) -> Path:
+    """Accept a full book_id or an unambiguous prefix; the dir must contain `marker`."""
+    exact = root / book_id
+    if (exact / marker).is_file():
         return exact
-    if not books_dir.is_dir():
-        raise click.ClickException(f"books directory not found: {books_dir}")
-    matches = [d for d in books_dir.iterdir() if d.name.startswith(book_id) and d.is_dir()]
+    if not root.is_dir():
+        raise click.ClickException(f"directory not found: {root}. {hint}")
+    matches = [
+        d
+        for d in root.iterdir()
+        if d.is_dir() and d.name.startswith(book_id) and (d / marker).is_file()
+    ]
     if len(matches) == 1:
         return matches[0]
-    known = ", ".join(sorted(d.name for d in books_dir.iterdir() if d.is_dir())) or "(none)"
+    known = ", ".join(sorted(d.name for d in root.iterdir() if (d / marker).is_file())) or "(none)"
     problem = "is ambiguous" if matches else "not found"
-    raise click.ClickException(
-        f"book {book_id!r} {problem}; ingested books: {known}. Run `seiyuu ingest` first."
-    )
+    raise click.ClickException(f"book {book_id!r} {problem}; candidates: {known}. {hint}")
 
 
 @main.command()
@@ -134,7 +136,9 @@ def render(
     from seiyuu.settings import get_settings
 
     cfg = get_settings()
-    book_dir = _resolve_book_dir(books_dir or cfg.books_dir, book_id)
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, "normalized.json", "Run `seiyuu ingest` first."
+    )
     book = NormalizedBook.model_validate_json(
         (book_dir / "normalized.json").read_text(encoding="utf-8")
     )
@@ -162,6 +166,34 @@ def render(
         f"{result.cache_hits} from cache, {minutes:.1f} min of audio"
     )
     click.echo(f"manifest: {result.manifest_path}")
+
+
+@main.command()
+@click.argument("book_id")
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+def assemble(book_id: str, output_dir: Path | None) -> None:
+    """Assemble rendered segments into per-chapter MP3s (output/{book}/chapters/)."""
+    from seiyuu.assemble import AssembleError, assemble_book
+    from seiyuu.render import MANIFEST_NAME
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        output_dir or cfg.output_dir, book_id, MANIFEST_NAME, "Run `seiyuu render` first."
+    )
+    try:
+        result = assemble_book(book_dir, progress=click.echo)
+    except AssembleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"done: {len(result.mp3_paths)} chapter MP3s, "
+        f"{result.total_seconds / 60:.1f} min total -> {book_dir / 'chapters'}"
+    )
 
 
 if __name__ == "__main__":

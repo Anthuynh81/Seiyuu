@@ -32,6 +32,7 @@ class RenderedChapter(BaseModel):
 
 class RenderManifest(BaseModel):
     book_id: str
+    book_title: str | None = None  # for player metadata (album tag)
     engine: str
     engine_model_version: str
     voice_id: str
