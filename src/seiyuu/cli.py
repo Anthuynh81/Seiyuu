@@ -75,5 +75,94 @@ def ingest(
     click.echo(f"wrote: {out_path}")
 
 
+def _resolve_book_dir(books_dir: Path, book_id: str) -> Path:
+    """Accept a full book_id or an unambiguous prefix of one."""
+    exact = books_dir / book_id
+    if (exact / "normalized.json").is_file():
+        return exact
+    if not books_dir.is_dir():
+        raise click.ClickException(f"books directory not found: {books_dir}")
+    matches = [d for d in books_dir.iterdir() if d.name.startswith(book_id) and d.is_dir()]
+    if len(matches) == 1:
+        return matches[0]
+    known = ", ".join(sorted(d.name for d in books_dir.iterdir() if d.is_dir())) or "(none)"
+    problem = "is ambiguous" if matches else "not found"
+    raise click.ClickException(
+        f"book {book_id!r} {problem}; ingested books: {known}. Run `seiyuu ingest` first."
+    )
+
+
+@main.command()
+@click.argument("book_id")
+@click.option("--engine", "engine_id", default=None, help="TTS engine (default from settings).")
+@click.option("--voice", default=None, help="Voice/preset id (default from settings).")
+@click.option(
+    "--chapter",
+    "chapter_indices",
+    multiple=True,
+    type=int,
+    help="Render only these 1-based chapters (repeatable). Default: all.",
+)
+@click.option("--speed", default=1.0, show_default=True, help="Speech speed multiplier.")
+@click.option("--seed", default=41172, show_default=True, help="Synthesis seed.")
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+def render(
+    book_id: str,
+    engine_id: str | None,
+    voice: str | None,
+    chapter_indices: tuple[int, ...],
+    speed: float,
+    seed: int,
+    books_dir: Path | None,
+    output_dir: Path | None,
+) -> None:
+    """Render a book single-voice: cached segment WAVs + manifest.json."""
+    from seiyuu.engines import get_engine
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.render import RenderError, render_book
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(books_dir or cfg.books_dir, book_id)
+    book = NormalizedBook.model_validate_json(
+        (book_dir / "normalized.json").read_text(encoding="utf-8")
+    )
+
+    engine_id = engine_id or cfg.tts_engine
+    voice = voice or cfg.kokoro_default_voice
+    try:
+        engine = get_engine(engine_id)
+        result = render_book(
+            book,
+            engine,
+            voice,
+            (output_dir or cfg.output_dir) / book.book_meta.book_id,
+            settings={"speed": speed},
+            seed=seed,
+            chapters=chapter_indices,
+            progress=click.echo,
+        )
+    except (RenderError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    minutes = result.total_audio_seconds / 60
+    click.echo(
+        f"done: {result.synthesized} segments synthesized, "
+        f"{result.cache_hits} from cache, {minutes:.1f} min of audio"
+    )
+    click.echo(f"manifest: {result.manifest_path}")
+
+
 if __name__ == "__main__":
     main()

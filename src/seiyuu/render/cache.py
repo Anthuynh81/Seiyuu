@@ -1,0 +1,75 @@
+"""File-based TTS segment cache (M1; a SQLite index arrives in M2).
+
+Key per SPEC: (engine, engine_model_version, voice_id, settings_hash, seed,
+normalized_text_hash). Layout: cache_dir/{key_hash}.wav plus a {key_hash}.json
+sidecar holding the full key for debuggability.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel
+
+from seiyuu.engines import AudioFile
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _hash_json(obj: Any) -> str:
+    return _sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+
+
+class SegmentKey(BaseModel):
+    engine: str
+    engine_model_version: str
+    voice_id: str
+    settings_hash: str
+    seed: int | None
+    normalized_text_hash: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        engine: str,
+        engine_model_version: str,
+        voice_id: str,
+        settings: dict[str, Any],
+        seed: int | None,
+        normalized_text: str,
+    ) -> "SegmentKey":
+        return cls(
+            engine=engine,
+            engine_model_version=engine_model_version,
+            voice_id=voice_id,
+            settings_hash=_hash_json(settings),
+            seed=seed,
+            normalized_text_hash=_sha256(normalized_text),
+        )
+
+    @property
+    def key_hash(self) -> str:
+        # 32 hex chars keeps Windows paths short while staying collision-safe.
+        return _hash_json(self.model_dump())[:32]
+
+
+class SegmentCache:
+    def __init__(self, cache_dir: Path) -> None:
+        self.cache_dir = Path(cache_dir)
+
+    def path_for(self, key: SegmentKey) -> Path:
+        return self.cache_dir / f"{key.key_hash}.wav"
+
+    def get(self, key: SegmentKey) -> Path | None:
+        path = self.path_for(key)
+        return path if path.is_file() else None
+
+    def put(self, key: SegmentKey, audio: AudioFile) -> Path:
+        path = audio.save(self.path_for(key))
+        sidecar = path.with_suffix(".json")
+        sidecar.write_text(key.model_dump_json(indent=2), encoding="utf-8")
+        return path
