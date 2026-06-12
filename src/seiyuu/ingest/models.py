@@ -3,7 +3,9 @@
 Schema (SPEC.md stage 1):
     {book_meta, chapters: [{title, blocks: [{type, id, text}]}]}
 
-Block ids are stable and ordered: ``ch{NNN}_b{NNNN}`` (1-based, chapter-scoped).
+Block ids are stable and ordered: ``ch{NNN}_b{NNNN}`` (1-based, chapter-scoped,
+zero-padded to at least 3/4 digits — wider when a book exceeds 999 chapters or
+9999 blocks, e.g. web novels with 1000+ chapters).
 """
 
 import re
@@ -11,7 +13,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
-BLOCK_ID_PATTERN = re.compile(r"^ch\d{3}_b\d{4}$")
+BLOCK_ID_PATTERN = re.compile(r"^ch\d{3,}_b\d{4,}$")
 
 
 class BlockType(StrEnum):

@@ -16,8 +16,14 @@ from ebooklib import ITEM_DOCUMENT, epub
 
 from seiyuu.ingest.models import Block, BlockType, BookMeta, Chapter, NormalizedBook
 
-# Spine items that are never narration (covers, navigation, wrappers).
-SKIP_ITEM_PATTERN = re.compile(r"cover|\btoc\b|nav|titlepage|wrap", re.IGNORECASE)
+# Spine items that are never narration (covers, navigation, wrappers). Matched
+# as whole name tokens — substring matching falsely skipped chapters like
+# "Azik's Discovery" (cover) and "Wrapping Up Work" (wrap). A name match alone
+# is not enough: the item must also be nearly textless (see MATTER_DOC_MAX_WORDS).
+SKIP_NAME_TOKENS = {"cover", "coverpage", "toc", "nav", "titlepage", "wrap", "wrapper"}
+
+# A name-flagged spine item with more words than this is real content and kept.
+MATTER_DOC_MAX_WORDS = 50
 
 # Containers whose text is never narration: illustration captions/figures and
 # Project Gutenberg boilerplate (header and license footer share the class).
@@ -144,8 +150,20 @@ def _clean_blocks(raws: list[RawBlock]) -> list[RawBlock]:
     return out
 
 
-def _slug(text: str) -> str:
-    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-") or "book"
+def _slug(text: str, max_len: int = 40) -> str:
+    s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-")
+    if len(s) > max_len:
+        s = s[:max_len]
+        if "-" in s:
+            s = s[: s.rfind("-")]
+    return s or "book"
+
+
+def _name_tokens(*names: str) -> set[str]:
+    tokens: set[str] = set()
+    for name in names:
+        tokens.update(re.findall(r"[a-z]+|\d+", name.lower()))
+    return tokens
 
 
 def _first_meta(book: epub.EpubBook, name: str) -> str | None:
@@ -187,12 +205,16 @@ def parse_epub(
         if _matches_any(name, idref, exclude_items):
             skipped.append(name)
             continue
-        if (SKIP_ITEM_PATTERN.search(name) or SKIP_ITEM_PATTERN.search(idref)) and not (
-            _matches_any(name, idref, include_items)
+        doc_blocks = _extract_doc_blocks(item.get_content())
+        doc_words = sum(len(b.text.split()) for b in doc_blocks)
+        if (
+            (_name_tokens(name, idref) & SKIP_NAME_TOKENS)
+            and doc_words <= MATTER_DOC_MAX_WORDS
+            and not _matches_any(name, idref, include_items)
         ):
             skipped.append(name)
             continue
-        raws.extend(_extract_doc_blocks(item.get_content()))
+        raws.extend(doc_blocks)
 
     if not raws:
         raise IngestError(f"no narratable content found in {epub_path} (all items skipped?)")
