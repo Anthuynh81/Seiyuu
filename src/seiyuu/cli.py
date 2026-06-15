@@ -168,6 +168,172 @@ def render(
     click.echo(f"manifest: {result.manifest_path}")
 
 
+def _build_provider(cfg, provider_id: str, model: str, prompt_version: str):
+    """Construct an attribution provider, passing only the kwargs each backend needs."""
+    from seiyuu.attribute.providers import get_provider
+
+    kwargs = {"prompt_version": prompt_version}
+    if provider_id == "local":
+        kwargs["base_url"] = cfg.ollama_base_url
+    return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)
+
+
+@main.command()
+@click.argument("book_id")
+@click.option(
+    "--provider", "provider_id", default=None, help="Attribution provider (default from settings)."
+)
+@click.option("--model", default=None, help="LLM model id (default from settings).")
+@click.option("--prompt-version", default=None, help="Prompt version (default from settings).")
+@click.option(
+    "--chapter",
+    "chapter_indices",
+    multiple=True,
+    type=int,
+    help="Attribute only these 1-based chapters (repeatable). Default: all.",
+)
+@click.option(
+    "--hybrid/--no-hybrid",
+    default=None,
+    help="Escalate chunks that fail local retries to the anthropic provider (paid).",
+)
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+def attribute(
+    book_id: str,
+    provider_id: str | None,
+    model: str | None,
+    prompt_version: str | None,
+    chapter_indices: tuple[int, ...],
+    hybrid: bool | None,
+    books_dir: Path | None,
+) -> None:
+    """Attribute speakers with the local LLM: writes attribution.json + a cache DB."""
+    from seiyuu.attribute import (
+        ATTRIBUTION_NAME,
+        AttributionCache,
+        AttributionError,
+        attribute_book,
+        write_attribution,
+    )
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, "normalized.json", "Run `seiyuu ingest` first."
+    )
+    book = NormalizedBook.model_validate_json(
+        (book_dir / "normalized.json").read_text(encoding="utf-8")
+    )
+
+    provider_id = provider_id or cfg.attribution_provider
+    model = model or cfg.attribution_model
+    prompt_version = prompt_version or cfg.attribution_prompt_version
+    use_hybrid = cfg.attribution_hybrid if hybrid is None else hybrid
+
+    try:
+        provider = _build_provider(cfg, provider_id, model, prompt_version)
+        escalation = None
+        if use_hybrid and provider_id != "anthropic":
+            escalation = _build_provider(cfg, "anthropic", cfg.anthropic_model, prompt_version)
+        with AttributionCache(book_dir / "attribution.db") as cache:
+            report = attribute_book(
+                book,
+                provider,
+                cache=cache,
+                budget_tokens=cfg.attribution_chunk_tokens,
+                overlap_blocks=cfg.attribution_chunk_overlap_blocks,
+                max_local_retries=cfg.attribution_max_local_retries,
+                escalation_provider=escalation,
+                chapters=chapter_indices,
+                progress=click.echo,
+            )
+    except (AttributionError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    write_attribution(report, book_dir)
+    n_segments = sum(len(c.segments) for c in report.chapters)
+    click.echo(
+        f"done: {len(report.registry.characters)} characters, {n_segments} segments "
+        f"({provider.provider_id}/{provider.model_id}, prompt {prompt_version})"
+    )
+    if report.flagged:
+        click.echo(f"  {len(report.flagged)} blocks flagged for review — see `seiyuu characters`")
+    click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
+
+
+@main.command()
+@click.argument("book_id")
+@click.option("--sample-lines", default=2, show_default=True, help="Dialogue lines per character.")
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+def characters(book_id: str, sample_lines: int, books_dir: Path | None) -> None:
+    """Report attributed characters, sample lines, and review flags (reads attribution.json)."""
+    import textwrap
+    from collections import Counter
+
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport, SegmentType
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    report = AttributionReport.model_validate_json(
+        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
+    )
+
+    threshold = cfg.attribution_confidence_threshold
+    counts: Counter[str] = Counter()
+    samples: dict[str, list[str]] = {}
+    narration = low_confidence = 0
+    for chapter in report.chapters:
+        for seg in chapter.segments:
+            if seg.speaker is None:
+                narration += 1
+                continue
+            counts[seg.speaker] += 1
+            if seg.confidence < threshold:
+                low_confidence += 1
+            if (
+                seg.type is SegmentType.DIALOGUE
+                and len(samples.setdefault(seg.speaker, [])) < sample_lines
+            ):
+                samples[seg.speaker].append(seg.text)
+
+    provenance = f"{report.provider_id}/{report.model_id}, prompt {report.prompt_version}"
+    click.echo(f"{report.book_id}  ({provenance})")
+    click.echo(f"narration segments: {narration}")
+    click.echo(f"characters: {len(report.registry.characters)}\n")
+
+    for char in sorted(report.registry.characters, key=lambda c: counts[c.id], reverse=True):
+        meta = ", ".join(filter(None, [char.gender, char.age_hint])) or "—"
+        aliases = f"  aka {', '.join(char.aliases)}" if char.aliases else ""
+        click.echo(
+            f"  {char.canonical_name} [{char.id}] ({meta}) — {counts[char.id]} lines{aliases}"
+        )
+        for line in samples.get(char.id, []):
+            click.echo(f"      “{textwrap.shorten(line, width=72)}”")
+
+    if low_confidence:
+        click.echo(f"\nlow-confidence speaker calls (< {threshold}): {low_confidence}")
+    if report.flagged:
+        click.echo(f"\nflagged for review: {len(report.flagged)} blocks")
+        for fb in report.flagged[:10]:
+            click.echo(f"  ch{fb.chapter_index} {fb.block_id}: {fb.reason}")
+    for note in report.registry_notes:
+        click.echo(f"note: {note}")
+
+
 def _pause_options(fn):
     """Pause-tuning flags shared by `assemble` and `convert` (seconds)."""
     for name, help_text in reversed(
