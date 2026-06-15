@@ -67,6 +67,7 @@ class OllamaProvider(AttributionLLM):
         transport: str = "native",
         temperature: float = 0.0,
         num_ctx: int = 8192,
+        keep_alive: str | int = "5m",
         timeout: float = 600.0,
         client: Any | None = None,  # OpenAI client (openai transport; injectable for tests)
         post: Callable[..., dict] | None = None,  # native HTTP POST (injectable for tests)
@@ -78,6 +79,7 @@ class OllamaProvider(AttributionLLM):
         self.transport = transport
         self.temperature = temperature
         self.num_ctx = num_ctx
+        self.keep_alive = keep_alive
         self.timeout = timeout
         self._client = client
         self._post = post or _urllib_post
@@ -106,7 +108,7 @@ class OllamaProvider(AttributionLLM):
             # model's <think> block would burn the context window before any JSON.
             "think": False,
             "options": {"temperature": temperature, "num_ctx": self.num_ctx},
-            "keep_alive": 0,
+            "keep_alive": self.keep_alive,
         }
         try:
             data = self._post(self.native_url, payload, self.timeout)
@@ -141,7 +143,7 @@ class OllamaProvider(AttributionLLM):
                     "type": "json_schema",
                     "json_schema": {"name": "attribution", "schema": schema},
                 },
-                extra_body={"keep_alive": 0},
+                extra_body={"keep_alive": self.keep_alive},
             )
         except APIConnectionError as exc:
             raise AttributionError(

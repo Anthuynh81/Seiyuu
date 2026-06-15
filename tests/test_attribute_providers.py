@@ -57,7 +57,7 @@ def test_native_request_shape_and_parse():
     rec: dict = {}
     resp = {"message": {"content": json.dumps(_SEG_JSON)}, "done_reason": "stop"}
     provider = OllamaProvider(
-        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, post=_fake_post(resp, rec)
+        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, num_ctx=4096, post=_fake_post(resp, rec)
     )
 
     result = provider.attribute_chunk(_chunk(), CharacterRegistry())
@@ -67,8 +67,8 @@ def test_native_request_shape_and_parse():
     payload = rec["payload"]
     assert payload["format"]["type"] == "object"  # the JSON schema itself
     assert payload["think"] is False
-    assert payload["options"]["num_ctx"] == 8192
-    assert payload["keep_alive"] == 0
+    assert payload["options"]["num_ctx"] == 4096
+    assert payload["keep_alive"] == "5m"  # stays warm between chunks
 
 
 def test_native_truncation_raises_context_error():
@@ -112,7 +112,7 @@ def test_openai_request_is_schema_enforced_and_unloads_model():
 
     assert result.segments[0].text == "Hello there."
     assert recorder["response_format"]["type"] == "json_schema"
-    assert recorder["extra_body"]["keep_alive"] == 0
+    assert recorder["extra_body"]["keep_alive"] == "5m"
 
 
 def test_openai_unreachable_raises_actionable_error():
@@ -139,6 +139,35 @@ def test_schema_violation_surfaces_as_attribution_error():
     )
     with pytest.raises(AttributionError, match="segment schema"):
         provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+
+def test_malformed_character_mention_dropped_not_fatal():
+    # The model echoed the registry shape (canonical_name/id, no `name`) for a character.
+    # That bad mention must be dropped, not reject the whole chunk's segments.
+    content = json.dumps(
+        {
+            "segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}],
+            "characters": [{"id": "x", "canonical_name": "X", "gender": "male"}],
+        }
+    )
+    provider = OllamaProvider(
+        model="m", prompts_dir=PROMPTS_DIR, transport="openai", client=_fake_client(content, {})
+    )
+    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+    assert result.segments[0].text == "Hello there."
+    assert result.characters == []  # dropped, not fatal
+
+
+def test_render_prompt_shows_registry_in_mention_shape():
+    from seiyuu.attribute.models import Character
+    from seiyuu.attribute.providers.base import _prompt_template, render_prompt
+
+    registry = CharacterRegistry(
+        characters=[Character(id="mr_bennet", canonical_name="Mr. Bennet", gender="male")]
+    )
+    prompt = render_prompt(_prompt_template(PROMPTS_DIR, "v1"), registry, _chunk())
+    assert '"name": "Mr. Bennet"' in prompt
+    assert "canonical_name" not in prompt  # internal field must not leak into the prompt
 
 
 def test_unknown_transport_rejected():

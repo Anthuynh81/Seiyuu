@@ -133,15 +133,20 @@ def attribute_book(
                 model_id=provider.model_id,
                 prompt_version=provider.prompt_version,
             )
+            label = f"  chunk {chunk.index + 1}/{len(chunks)} ({len(chunk.owned_ids)} blocks)"
             attribution = cache.get(key)
-            if attribution is None:
+            if attribution is not None:
+                say(f"{label}: cached")
+            else:
                 outcome = _attribute_chunk_validated(provider, chunk, registry, max_local_retries)
                 if outcome.attribution is None and escalation_provider is not None:
-                    say(f"  chunk {chunk.index}: escalating to {escalation_provider.provider_id}")
+                    say(f"{label}: escalating to {escalation_provider.provider_id}")
                     outcome = _attribute_chunk_validated(
                         escalation_provider, chunk, registry, max_local_retries
                     )
                 if outcome.attribution is None:
+                    why = outcome.failures[0].reason[:80] if outcome.failures else "unknown"
+                    say(f"{label}: FLAGGED after {outcome.attempts} attempt(s) — {why}")
                     for failure in outcome.failures:
                         flagged.append(
                             FlaggedBlock(
@@ -153,6 +158,7 @@ def attribute_book(
                     continue
                 attribution = outcome.attribution
                 cache.put(key, attribution)
+                say(f"{label}: {len(attribution.segments)} segments, {outcome.attempts} attempt(s)")
 
             resolved, chunk_notes = resolve_chunk(
                 registry, attribution.segments, attribution.characters

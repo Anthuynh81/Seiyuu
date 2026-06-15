@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from seiyuu.attribute.chunking import Chunk
-from seiyuu.attribute.models import CharacterRegistry, ChunkAttribution
+from seiyuu.attribute.models import (
+    CharacterMention,
+    CharacterRegistry,
+    ChunkAttribution,
+    Segment,
+)
 
 
 class AttributionError(Exception):
@@ -55,13 +60,28 @@ def _render_blocks(blocks: list) -> str:
 def render_prompt(template: str, registry: CharacterRegistry, chunk: Chunk) -> str:
     owned_ids = chunk.owned_ids
     context_blocks = [b for b in chunk.blocks if b.id not in owned_ids]
+    # Render the registry in the SAME shape the model must emit (CharacterMention: a `name`
+    # field, no `id`/`canonical_name`). Showing it the internal Character shape made the
+    # model copy `canonical_name`/`id` into its output and drop the required `name`.
     registry_json = json.dumps(
-        [c.model_dump() for c in registry.characters], indent=2, ensure_ascii=False
+        [
+            {
+                "name": c.canonical_name,
+                "aliases": c.aliases,
+                "gender": c.gender,
+                "age_hint": c.age_hint,
+                "description": c.description,
+            }
+            for c in registry.characters
+        ],
+        indent=2,
+        ensure_ascii=False,
     )
-    return template.format(
-        registry_json=registry_json,
-        context_blocks=_render_blocks(context_blocks),
-        blocks=_render_blocks(chunk.owned_blocks),
+    # Literal replacement, not str.format — the prompt contains JSON examples with braces.
+    return (
+        template.replace("{registry_json}", registry_json)
+        .replace("{context_blocks}", _render_blocks(context_blocks))
+        .replace("{blocks}", _render_blocks(chunk.owned_blocks))
     )
 
 
@@ -91,13 +111,27 @@ class AttributionLLM(ABC):
                 "changes."
             )
         raw = self._complete_json(prompt, chunk_attribution_schema(), attempt)
+        if not isinstance(raw, dict):
+            raise MalformedOutputError(
+                f"{self.provider_id}/{self.model_id} returned a non-object for chunk {chunk.index}"
+            )
+        # Segments are the payload — validate strictly (a failure retries, then flags).
         try:
-            return ChunkAttribution.model_validate(raw)
+            segments = [Segment.model_validate(s) for s in raw.get("segments") or []]
         except Exception as exc:
             raise MalformedOutputError(
                 f"{self.provider_id}/{self.model_id} returned output failing the segment "
                 f"schema for chunk {chunk.index}: {exc}"
             ) from exc
+        # Character mentions are auxiliary metadata; a malformed one must not sink the whole
+        # chunk. Drop entries that don't validate (e.g. the model echoed the registry shape).
+        characters = []
+        for entry in raw.get("characters") or []:
+            try:
+                characters.append(CharacterMention.model_validate(entry))
+            except Exception:
+                continue
+        return ChunkAttribution(segments=segments, characters=characters)
 
     @abstractmethod
     def _complete_json(
