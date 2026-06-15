@@ -30,7 +30,8 @@ def _fake_client(content: str, recorder: dict):
     def create(**kwargs):
         recorder.update(kwargs)
         message = types.SimpleNamespace(content=content)
-        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+        choice = types.SimpleNamespace(message=message, finish_reason="stop")
+        return types.SimpleNamespace(choices=[choice])
 
     completions = types.SimpleNamespace(create=create)
     return types.SimpleNamespace(chat=types.SimpleNamespace(completions=completions))
@@ -77,6 +78,34 @@ def test_schema_violation_surfaces_as_attribution_error():
     provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, client=_fake_client(content, {}))
     with pytest.raises(AttributionError, match="segment schema"):
         provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+
+def test_truncated_output_raises_context_window_error():
+    def create(**kwargs):
+        message = types.SimpleNamespace(content="")
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=message, finish_reason="length")]
+        )
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+    )
+    provider = OllamaProvider(model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, client=client)
+    with pytest.raises(AttributionError, match="OLLAMA_CONTEXT_LENGTH"):
+        provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+
+def test_code_fenced_json_is_parsed():
+    content = (
+        "```json\n"
+        + json.dumps(
+            {"segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}]}
+        )
+        + "\n```"
+    )
+    provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, client=_fake_client(content, {}))
+    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+    assert result.segments[0].text == "Hello there."
 
 
 def test_get_provider_rejects_unknown():

@@ -24,16 +24,15 @@ from seiyuu.attribute.models import (
     Segment,
     SegmentType,
 )
-from seiyuu.attribute.providers.base import AttributionLLM
+from seiyuu.attribute.providers.base import AttributionError, AttributionLLM
 from seiyuu.attribute.registry import resolve_chunk
 from seiyuu.attribute.validate import find_reconstruction_failures
 from seiyuu.ingest.models import Block, BlockType, NormalizedBook
 
 ATTRIBUTION_NAME = "attribution.json"
 
-
-class AttributionError(Exception):
-    """Loud attribution failure naming book/chapter/chunk."""
+# AttributionError is defined once in providers.base and re-exported here so that errors
+# raised by a provider and by the pipeline are the same type (the CLI catches one).
 
 
 @dataclass

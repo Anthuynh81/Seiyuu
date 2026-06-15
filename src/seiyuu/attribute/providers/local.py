@@ -7,9 +7,18 @@ single GPU (SPEC GPU discipline). Ollama being down is a clear, actionable error
 """
 
 import json
+import re
 from typing import Any
 
 from seiyuu.attribute.providers.base import AttributionError, AttributionLLM
+
+_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Some models wrap JSON in a ```json fence despite structured-output mode."""
+    match = _FENCE.match(text.strip())
+    return match.group(1) if match else text
 
 
 class OllamaProvider(AttributionLLM):
@@ -64,7 +73,19 @@ class OllamaProvider(AttributionLLM):
                 f"model {self.model_id!r} pulled (`ollama pull {self.model_id}`)?"
             ) from exc
 
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        # `length` means the model ran out of context before closing the JSON. With a
+        # reasoning model (e.g. Qwen3), thinking tokens can consume the whole window and
+        # leave empty content. The OpenAI-compatible endpoint cannot raise num_ctx or
+        # disable thinking per-request — both are server-side (OLLAMA_CONTEXT_LENGTH, or a
+        # non-thinking model). Fail with that guidance instead of an opaque parse error.
+        if choice.finish_reason == "length":
+            raise AttributionError(
+                f"Ollama truncated output for model {self.model_id!r} (hit the context "
+                f"window). Raise the server context (OLLAMA_CONTEXT_LENGTH), use a "
+                f"non-thinking model, or lower attribution_chunk_tokens."
+            )
+        content = (choice.message.content or "").strip()
         if not content:
             raise AttributionError(f"Ollama returned empty content for model {self.model_id!r}")
-        return json.loads(content)
+        return json.loads(_strip_code_fence(content))
