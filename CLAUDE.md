@@ -13,10 +13,13 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
 - Python 3.11 in `.venv` (uv-managed). Activate: `.venv\Scripts\activate`.
 - Package name is `seiyuu` (`src/seiyuu/`). NEVER name a package or module `abc`,
   `json`, `email`, or any other stdlib name.
-- Ollama serves the local attribution LLM at `http://localhost:11434/v1`
-  (OpenAI-compatible). Default model: `qwen3.5:9b` (Q4_K_M, ~6.6GB) per settings;
-  Gemma 4 8B is the approved fallback. Ollama being
-  down is a clear, actionable error, not a crash.
+- Ollama serves the local attribution LLM at `http://localhost:11434`. The provider
+  defaults to the NATIVE `/api/chat` transport (`ollama_transport=native`) because the
+  OpenAI-compatible `/v1` shim cannot disable thinking or set `num_ctx` per request —
+  both are required for reasoning models. The `/v1` shim stays available via
+  `ollama_transport=openai` for non-thinking models. Default model: `qwen3.5:9b`
+  (Q4_K_M, ~6.6GB) per settings; Gemma 4 8B is the approved fallback. Ollama being down
+  is a clear, actionable error, not a crash.
 - ffmpeg is on PATH and is the only sanctioned way to touch audio containers/m4b.
 
 ## Critical: GPU discipline (single consumer GPU, assume 8GB)
@@ -126,3 +129,11 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
   short anyway.
 - First Chatterbox/Kokoro run downloads multi-GB weights to the HF cache; first
   `ollama pull` is also multi-GB. Slow first runs are downloads, not hangs.
+- Reasoning models (qwen3.5:9b) on Ollama's `/v1` OpenAI shim return EMPTY content on
+  real attribution chunks: `<think>` tokens exhaust the default 4096 context and the
+  shim ignores `think`/`num_ctx`. Fix: native `/api/chat` transport with `think: false`
+  + `options.num_ctx` (the default). Ollama also wraps JSON in a ```json fence even
+  under `format` — the provider strips it.
+- Reconstruction invariant folds typographic quote glyphs (curly → straight) before
+  comparing: LLMs normalize `"` to `"`, which is cosmetic, not a paraphrase. Folding is
+  symmetric so real word/punctuation changes still fail. Dashes/ellipses are NOT folded.

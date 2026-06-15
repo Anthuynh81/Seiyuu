@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     # Local attribution LLM (used from M2).
     ollama_base_url: str = "http://localhost:11434/v1"
+    # Ollama transport: "native" (/api/chat — needed to disable thinking + set num_ctx,
+    # required for reasoning models like Qwen3) or "openai" (the /v1 compat shim).
+    ollama_transport: str = "native"
+    # Context window for the native transport; reasoning-free attribution of a ~3k-token
+    # chunk needs room for prompt + JSON output. Bigger = more VRAM/slower.
+    ollama_num_ctx: int = 8192
     attribution_provider: str = "local"
     attribution_model: str = "qwen3.5:9b"
     attribution_prompt_version: str = "v1"

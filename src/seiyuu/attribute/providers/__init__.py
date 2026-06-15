@@ -6,6 +6,7 @@ from pathlib import Path
 from seiyuu.attribute.providers.base import (
     AttributionError,
     AttributionLLM,
+    MalformedOutputError,
     chunk_attribution_schema,
 )
 
@@ -30,6 +31,7 @@ def get_provider(provider_id: str, *, model: str, prompts_dir: Path, **kwargs) -
 __all__ = [
     "AttributionError",
     "AttributionLLM",
+    "MalformedOutputError",
     "chunk_attribution_schema",
     "get_provider",
 ]

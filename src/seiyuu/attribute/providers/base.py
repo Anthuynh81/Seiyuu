@@ -20,7 +20,19 @@ from seiyuu.attribute.models import CharacterRegistry, ChunkAttribution
 
 
 class AttributionError(Exception):
-    """Loud attribution failure; the pipeline adds book/chapter/chunk context."""
+    """Fatal attribution failure (unreachable backend, truncation/config, auth).
+
+    The pipeline does NOT retry these — they abort the run with actionable guidance.
+    """
+
+
+class MalformedOutputError(AttributionError):
+    """One attempt's output was unusable (invalid JSON, schema violation).
+
+    A per-attempt failure: the pipeline retries, then flags the chunk's blocks for review
+    with a verbatim-narration fallback. Subclasses AttributionError so the CLI still
+    catches it if it ever escapes.
+    """
 
 
 @lru_cache
@@ -82,7 +94,7 @@ class AttributionLLM(ABC):
         try:
             return ChunkAttribution.model_validate(raw)
         except Exception as exc:
-            raise AttributionError(
+            raise MalformedOutputError(
                 f"{self.provider_id}/{self.model_id} returned output failing the segment "
                 f"schema for chunk {chunk.index}: {exc}"
             ) from exc

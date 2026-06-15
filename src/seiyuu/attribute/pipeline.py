@@ -24,9 +24,13 @@ from seiyuu.attribute.models import (
     Segment,
     SegmentType,
 )
-from seiyuu.attribute.providers.base import AttributionError, AttributionLLM
+from seiyuu.attribute.providers.base import (
+    AttributionError,
+    AttributionLLM,
+    MalformedOutputError,
+)
 from seiyuu.attribute.registry import resolve_chunk
-from seiyuu.attribute.validate import find_reconstruction_failures
+from seiyuu.attribute.validate import ReconstructionFailure, find_reconstruction_failures
 from seiyuu.ingest.models import Block, BlockType, NormalizedBook
 
 ATTRIBUTION_NAME = "attribution.json"
@@ -48,10 +52,22 @@ def _attribute_chunk_validated(
     registry: CharacterRegistry,
     max_retries: int,
 ) -> _ChunkOutcome:
-    """Call the provider, drop non-owned segments, check reconstruction, retry on failure."""
+    """Call the provider, drop non-owned segments, check reconstruction, retry on failure.
+
+    A per-attempt bad-output error (invalid JSON, schema violation) is treated like a
+    reconstruction failure: retry, then flag. Fatal errors (unreachable backend,
+    truncation/config) are NOT caught here — they abort the run with guidance.
+    """
     last_failures: list = []
     for attempt in range(max_retries + 1):
-        attribution = provider.attribute_chunk(chunk, registry, attempt)
+        try:
+            attribution = provider.attribute_chunk(chunk, registry, attempt)
+        except MalformedOutputError as exc:
+            last_failures = [
+                ReconstructionFailure(b.id, f"unusable model output: {exc}")
+                for b in chunk.owned_blocks
+            ]
+            continue
         owned = [s for s in attribution.segments if s.block_id in chunk.owned_ids]
         last_failures = find_reconstruction_failures(chunk.owned_blocks, owned)
         if not last_failures:

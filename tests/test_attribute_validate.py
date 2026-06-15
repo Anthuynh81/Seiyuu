@@ -44,14 +44,24 @@ def test_honest_split_reconstructs():
             ['"I won\'t go,"', " she said, trembling, sobbing. ", '"Not after everything."'],
             id="added-word",
         ),
-        pytest.param(
-            ["“I won’t go,”", " she said, trembling. ", '"Not after everything."'],
-            id="smart-quote-substitution",
-        ),
     ],
 )
 def test_tampered_splits_rejected(segments):
     assert not reconstructs_block(BLOCK, segments)
+
+
+def test_typographic_quote_folding_tolerated():
+    # The model emitting straight quotes for curly source quotes is cosmetic, not a
+    # paraphrase — it must NOT be rejected (real-world Qwen3 behavior on prose).
+    curly = "“I won’t go,” she said, trembling. “Not after everything.”"
+    straight = ['"I won\'t go,"', " she said, trembling. ", '"Not after everything."']
+    assert reconstructs_block(curly, straight)
+
+
+def test_word_change_still_rejected_under_quote_folding():
+    # Folding quotes must not mask an actual word substitution.
+    curly = "“I won’t go,” she said."
+    assert not reconstructs_block(curly, ['"I will not go,"', " she said."])
 
 
 def test_seam_whitespace_tolerated():

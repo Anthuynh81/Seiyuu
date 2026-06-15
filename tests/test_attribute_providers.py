@@ -6,6 +6,7 @@ schema-enforced output, keep_alive: 0 (GPU discipline), and the down-Ollama erro
 
 import json
 import types
+import urllib.error
 
 import httpx
 import pytest
@@ -26,6 +27,9 @@ def _chunk():
     return chunk_blocks(blocks, overlap_blocks=0)[0]
 
 
+_SEG_JSON = {"segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}]}
+
+
 def _fake_client(content: str, recorder: dict):
     def create(**kwargs):
         recorder.update(kwargs)
@@ -37,35 +41,90 @@ def _fake_client(content: str, recorder: dict):
     return types.SimpleNamespace(chat=types.SimpleNamespace(completions=completions))
 
 
-def test_request_is_schema_enforced_and_unloads_model():
-    recorder: dict = {}
-    content = json.dumps(
-        {
-            "segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}],
-            "characters": [],
-        }
-    )
+def _fake_post(response: dict, recorder: dict):
+    def post(url, payload, timeout):
+        recorder["url"] = url
+        recorder["payload"] = payload
+        return response
+
+    return post
+
+
+# --- native transport (default) ---
+
+
+def test_native_request_shape_and_parse():
+    rec: dict = {}
+    resp = {"message": {"content": json.dumps(_SEG_JSON)}, "done_reason": "stop"}
     provider = OllamaProvider(
-        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, client=_fake_client(content, recorder)
+        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, post=_fake_post(resp, rec)
     )
 
     result = provider.attribute_chunk(_chunk(), CharacterRegistry())
 
     assert result.segments[0].text == "Hello there."
-    assert recorder["model"] == "qwen3.5:9b"
+    assert rec["url"].endswith("/api/chat")
+    payload = rec["payload"]
+    assert payload["format"]["type"] == "object"  # the JSON schema itself
+    assert payload["think"] is False
+    assert payload["options"]["num_ctx"] == 8192
+    assert payload["keep_alive"] == 0
+
+
+def test_native_truncation_raises_context_error():
+    resp = {"message": {"content": ""}, "done_reason": "length"}
+    provider = OllamaProvider(
+        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, post=_fake_post(resp, {})
+    )
+    with pytest.raises(AttributionError, match="num_ctx"):
+        provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+
+def test_native_unreachable_raises_actionable_error():
+    def boom(url, payload, timeout):
+        raise urllib.error.URLError("Connection refused")
+
+    provider = OllamaProvider(model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, post=boom)
+    with pytest.raises(AttributionError, match="ollama serve"):
+        provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+
+def test_native_strips_code_fence():
+    resp = {"message": {"content": "```json\n" + json.dumps(_SEG_JSON) + "\n```"}}
+    provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, post=_fake_post(resp, {}))
+    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+    assert result.segments[0].text == "Hello there."
+
+
+# --- openai transport (alternate, for non-thinking models) ---
+
+
+def test_openai_request_is_schema_enforced_and_unloads_model():
+    recorder: dict = {}
+    provider = OllamaProvider(
+        model="qwen3.5:9b",
+        prompts_dir=PROMPTS_DIR,
+        transport="openai",
+        client=_fake_client(json.dumps(_SEG_JSON), recorder),
+    )
+
+    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+    assert result.segments[0].text == "Hello there."
     assert recorder["response_format"]["type"] == "json_schema"
     assert recorder["extra_body"]["keep_alive"] == 0
 
 
-def test_unreachable_ollama_raises_actionable_error():
+def test_openai_unreachable_raises_actionable_error():
     def boom(**kwargs):
         raise APIConnectionError(request=httpx.Request("POST", "http://localhost:11434"))
 
     client = types.SimpleNamespace(
         chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=boom))
     )
-    provider = OllamaProvider(model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, client=client)
-
+    provider = OllamaProvider(
+        model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, transport="openai", client=client
+    )
     with pytest.raises(AttributionError, match="ollama serve"):
         provider.attribute_chunk(_chunk(), CharacterRegistry())
 
@@ -75,37 +134,16 @@ def test_schema_violation_surfaces_as_attribution_error():
     content = json.dumps(
         {"segments": [{"block_id": "ch001_b0001", "type": "dialogue", "text": "Hi"}]}
     )
-    provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, client=_fake_client(content, {}))
+    provider = OllamaProvider(
+        model="m", prompts_dir=PROMPTS_DIR, transport="openai", client=_fake_client(content, {})
+    )
     with pytest.raises(AttributionError, match="segment schema"):
         provider.attribute_chunk(_chunk(), CharacterRegistry())
 
 
-def test_truncated_output_raises_context_window_error():
-    def create(**kwargs):
-        message = types.SimpleNamespace(content="")
-        return types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=message, finish_reason="length")]
-        )
-
-    client = types.SimpleNamespace(
-        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
-    )
-    provider = OllamaProvider(model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, client=client)
-    with pytest.raises(AttributionError, match="OLLAMA_CONTEXT_LENGTH"):
-        provider.attribute_chunk(_chunk(), CharacterRegistry())
-
-
-def test_code_fenced_json_is_parsed():
-    content = (
-        "```json\n"
-        + json.dumps(
-            {"segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}]}
-        )
-        + "\n```"
-    )
-    provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, client=_fake_client(content, {}))
-    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
-    assert result.segments[0].text == "Hello there."
+def test_unknown_transport_rejected():
+    with pytest.raises(ValueError, match="unknown ollama transport"):
+        OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, transport="grpc")
 
 
 def test_get_provider_rejects_unknown():

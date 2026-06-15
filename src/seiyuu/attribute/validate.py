@@ -18,10 +18,31 @@ from seiyuu.ingest.models import Block
 
 _WHITESPACE = re.compile(r"\s+")
 
+# Fold typographic quote/apostrophe glyphs to ASCII for comparison only. LLMs routinely
+# emit straight quotes for curly source quotes (observed with Qwen3 on real prose); that
+# is a cosmetic punctuation change, not a paraphrase, so rejecting it would discard
+# otherwise-perfect attribution. Folding is applied to BOTH sides, so any real word- or
+# punctuation-level change still fails the check — only the glyph variants below collapse.
+# Dashes and ellipses are deliberately NOT folded (they can carry meaning); revisit if a
+# real chapter shows a safe, recurring need.
+_QUOTE_FOLD = str.maketrans(
+    {
+        "“": '"',  # " left double
+        "”": '"',  # " right double
+        "„": '"',  # „ low double
+        "‟": '"',  # ‟ high-reversed double
+        "‘": "'",  # ' left single
+        "’": "'",  # ' right single (also typographic apostrophe)
+        "‚": "'",  # ‚ low single
+        "‛": "'",  # ‛ high-reversed single
+    }
+)
+
 
 def normalize_ws(text: str) -> str:
-    """Canonical form for comparison: NFC, whitespace runs collapsed to one space, trimmed."""
-    return _WHITESPACE.sub(" ", unicodedata.normalize("NFC", text)).strip()
+    """Canonical compare form: NFC, typographic quotes folded, whitespace collapsed, trimmed."""
+    text = unicodedata.normalize("NFC", text).translate(_QUOTE_FOLD)
+    return _WHITESPACE.sub(" ", text).strip()
 
 
 def reconstructs_block(block_text: str, segment_texts: Sequence[str]) -> bool:

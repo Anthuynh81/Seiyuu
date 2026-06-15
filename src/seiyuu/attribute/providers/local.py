@@ -1,24 +1,57 @@
-"""Local attribution provider: the OpenAI SDK pointed at Ollama's OpenAI-compatible API.
+"""Local attribution provider talking to Ollama.
 
-Uses Ollama structured outputs (``response_format`` json_schema) so output is schema-valid
-by construction. Sets ``keep_alive: 0`` so Ollama unloads the model from VRAM right after
-the call — the render stage must be able to load a TTS engine without contending for the
-single GPU (SPEC GPU discipline). Ollama being down is a clear, actionable error.
+Two transports, selected by config (``attribution.ollama_transport``):
+
+- ``native`` (default): Ollama's ``/api/chat`` with ``format`` (the JSON schema),
+  ``think: false``, and ``options.num_ctx``. This is required for reasoning models such
+  as Qwen3 — their thinking tokens otherwise exhaust the context window and the response
+  comes back empty (``done_reason: length``). The OpenAI-compatible endpoint exposes no
+  way to disable thinking or raise ``num_ctx`` per request, so native is the default.
+- ``openai``: the OpenAI SDK pointed at ``/v1`` with ``response_format`` json_schema —
+  fine for non-thinking models; kept for parity and easy migration.
+
+Both set ``keep_alive: 0`` so Ollama frees VRAM right after the call — the render stage
+must be able to load a TTS engine without contending for the single GPU (SPEC GPU
+discipline). Ollama being unreachable is a clear, actionable error.
 """
 
 import json
 import re
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from typing import Any
 
-from seiyuu.attribute.providers.base import AttributionError, AttributionLLM
+from seiyuu.attribute.providers.base import (
+    AttributionError,
+    AttributionLLM,
+    MalformedOutputError,
+)
 
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_TRANSPORTS = ("native", "openai")
 
 
 def _strip_code_fence(text: str) -> str:
     """Some models wrap JSON in a ```json fence despite structured-output mode."""
     match = _FENCE.match(text.strip())
     return match.group(1) if match else text
+
+
+def _parse_json(content: str, model_id: str) -> dict[str, Any]:
+    """A flaky local model can emit invalid or duplicated JSON — a retryable failure."""
+    try:
+        return json.loads(_strip_code_fence(content))
+    except json.JSONDecodeError as exc:
+        raise MalformedOutputError(f"{model_id!r} returned invalid JSON: {exc}") from exc
+
+
+def _urllib_post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read())
 
 
 class OllamaProvider(AttributionLLM):
@@ -31,32 +64,76 @@ class OllamaProvider(AttributionLLM):
         prompts_dir,
         prompt_version: str = "v1",
         base_url: str = "http://localhost:11434/v1",
+        transport: str = "native",
         temperature: float = 0.0,
-        client: Any | None = None,
+        num_ctx: int = 8192,
+        timeout: float = 600.0,
+        client: Any | None = None,  # OpenAI client (openai transport; injectable for tests)
+        post: Callable[..., dict] | None = None,  # native HTTP POST (injectable for tests)
     ) -> None:
         super().__init__(model=model, prompts_dir=prompts_dir, prompt_version=prompt_version)
+        if transport not in _TRANSPORTS:
+            raise ValueError(f"unknown ollama transport {transport!r}; choose from {_TRANSPORTS}")
         self.base_url = base_url
+        self.transport = transport
         self.temperature = temperature
-        self._client = client  # injectable for tests; built lazily otherwise
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            # Lazy import: importing the package must not require the OpenAI SDK.
-            from openai import OpenAI
-
-            self._client = OpenAI(base_url=self.base_url, api_key="ollama")
-        return self._client
+        self.num_ctx = num_ctx
+        self.timeout = timeout
+        self._client = client
+        self._post = post or _urllib_post
+        # The native API lives at the server root, not under the /v1 OpenAI shim.
+        self.native_url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
 
     def _complete_json(
         self, prompt: str, schema: dict[str, Any], attempt: int = 0
     ) -> dict[str, Any]:
-        from openai import APIConnectionError
-
         # Retries need variation or they just reproduce the rejected answer; nudge
         # temperature up per attempt while keeping the first pass deterministic.
         temperature = min(0.8, self.temperature + 0.2 * attempt)
+        if self.transport == "native":
+            return self._complete_native(prompt, schema, temperature)
+        return self._complete_openai(prompt, schema, temperature)
+
+    def _complete_native(
+        self, prompt: str, schema: dict[str, Any], temperature: float
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "format": schema,
+            # Disable reasoning: attribution is structured extraction, and a thinking
+            # model's <think> block would burn the context window before any JSON.
+            "think": False,
+            "options": {"temperature": temperature, "num_ctx": self.num_ctx},
+            "keep_alive": 0,
+        }
         try:
-            response = self._get_client().chat.completions.create(
+            data = self._post(self.native_url, payload, self.timeout)
+        except urllib.error.URLError as exc:
+            raise AttributionError(
+                f"cannot reach Ollama at {self.native_url}: is `ollama serve` running and is "
+                f"model {self.model_id!r} pulled (`ollama pull {self.model_id}`)? ({exc})"
+            ) from exc
+
+        if data.get("done_reason") == "length":
+            raise self._truncation_error()
+        content = (data.get("message", {}).get("content") or "").strip()
+        if not content:
+            raise AttributionError(f"Ollama returned empty content for model {self.model_id!r}")
+        return _parse_json(content, self.model_id)
+
+    def _complete_openai(
+        self, prompt: str, schema: dict[str, Any], temperature: float
+    ) -> dict[str, Any]:
+        from openai import APIConnectionError
+
+        if self._client is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(base_url=self.base_url, api_key="ollama")
+        try:
+            response = self._client.chat.completions.create(
                 model=self.model_id,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
@@ -64,7 +141,6 @@ class OllamaProvider(AttributionLLM):
                     "type": "json_schema",
                     "json_schema": {"name": "attribution", "schema": schema},
                 },
-                # Ollama extension: free VRAM immediately so a TTS engine can load.
                 extra_body={"keep_alive": 0},
             )
         except APIConnectionError as exc:
@@ -74,18 +150,19 @@ class OllamaProvider(AttributionLLM):
             ) from exc
 
         choice = response.choices[0]
-        # `length` means the model ran out of context before closing the JSON. With a
-        # reasoning model (e.g. Qwen3), thinking tokens can consume the whole window and
-        # leave empty content. The OpenAI-compatible endpoint cannot raise num_ctx or
-        # disable thinking per-request — both are server-side (OLLAMA_CONTEXT_LENGTH, or a
-        # non-thinking model). Fail with that guidance instead of an opaque parse error.
         if choice.finish_reason == "length":
-            raise AttributionError(
-                f"Ollama truncated output for model {self.model_id!r} (hit the context "
-                f"window). Raise the server context (OLLAMA_CONTEXT_LENGTH), use a "
-                f"non-thinking model, or lower attribution_chunk_tokens."
-            )
+            raise self._truncation_error()
         content = (choice.message.content or "").strip()
         if not content:
             raise AttributionError(f"Ollama returned empty content for model {self.model_id!r}")
-        return json.loads(_strip_code_fence(content))
+        return _parse_json(content, self.model_id)
+
+    def _truncation_error(self) -> MalformedOutputError:
+        # Retryable, not fatal: a single attempt can run long (e.g. a corrective retry
+        # whose extra output overflows the window) while others fit. If every attempt
+        # truncates, the chunk is flagged for review carrying this guidance as its reason.
+        return MalformedOutputError(
+            f"Ollama truncated output for model {self.model_id!r} (hit the context window). "
+            f"Raise num_ctx (attribution.num_ctx / OLLAMA_CONTEXT_LENGTH), use a non-thinking "
+            f"model, or lower attribution_chunk_tokens."
+        )

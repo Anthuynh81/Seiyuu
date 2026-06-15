@@ -1,5 +1,7 @@
 """Attribution pipeline: registry threading, caching, retry, flagging, escalation."""
 
+import pytest
+
 from factories import make_book
 from fake_provider import FakeProvider
 from seiyuu.attribute import AttributionCache, attribute_book, write_attribution
@@ -10,6 +12,7 @@ from seiyuu.attribute.models import (
     Segment,
     SegmentType,
 )
+from seiyuu.attribute.providers import AttributionError, MalformedOutputError
 
 
 def _dialogue_by(speaker: str):
@@ -105,6 +108,29 @@ def test_hybrid_escalation_recovers_a_failed_chunk(tmp_path):
     assert report.flagged == []
     assert premium.calls  # escalation actually ran
     assert report.registry.get("cara") is not None
+
+
+def test_malformed_output_is_flagged_not_fatal(tmp_path):
+    def bad(chunk, registry, attempt):
+        raise MalformedOutputError("model returned invalid JSON")
+
+    with AttributionCache(tmp_path / "attribution.db") as cache:
+        report = attribute_book(make_book(), FakeProvider(bad), cache=cache, max_local_retries=1)
+
+    assert report.flagged, "unusable model output should flag the chunk, not crash"
+    non_narration = [
+        s for c in report.chapters for s in c.segments if s.type != SegmentType.NARRATION
+    ]
+    assert non_narration == []  # fell back to verbatim narration
+
+
+def test_fatal_provider_error_aborts(tmp_path):
+    def boom(chunk, registry, attempt):
+        raise AttributionError("Ollama truncated output (hit the context window); raise num_ctx")
+
+    with AttributionCache(tmp_path / "attribution.db") as cache:
+        with pytest.raises(AttributionError, match="num_ctx"):
+            attribute_book(make_book(), FakeProvider(boom), cache=cache, max_local_retries=1)
 
 
 def test_write_attribution_round_trips(tmp_path):
