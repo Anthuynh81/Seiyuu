@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     attribution_provider: str = "local"
     attribution_model: str = "qwen3.5:9b"
+    attribution_prompt_version: str = "v1"
+    attribution_chunk_tokens: int = 3000
+    attribution_chunk_overlap_blocks: int = 2
+    attribution_max_local_retries: int = 2
+    # Speaker calls below this confidence are surfaced for review in the characters report.
+    attribution_confidence_threshold: float = 0.7
+    # Hybrid escalation: when on, chunks that fail local retries re-run through anthropic.
+    attribution_hybrid: bool = False
 
     # TTS defaults (M1).
     tts_engine: str = "kokoro"

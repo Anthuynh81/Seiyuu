@@ -15,19 +15,21 @@ class FakeProvider(AttributionLLM):
 
     def __init__(
         self,
-        script: Callable[[Chunk, CharacterRegistry], ChunkAttribution],
+        script: Callable[[Chunk, CharacterRegistry, int], ChunkAttribution],
         *,
         model: str = "fake-1.0",
     ) -> None:
         # Bypass the SDK template; we script attribute_chunk directly.
         self.model_id = model
         self.prompt_version = "v1"
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, int]] = []  # (chunk index, attempt)
         self._script = script
 
-    def attribute_chunk(self, chunk: Chunk, registry: CharacterRegistry) -> ChunkAttribution:
-        self.calls.append(chunk.index)
-        return self._script(chunk, registry)
+    def attribute_chunk(
+        self, chunk: Chunk, registry: CharacterRegistry, attempt: int = 0
+    ) -> ChunkAttribution:
+        self.calls.append((chunk.index, attempt))
+        return self._script(chunk, registry, attempt)
 
-    def _complete_json(self, prompt, schema):  # pragma: no cover - never called
+    def _complete_json(self, prompt, schema, attempt=0):  # pragma: no cover - never called
         raise NotImplementedError

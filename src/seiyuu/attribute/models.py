@@ -143,3 +143,4 @@ class AttributionReport(BaseModel):
     registry: CharacterRegistry
     chapters: list[AttributedChapter]
     flagged: list[FlaggedBlock] = []
+    registry_notes: list[str] = []  # conservative merges skipped for human review

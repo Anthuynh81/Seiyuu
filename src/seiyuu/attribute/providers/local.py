@@ -38,14 +38,19 @@ class OllamaProvider(AttributionLLM):
             self._client = OpenAI(base_url=self.base_url, api_key="ollama")
         return self._client
 
-    def _complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def _complete_json(
+        self, prompt: str, schema: dict[str, Any], attempt: int = 0
+    ) -> dict[str, Any]:
         from openai import APIConnectionError
 
+        # Retries need variation or they just reproduce the rejected answer; nudge
+        # temperature up per attempt while keeping the first pass deterministic.
+        temperature = min(0.8, self.temperature + 0.2 * attempt)
         try:
             response = self._get_client().chat.completions.create(
                 model=self.model_id,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
+                temperature=temperature,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {"name": "attribution", "schema": schema},

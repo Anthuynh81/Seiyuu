@@ -61,11 +61,24 @@ class AttributionLLM(ABC):
         self.prompts_dir = Path(prompts_dir)
         self.prompt_version = prompt_version
 
-    def attribute_chunk(self, chunk: Chunk, registry: CharacterRegistry) -> ChunkAttribution:
-        """Attribute one chunk's owned blocks; returns name-based speakers (pre-resolution)."""
+    def attribute_chunk(
+        self, chunk: Chunk, registry: CharacterRegistry, attempt: int = 0
+    ) -> ChunkAttribution:
+        """Attribute one chunk's owned blocks; returns name-based speakers (pre-resolution).
+
+        ``attempt`` is the 0-based retry index. The pipeline retries chunks that fail the
+        reconstruction invariant; on a retry we add a corrective reminder and let the
+        backend vary its sampling so the next answer differs from the rejected one.
+        """
         template = _prompt_template(self.prompts_dir, self.prompt_version)
         prompt = render_prompt(template, registry, chunk)
-        raw = self._complete_json(prompt, chunk_attribution_schema())
+        if attempt > 0:
+            prompt += (
+                "\n\n## Reminder\n\nA previous attempt changed the wording. Reproduce every "
+                "block's text EXACTLY, character for character; split only where the speaker "
+                "changes."
+            )
+        raw = self._complete_json(prompt, chunk_attribution_schema(), attempt)
         try:
             return ChunkAttribution.model_validate(raw)
         except Exception as exc:
@@ -75,5 +88,7 @@ class AttributionLLM(ABC):
             ) from exc
 
     @abstractmethod
-    def _complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def _complete_json(
+        self, prompt: str, schema: dict[str, Any], attempt: int = 0
+    ) -> dict[str, Any]:
         """Backend-specific: run the prompt under schema-enforced JSON output, return it."""

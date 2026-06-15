@@ -4,6 +4,7 @@ Provider SDKs live ONLY under ``attribute/providers/`` behind the ``AttributionL
 interface; pipeline code never imports an LLM SDK directly.
 """
 
+from seiyuu.attribute.cache import AttributionCache, ChunkCacheKey
 from seiyuu.attribute.models import (
     AttributedChapter,
     AttributionReport,
@@ -15,15 +16,27 @@ from seiyuu.attribute.models import (
     Segment,
     SegmentType,
 )
+from seiyuu.attribute.pipeline import (
+    ATTRIBUTION_NAME,
+    AttributionError,
+    attribute_book,
+    write_attribution,
+)
 
 __all__ = [
+    "ATTRIBUTION_NAME",
     "AttributedChapter",
+    "AttributionCache",
+    "AttributionError",
     "AttributionReport",
     "Character",
     "CharacterMention",
     "CharacterRegistry",
     "ChunkAttribution",
+    "ChunkCacheKey",
     "FlaggedBlock",
     "Segment",
     "SegmentType",
+    "attribute_book",
+    "write_attribution",
 ]
