@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None
+    # Premium attribution model (anthropic provider / hybrid escalation).
+    anthropic_model: str = "claude-opus-4-8"
 
 
 @lru_cache

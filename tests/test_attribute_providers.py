@@ -82,3 +82,40 @@ def test_schema_violation_surfaces_as_attribution_error():
 def test_get_provider_rejects_unknown():
     with pytest.raises(ValueError, match="unknown attribution provider"):
         get_provider("bogus", model="m", prompts_dir=PROMPTS_DIR)
+
+
+def _fake_anthropic_client(input_obj: dict, recorder: dict):
+    def create(**kwargs):
+        recorder.update(kwargs)
+        block = types.SimpleNamespace(type="tool_use", input=input_obj)
+        return types.SimpleNamespace(content=[block], stop_reason="tool_use")
+
+    return types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
+
+
+def test_anthropic_forces_tool_use_and_parses():
+    from seiyuu.attribute.providers.anthropic import AnthropicProvider
+
+    recorder: dict = {}
+    payload = {
+        "segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}],
+        "characters": [],
+    }
+    provider = AnthropicProvider(
+        model="claude-opus-4-8",
+        prompts_dir=PROMPTS_DIR,
+        client=_fake_anthropic_client(payload, recorder),
+    )
+
+    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+
+    assert result.segments[0].text == "Hello there."
+    assert recorder["tool_choice"] == {"type": "tool", "name": "emit_attribution"}
+    assert recorder["tools"][0]["name"] == "emit_attribution"
+
+
+def test_anthropic_requires_api_key_when_no_client():
+    from seiyuu.attribute.providers.anthropic import AnthropicProvider
+
+    with pytest.raises(AttributionError, match="ANTHROPIC_API_KEY"):
+        AnthropicProvider(model="claude-opus-4-8", prompts_dir=PROMPTS_DIR, api_key=None)
