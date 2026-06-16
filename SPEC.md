@@ -212,13 +212,27 @@ regenerable from reference.wav.
    progress, downloads.
 
 ## Milestones
-1. **M1 — Plumbing:** EPUB → normalized JSON (with scene breaks) → single-voice
-   Kokoro render through TTSEngine + canonical audio → chapter MP3s, via CLI.
-2. **M2 — Attribution (local-first):** `AttributionLLM` interface + Ollama provider
-   with schema-enforced JSON + reconstruction invariant + overlap merge + registry +
-   caching. Prompt tuning happens here against the local model. CLI report of
-   characters and sample lines. Anthropic adapter added at the end of M2 (it's a
-   thin second adapter once the interface exists), hybrid escalation optional.
+1. **M1 — Plumbing:** ✅ **done.** EPUB → normalized JSON (with scene breaks) →
+   single-voice Kokoro render through TTSEngine + canonical audio → chapter MP3s, via CLI.
+2. **M2 — Attribution (local-first):** ✅ **done.** `AttributionLLM` interface + Ollama
+   provider with schema-enforced JSON + reconstruction invariant + overlap merge +
+   registry + caching. Prompt tuning happened here against the local model. CLI report of
+   characters and sample lines (`seiyuu attribute` / `seiyuu characters`). Anthropic
+   adapter + optional hybrid escalation added at the end.
+   - **Key design (deviation worth noting):** *reconstruction-by-construction*. Small local
+     models can't reproduce prose verbatim, so the pipeline splits each block into spans
+     deterministically (double-quote boundaries, `attribute/spans.py`) and the LLM only
+     names ONE speaker per block; segment text is sliced from the SOURCE (quoted span =
+     dialogue by that speaker, prose = narration). The hard reconstruction guard remains as
+     a safety net but can no longer be violated by a well-behaved model.
+   - **Local transport:** Ollama native `/api/chat` (the OpenAI `/v1` shim can't disable a
+     reasoning model's thinking or set `num_ctx`); default model `qwen2.5:7b` (fits 8GB).
+   - **Known gaps (carry forward):** (a) long-range alias resolution is weak on a 7B
+     (un-merged `Darcy`/`Mr. Darcy`, occasional invented name) — flagged-not-merged per
+     spec; a dedicated resolution pass or the cloud finisher would help. (b) `thought`
+     segments are not emitted by the local span path (type is derived from quotes:
+     quoted→dialogue, prose→narration); the `Segment` schema still supports `thought` for a
+     future markup-aware or cloud pass.
 3. **M3 — Voices:** voice library + Chatterbox cloning (upload→curate→audition CLI),
    conds caching, seeds, Kokoro blends, text normalization stage. First multi-voice
    cloned render. GPU resource manager (LLM↔TTS handoff) lands here.
@@ -243,12 +257,18 @@ regenerable from reference.wav.
 
 ## Open Questions
 - Thoughts/internal monologue: character voice, narrator, or softened variant?
-  (Decide before M2 — affects attribution schema.)
+  *M2 update:* the `Segment` schema keeps a `thought` type, but the local span pipeline
+  derives type from quotes only (quoted→dialogue, prose→narration), so it does not emit
+  `thought` today. Revisit with italics/markup-aware splitting or a cloud pass; the
+  voice-rendering choice is still deferred to M3 voice assignment.
 - Hybrid escalation defaults: confidence threshold, max local retries before
   escalating.
-- Which local model wins on attribution quality — bake off Qwen3.5 9B vs Gemma 4 8B
-  during M2 prompt tuning (attribution cache is keyed by model_id, so run both on
-  the same chapter and diff the results).
+- Which local model wins on attribution quality — *M2 finding:* qwen3.5:9b is a reasoning
+  model whose weights exceed usable 8GB VRAM (CPU spill, slow); qwen2.5:7b (non-thinking)
+  fits fully and is the working default. Re-run the bake-off (incl. Gemma) if more VRAM is
+  available; cache is keyed by model_id so results don't clobber.
+- Alias-resolution quality on small models: add a dedicated registry-resolution pass
+  (or escalate flagged merges to the cloud) — 7B leaves obvious aliases un-merged.
 - Emotion handling: IndexTTS-2 emotion refs (M7), per-segment Chatterbox
   exaggeration, or skip for v1?
 - Cloud finisher default: ElevenLabs quality vs Fish Audio price; re-verify pricing
