@@ -27,7 +27,9 @@ def _chunk():
     return chunk_blocks(blocks, overlap_blocks=0)[0]
 
 
-_SEG_JSON = {"segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}]}
+# The model returns one speaker per block now; the provider derives spans/types and slices
+# text from the source. _chunk()'s block has no quotes -> one narration segment.
+_LABELS = {"blocks": [{"block_id": "ch001_b0001", "speaker": None}]}
 
 
 def _fake_client(content: str, recorder: dict):
@@ -50,12 +52,18 @@ def _fake_post(response: dict, recorder: dict):
     return post
 
 
+def _openai_provider(content: str) -> OllamaProvider:
+    return OllamaProvider(
+        model="m", prompts_dir=PROMPTS_DIR, transport="openai", client=_fake_client(content, {})
+    )
+
+
 # --- native transport (default) ---
 
 
 def test_native_request_shape_and_parse():
     rec: dict = {}
-    resp = {"message": {"content": json.dumps(_SEG_JSON)}, "done_reason": "stop"}
+    resp = {"message": {"content": json.dumps(_LABELS)}, "done_reason": "stop"}
     provider = OllamaProvider(
         model="qwen3.5:9b", prompts_dir=PROMPTS_DIR, num_ctx=4096, post=_fake_post(resp, rec)
     )
@@ -90,7 +98,7 @@ def test_native_unreachable_raises_actionable_error():
 
 
 def test_native_strips_code_fence():
-    resp = {"message": {"content": "```json\n" + json.dumps(_SEG_JSON) + "\n```"}}
+    resp = {"message": {"content": "```json\n" + json.dumps(_LABELS) + "\n```"}}
     provider = OllamaProvider(model="m", prompts_dir=PROMPTS_DIR, post=_fake_post(resp, {}))
     result = provider.attribute_chunk(_chunk(), CharacterRegistry())
     assert result.segments[0].text == "Hello there."
@@ -105,7 +113,7 @@ def test_openai_request_is_schema_enforced_and_unloads_model():
         model="qwen3.5:9b",
         prompts_dir=PROMPTS_DIR,
         transport="openai",
-        client=_fake_client(json.dumps(_SEG_JSON), recorder),
+        client=_fake_client(json.dumps(_LABELS), recorder),
     )
 
     result = provider.attribute_chunk(_chunk(), CharacterRegistry())
@@ -129,45 +137,72 @@ def test_openai_unreachable_raises_actionable_error():
         provider.attribute_chunk(_chunk(), CharacterRegistry())
 
 
-def test_schema_violation_surfaces_as_attribution_error():
-    # Missing speaker on a dialogue segment violates the model invariants.
-    content = json.dumps(
-        {"segments": [{"block_id": "ch001_b0001", "type": "dialogue", "text": "Hi"}]}
+def _quote_chunk():
+    # A block with dialogue -> three spans: narration, quoted, narration.
+    blocks = [
+        Block(id="ch001_b0001", type=BlockType.PARAGRAPH, text='He paused. "Hello," she said.')
+    ]
+    return chunk_blocks(blocks, overlap_blocks=0)[0]
+
+
+def test_spans_assemble_segments_from_source_text():
+    # The model gives one speaker per block; text/types are derived and sliced from source.
+    labels = {"blocks": [{"block_id": "ch001_b0001", "speaker": "Jane"}]}
+    provider = _openai_provider(json.dumps(labels))
+    result = provider.attribute_chunk(_quote_chunk(), CharacterRegistry())
+    texts = [s.text for s in result.segments]
+    assert texts == ["He paused. ", '"Hello,"', " she said."]
+    assert "".join(texts) == 'He paused. "Hello," she said.'  # exact reconstruction
+    # Quoted span -> dialogue by the block's speaker; prose -> narration.
+    assert [s.type.value for s in result.segments] == ["narration", "dialogue", "narration"]
+    assert result.segments[1].speaker == "Jane"
+
+
+def test_unattributed_quote_degrades_to_narration():
+    # A quoted block with no speaker is NOT an error — the quote becomes narration.
+    labels = {"blocks": [{"block_id": "ch001_b0001", "speaker": None}]}
+    result = _openai_provider(json.dumps(labels)).attribute_chunk(
+        _quote_chunk(), CharacterRegistry()
     )
-    provider = OllamaProvider(
-        model="m", prompts_dir=PROMPTS_DIR, transport="openai", client=_fake_client(content, {})
+    assert all(s.type.value == "narration" for s in result.segments)
+    assert "".join(s.text for s in result.segments) == 'He paused. "Hello," she said.'
+
+
+def test_omitted_block_still_produces_narration():
+    # The model returns no entry for the block -> it still gets narration (never a missing
+    # block / reconstruction failure).
+    result = _openai_provider(json.dumps({"blocks": []})).attribute_chunk(
+        _quote_chunk(), CharacterRegistry()
     )
-    with pytest.raises(AttributionError, match="segment schema"):
-        provider.attribute_chunk(_chunk(), CharacterRegistry())
+    assert result.segments and all(s.type.value == "narration" for s in result.segments)
 
 
 def test_malformed_character_mention_dropped_not_fatal():
     # The model echoed the registry shape (canonical_name/id, no `name`) for a character.
-    # That bad mention must be dropped, not reject the whole chunk's segments.
+    # That bad mention must be dropped, not reject the whole chunk.
     content = json.dumps(
         {
-            "segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}],
+            "blocks": [{"block_id": "ch001_b0001", "speaker": None}],
             "characters": [{"id": "x", "canonical_name": "X", "gender": "male"}],
         }
     )
-    provider = OllamaProvider(
-        model="m", prompts_dir=PROMPTS_DIR, transport="openai", client=_fake_client(content, {})
-    )
-    result = provider.attribute_chunk(_chunk(), CharacterRegistry())
+    result = _openai_provider(content).attribute_chunk(_chunk(), CharacterRegistry())
     assert result.segments[0].text == "Hello there."
     assert result.characters == []  # dropped, not fatal
 
 
-def test_render_prompt_shows_registry_in_mention_shape():
+def test_render_prompt_shows_registry_and_blocks():
     from seiyuu.attribute.models import Character
     from seiyuu.attribute.providers.base import _prompt_template, render_prompt
 
     registry = CharacterRegistry(
         characters=[Character(id="mr_bennet", canonical_name="Mr. Bennet", gender="male")]
     )
-    prompt = render_prompt(_prompt_template(PROMPTS_DIR, "v1"), registry, _chunk())
+    prompt = render_prompt(_prompt_template(PROMPTS_DIR, "v3"), registry, _quote_chunk())
     assert '"name": "Mr. Bennet"' in prompt
-    assert "canonical_name" not in prompt  # internal field must not leak into the prompt
+    # The rendered registry must use the mention shape, not leak the internal Character field.
+    assert '"canonical_name": "Mr. Bennet"' not in prompt
+    assert 'He paused. "Hello," she said.' in prompt  # block text shown for attribution
 
 
 def test_unknown_transport_rejected():
@@ -194,7 +229,7 @@ def test_anthropic_forces_tool_use_and_parses():
 
     recorder: dict = {}
     payload = {
-        "segments": [{"block_id": "ch001_b0001", "type": "narration", "text": "Hello there."}],
+        "blocks": [{"block_id": "ch001_b0001", "labels": [{"type": "narration", "speaker": None}]}],
         "characters": [],
     }
     provider = AnthropicProvider(

@@ -81,8 +81,36 @@ class CharacterMention(BaseModel):
         return _clean_optional(value)
 
 
+class BlockSpeaker(BaseModel):
+    """The model's only job per block: name who speaks its dialogue (null if none).
+
+    Text and segment TYPE are derived deterministically (we split on quotes; quoted spans
+    are dialogue, prose is narration), so the model never reproduces text or counts spans —
+    it just attributes. That makes reconstruction structural and the task small models can do.
+    """
+
+    block_id: str
+    speaker: str | None = None
+    confidence: float = 1.0
+
+    @field_validator("speaker")
+    @classmethod
+    def _clean_speaker(cls, value: str | None) -> str | None:
+        return _clean_optional(value)
+
+
+class ChunkLabels(BaseModel):
+    """An ``AttributionLLM`` provider's RAW output: a speaker per block + character mentions.
+
+    The provider assembles this into a :class:`ChunkAttribution` (segments with source text).
+    """
+
+    blocks: list[BlockSpeaker] = []
+    characters: list[CharacterMention] = []
+
+
 class ChunkAttribution(BaseModel):
-    """An ``AttributionLLM`` provider's full output for one chunk; also the cached unit.
+    """Assembled, validated attribution for one chunk; the cached unit.
 
     Speakers are still raw names here; registry resolution turns them into character ids.
     """

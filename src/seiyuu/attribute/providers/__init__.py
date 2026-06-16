@@ -7,7 +7,7 @@ from seiyuu.attribute.providers.base import (
     AttributionError,
     AttributionLLM,
     MalformedOutputError,
-    chunk_attribution_schema,
+    chunk_label_schema,
 )
 
 # Provider classes are referenced as strings and imported lazily so that importing
@@ -32,6 +32,6 @@ __all__ = [
     "AttributionError",
     "AttributionLLM",
     "MalformedOutputError",
-    "chunk_attribution_schema",
+    "chunk_label_schema",
     "get_provider",
 ]

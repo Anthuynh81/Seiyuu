@@ -17,11 +17,15 @@ from typing import Any
 
 from seiyuu.attribute.chunking import Chunk
 from seiyuu.attribute.models import (
+    BlockSpeaker,
     CharacterMention,
     CharacterRegistry,
     ChunkAttribution,
+    ChunkLabels,
     Segment,
+    SegmentType,
 )
+from seiyuu.attribute.spans import is_quoted_span, split_block_spans
 
 
 class AttributionError(Exception):
@@ -48,9 +52,9 @@ def _prompt_template(prompts_dir: Path, version: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def chunk_attribution_schema() -> dict[str, Any]:
-    """JSON schema for one chunk's output — handed to the backend's structured-output mode."""
-    return ChunkAttribution.model_json_schema()
+def chunk_label_schema() -> dict[str, Any]:
+    """JSON schema for the model's RAW output (per-block span labels + character mentions)."""
+    return ChunkLabels.model_json_schema()
 
 
 def _render_blocks(blocks: list) -> str:
@@ -96,33 +100,26 @@ class AttributionLLM(ABC):
     def attribute_chunk(
         self, chunk: Chunk, registry: CharacterRegistry, attempt: int = 0
     ) -> ChunkAttribution:
-        """Attribute one chunk's owned blocks; returns name-based speakers (pre-resolution).
+        """Label one chunk's spans and assemble Segments from the SOURCE text.
 
-        ``attempt`` is the 0-based retry index. The pipeline retries chunks that fail the
-        reconstruction invariant; on a retry we add a corrective reminder and let the
-        backend vary its sampling so the next answer differs from the rejected one.
+        We split each owned block into spans here; the model only labels them. Segment text
+        is sliced from the source, so reconstruction cannot be violated by the model.
+        ``attempt`` is the 0-based retry index; a retry adds a corrective reminder.
         """
+        spans_by_block = {b.id: split_block_spans(b.text) for b in chunk.owned_blocks}
         template = _prompt_template(self.prompts_dir, self.prompt_version)
         prompt = render_prompt(template, registry, chunk)
         if attempt > 0:
             prompt += (
-                "\n\n## Reminder\n\nA previous attempt changed the wording. Reproduce every "
-                "block's text EXACTLY, character for character; split only where the speaker "
-                "changes."
+                "\n\n## Reminder\n\nReturn one entry per block with the `block_id` and the "
+                "speaker of that block's dialogue (null if the block is pure narration)."
             )
-        raw = self._complete_json(prompt, chunk_attribution_schema(), attempt)
+        raw = self._complete_json(prompt, chunk_label_schema(), attempt)
         if not isinstance(raw, dict):
             raise MalformedOutputError(
                 f"{self.provider_id}/{self.model_id} returned a non-object for chunk {chunk.index}"
             )
-        # Segments are the payload — validate strictly (a failure retries, then flags).
-        try:
-            segments = [Segment.model_validate(s) for s in raw.get("segments") or []]
-        except Exception as exc:
-            raise MalformedOutputError(
-                f"{self.provider_id}/{self.model_id} returned output failing the segment "
-                f"schema for chunk {chunk.index}: {exc}"
-            ) from exc
+        segments = self._assemble_segments(raw.get("blocks") or [], spans_by_block)
         # Character mentions are auxiliary metadata; a malformed one must not sink the whole
         # chunk. Drop entries that don't validate (e.g. the model echoed the registry shape).
         characters = []
@@ -132,6 +129,44 @@ class AttributionLLM(ABC):
             except Exception:
                 continue
         return ChunkAttribution(segments=segments, characters=characters)
+
+    def _assemble_segments(
+        self, raw_blocks: list, spans_by_block: dict[str, list[str]]
+    ) -> list[Segment]:
+        """Build segments from source spans: quoted span -> dialogue (model's per-block
+        speaker), prose -> narration. The model never counts spans or echoes text, so this
+        can't fail on alignment; an un-attributed quote degrades to narration, not an error.
+        """
+        speakers: dict[str, tuple[str | None, float]] = {}
+        for raw_block in raw_blocks:
+            try:
+                block = BlockSpeaker.model_validate(raw_block)
+            except Exception:
+                continue  # drop a malformed entry; its block just gets no attributed speaker
+            speakers[block.block_id] = (block.speaker, block.confidence)
+
+        segments: list[Segment] = []
+        for block_id, spans in spans_by_block.items():
+            speaker, confidence = speakers.get(block_id, (None, 1.0))
+            for span_text in spans:
+                if not span_text.strip():
+                    continue  # whitespace-only span (e.g. a seam) carries no segment
+                if is_quoted_span(span_text) and speaker:
+                    segments.append(
+                        Segment(
+                            block_id=block_id,
+                            type=SegmentType.DIALOGUE,
+                            speaker=speaker,
+                            text=span_text,
+                            confidence=confidence,
+                        )
+                    )
+                else:
+                    # Prose, or a quote the model could not attribute: narration.
+                    segments.append(
+                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span_text)
+                    )
+        return segments
 
     @abstractmethod
     def _complete_json(

@@ -29,16 +29,18 @@ class Settings(BaseSettings):
     # required for reasoning models like Qwen3) or "openai" (the /v1 compat shim).
     ollama_transport: str = "native"
     # Context window for the native transport; the chunk's prompt + JSON output must fit.
-    # On an 8GB GPU, 8192 pushes qwen3.5:9b's KV cache off-GPU (spills to CPU, ~10x
-    # slower); 4096 keeps it fully resident. Pair with small chunks so output still fits.
-    ollama_num_ctx: int = 4096
+    # qwen2.5:7b (~4.7GB) fits fully on an 8GB GPU at 8192; a 9B model would spill to CPU
+    # (~10x slower) — drop num_ctx or use a smaller model if you swap to one.
+    ollama_num_ctx: int = 8192
     # Keep the model resident between chunks (a book is many calls seconds apart). The
     # explicit free-before-render unload is the M3 GPU resource manager's job; 0 here would
     # reload the model every chunk.
     ollama_keep_alive: str = "5m"
     attribution_provider: str = "local"
-    attribution_model: str = "qwen3.5:9b"
-    attribution_prompt_version: str = "v2"
+    # qwen2.5:7b: non-thinking, fits an 8GB GPU fully, reliable at the per-block speaker
+    # task. qwen3.5:9b is higher quality but too large to stay on-GPU here (slow).
+    attribution_model: str = "qwen2.5:7b"
+    attribution_prompt_version: str = "v3"
     # Smaller chunks keep a local model's JSON output well within num_ctx and make it far
     # more likely to honor the schema; overlap_blocks still gives cross-block context.
     attribution_chunk_tokens: int = 800
