@@ -37,6 +37,8 @@ from seiyuu.normalize.numbers import roman_to_int
         ("King Henry VIII reigned.", "King Henry the eighth reigned."),
         ("Chapter IV", "Chapter four"),
         ("Henry I think you are wrong.", "Henry I think you are wrong."),  # bare I left alone
+        ("Part IV begins", "Part four begins"),  # capitalized heading converts
+        ("the part I played", "the part I played"),  # lowercase heading word + pronoun I: leave
     ],
 )
 def test_normalize_cases(raw, expected):

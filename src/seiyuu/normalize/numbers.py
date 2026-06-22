@@ -121,8 +121,10 @@ _REGNAL_ROMAN_RE = re.compile(r"\b([A-Z][a-z]+)\s+([IVXLCDM]+)\b")
 
 def expand_roman_numerals(text: str) -> str:
     def heading(m: re.Match) -> str:
+        # Require a CAPITALIZED heading word: real headings are "Part IV"/"CHAPTER II", while
+        # lowercase "the part I played" is the pronoun "I" and must be left untouched.
         n = roman_to_int(m.group(2))
-        return f"{m.group(1)} {cardinal(n)}" if n else m.group(0)
+        return f"{m.group(1)} {cardinal(n)}" if n and m.group(1)[:1].isupper() else m.group(0)
 
     def regnal(m: re.Match) -> str:
         # Require >=2 letters: a lone "I"/"V"/"X" after a name is usually a pronoun/initial,
