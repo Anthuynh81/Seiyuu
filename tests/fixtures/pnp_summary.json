@@ -1,0 +1,315 @@
+{
+  "book_id": "pride-and-prejudice-7a5c08be",
+  "chapters": [
+    {
+      "title": "PRIDE. and PREJUDICE",
+      "blocks": 19,
+      "words": 4318
+    },
+    {
+      "title": "Chapter I.",
+      "blocks": 35,
+      "words": 849
+    },
+    {
+      "title": "CHAPTER II.",
+      "blocks": 28,
+      "words": 799
+    },
+    {
+      "title": "CHAPTER III.",
+      "blocks": 22,
+      "words": 1700
+    },
+    {
+      "title": "CHAPTER IV.",
+      "blocks": 17,
+      "words": 1061
+    },
+    {
+      "title": "CHAPTER V.",
+      "blocks": 24,
+      "words": 954
+    },
+    {
+      "title": "CHAPTER VI.",
+      "blocks": 55,
+      "words": 2342
+    },
+    {
+      "title": "CHAPTER VII.",
+      "blocks": 50,
+      "words": 1986
+    },
+    {
+      "title": "CHAPTER VIII.",
+      "blocks": 60,
+      "words": 1927
+    },
+    {
+      "title": "CHAPTER IX.",
+      "blocks": 40,
+      "words": 1729
+    },
+    {
+      "title": "CHAPTER X.",
+      "blocks": 67,
+      "words": 2208
+    },
+    {
+      "title": "CHAPTER XI.",
+      "blocks": 35,
+      "words": 1597
+    },
+    {
+      "title": "CHAPTER XII.",
+      "blocks": 8,
+      "words": 675
+    },
+    {
+      "title": "CHAPTER XIII",
+      "blocks": 31,
+      "words": 1688
+    },
+    {
+      "title": "CHAPTER XIV",
+      "blocks": 19,
+      "words": 1117
+    },
+    {
+      "title": "CHAPTER XV.",
+      "blocks": 14,
+      "words": 1690
+    },
+    {
+      "title": "CHAPTER XVI.",
+      "blocks": 61,
+      "words": 3362
+    },
+    {
+      "title": "CHAPTER XVII.",
+      "blocks": 16,
+      "words": 1276
+    },
+    {
+      "title": "CHAPTER XVIII.",
+      "blocks": 78,
+      "words": 5169
+    },
+    {
+      "title": "CHAPTER XIX.",
+      "blocks": 23,
+      "words": 1911
+    },
+    {
+      "title": "CHAPTER XX.",
+      "blocks": 36,
+      "words": 1645
+    },
+    {
+      "title": "CHAPTER XXI.",
+      "blocks": 29,
+      "words": 2000
+    },
+    {
+      "title": "CHAPTER XXII.",
+      "blocks": 21,
+      "words": 1732
+    },
+    {
+      "title": "CHAPTER XXIII.",
+      "blocks": 26,
+      "words": 1611
+    },
+    {
+      "title": "CHAPTER XXIV.",
+      "blocks": 32,
+      "words": 1928
+    },
+    {
+      "title": "CHAPTER XXV.",
+      "blocks": 21,
+      "words": 1516
+    },
+    {
+      "title": "CHAPTER XXVI.",
+      "blocks": 31,
+      "words": 2330
+    },
+    {
+      "title": "CHAPTERXXVII.",
+      "blocks": 24,
+      "words": 1255
+    },
+    {
+      "title": "CHAPTERXXVIII.",
+      "blocks": 21,
+      "words": 1449
+    },
+    {
+      "title": "CHAPTER XXIX.",
+      "blocks": 43,
+      "words": 2382
+    },
+    {
+      "title": "CHAPTER XXX.",
+      "blocks": 14,
+      "words": 1231
+    },
+    {
+      "title": "CHAPTER XXXI.",
+      "blocks": 31,
+      "words": 1554
+    },
+    {
+      "title": "CHAPTER XXXII.",
+      "blocks": 32,
+      "words": 1494
+    },
+    {
+      "title": "CHAPTER XXXIII.",
+      "blocks": 42,
+      "words": 1856
+    },
+    {
+      "title": "CHAPTER XXXIV.",
+      "blocks": 32,
+      "words": 2099
+    },
+    {
+      "title": "CHAPTER XXXV.",
+      "blocks": 7,
+      "words": 2995
+    },
+    {
+      "title": "CHAPTER XXXVI.",
+      "blocks": 15,
+      "words": 1999
+    },
+    {
+      "title": "CHAPTER XXXVII.",
+      "blocks": 21,
+      "words": 1370
+    },
+    {
+      "title": "CHAPTER XXXVIII.",
+      "blocks": 18,
+      "words": 1039
+    },
+    {
+      "title": "CHAPTER XXXIX.",
+      "blocks": 27,
+      "words": 1630
+    },
+    {
+      "title": "CHAPTER XL.",
+      "blocks": 36,
+      "words": 1678
+    },
+    {
+      "title": "CHAPTER XLI.",
+      "blocks": 41,
+      "words": 2265
+    },
+    {
+      "title": "CHAPTER XLII.",
+      "blocks": 19,
+      "words": 1825
+    },
+    {
+      "title": "CHAPTER XLIII.",
+      "blocks": 80,
+      "words": 4846
+    },
+    {
+      "title": "CHAPTER XLIV.",
+      "blocks": 19,
+      "words": 2334
+    },
+    {
+      "title": "CHAPTER XLV.",
+      "blocks": 21,
+      "words": 1730
+    },
+    {
+      "title": "Chapter XLVI.",
+      "blocks": 33,
+      "words": 3011
+    },
+    {
+      "title": "CHAPTER XLVII.",
+      "blocks": 74,
+      "words": 4076
+    },
+    {
+      "title": "CHAPTER XLVIII.",
+      "blocks": 36,
+      "words": 2252
+    },
+    {
+      "title": "CHAPTER XLIX.",
+      "blocks": 56,
+      "words": 2239
+    },
+    {
+      "title": "CHAPTER L.",
+      "blocks": 24,
+      "words": 2200
+    },
+    {
+      "title": "CHAPTER LI.",
+      "blocks": 41,
+      "words": 2070
+    },
+    {
+      "title": "CHAPTER LII.",
+      "blocks": 39,
+      "words": 3026
+    },
+    {
+      "title": "CHAPTER LIII.",
+      "blocks": 61,
+      "words": 2935
+    },
+    {
+      "title": "CHAPTER LIV.",
+      "blocks": 36,
+      "words": 1594
+    },
+    {
+      "title": "CHAPTER LV.",
+      "blocks": 57,
+      "words": 2325
+    },
+    {
+      "title": "CHAPTER LVI.",
+      "blocks": 77,
+      "words": 2724
+    },
+    {
+      "title": "CHAPTER LVII.",
+      "blocks": 22,
+      "words": 1652
+    },
+    {
+      "title": "CHAPTER LVIII.",
+      "blocks": 47,
+      "words": 2433
+    },
+    {
+      "title": "CHAPTER LIX.",
+      "blocks": 49,
+      "words": 2470
+    },
+    {
+      "title": "CHAPTER LX.",
+      "blocks": 30,
+      "words": 1586
+    },
+    {
+      "title": "CHAPTER LXI.",
+      "blocks": 16,
+      "words": 1248
+    }
+  ]
+}
