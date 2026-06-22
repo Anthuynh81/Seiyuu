@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"
 
+    # Text normalization (M3). Output changes auto-invalidate the segment cache via
+    # normalized_text_hash; this string is for debuggability only, NOT part of the key.
+    normalization_version: str = "1"
+
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None

@@ -14,7 +14,7 @@ import soundfile as sf
 
 from seiyuu.engines import TTSEngine
 from seiyuu.ingest.models import BlockType, NormalizedBook
-from seiyuu.normalize import normalize_text
+from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest
 
@@ -63,6 +63,7 @@ def render_book(
         )
 
     rendered_chapters: list[RenderedChapter] = []
+    profile = profile_for(engine.engine_id)
     synthesized = cache_hits = 0
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
@@ -73,7 +74,7 @@ def render_book(
             if block.type is BlockType.SCENE_BREAK:
                 segments.append(RenderedSegment(block_id=block.id, type=block.type))
                 continue
-            text = normalize_text(block.text)
+            text = normalize_text(block.text, profile=profile)
             key = SegmentKey.build(
                 engine=engine.engine_id,
                 engine_model_version=engine.model_version,
