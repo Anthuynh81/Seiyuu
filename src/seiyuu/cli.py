@@ -178,6 +178,7 @@ def _build_provider(cfg, provider_id: str, model: str, prompt_version: str):
         kwargs["transport"] = cfg.ollama_transport
         kwargs["num_ctx"] = cfg.ollama_num_ctx
         kwargs["keep_alive"] = cfg.ollama_keep_alive
+        kwargs["unload_poll_timeout"] = cfg.gpu_unload_poll_timeout
     elif provider_id == "anthropic":
         kwargs["api_key"] = cfg.anthropic_api_key
     return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)

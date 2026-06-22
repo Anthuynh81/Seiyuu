@@ -55,6 +55,16 @@ class KokoroEngine(TTSEngine):
     def cost_estimate(self, text: str) -> float:
         return 0.0
 
+    def unload(self) -> None:
+        """Drop loaded KPipelines and free VRAM (GPU resource manager handoff)."""
+        import gc
+
+        self._pipelines.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
     def _pipeline(self, lang_code: str) -> Any:
         if lang_code not in self._pipelines:
             from kokoro import KPipeline  # SDK import stays inside the adapter
