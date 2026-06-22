@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from seiyuu.attribute.aliases import resolve_registry_aliases
 from seiyuu.attribute.cache import AttributionCache, ChunkCacheKey
 from seiyuu.attribute.chunking import Chunk, chunk_blocks
 from seiyuu.attribute.models import (
@@ -76,6 +77,15 @@ def _attribute_chunk_validated(
                 attempts=attempt + 1,
             )
     return _ChunkOutcome(None, attempts=max_retries + 1, failures=last_failures)
+
+
+def _drop_superseded_notes(notes: list[str], merged_names: set[str]) -> list[str]:
+    """Drop incremental 'not merging X' notes the alias post-pass later resolved by merging X."""
+    return [
+        n
+        for n in notes
+        if not (n.startswith("not merging") and any(f"'{m}'" in n for m in merged_names))
+    ]
 
 
 def _fallback_segments(blocks: list[Block]) -> list[Segment]:
@@ -176,6 +186,22 @@ def attribute_book(
             elif block.type is BlockType.PARAGRAPH:
                 segments.extend(by_block.get(block.id, []))
         out_chapters.append(AttributedChapter(index=ci, title=chapter.title, segments=segments))
+
+    # Once the whole registry exists, merge provably-same characters (honorific variants,
+    # subsumed aliases) and flag the ambiguous. Then remap any absorbed speaker ids on the
+    # already-resolved segments. This touches only the in-memory report, never the cache.
+    pre_names = {c.id: c.canonical_name for c in registry.characters}
+    id_remap, alias_notes = resolve_registry_aliases(registry, out_chapters)
+    notes = _drop_superseded_notes(notes, {pre_names[loser] for loser in id_remap})
+    notes.extend(alias_notes)
+    if id_remap:
+        for chapter_out in out_chapters:
+            chapter_out.segments = [
+                seg.model_copy(update={"speaker": id_remap[seg.speaker]})
+                if seg.speaker in id_remap
+                else seg
+                for seg in chapter_out.segments
+            ]
 
     return AttributionReport(
         book_id=book.book_meta.book_id,

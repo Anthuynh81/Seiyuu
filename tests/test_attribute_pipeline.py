@@ -110,6 +110,19 @@ def test_hybrid_escalation_recovers_a_failed_chunk(tmp_path):
     assert report.registry.get("cara") is not None
 
 
+def test_drop_superseded_notes_removes_resolved_not_merging():
+    from seiyuu.attribute.pipeline import _drop_superseded_notes
+
+    notes = [
+        "not merging 'Darcy' with existing ['Mr. Darcy'] (flagged for review, not auto-applied)",
+        "not merging 'Bennet' with existing ['Mr. Bennet']",
+        "some unrelated note",
+    ]
+    # The alias post-pass merged Darcy but not Bennet -> only the Darcy note is dropped.
+    assert _drop_superseded_notes(notes, {"Darcy"}) == notes[1:]
+    assert _drop_superseded_notes(notes, set()) == notes
+
+
 def test_malformed_output_is_flagged_not_fatal(tmp_path):
     def bad(chunk, registry, attempt):
         raise MalformedOutputError("model returned invalid JSON")

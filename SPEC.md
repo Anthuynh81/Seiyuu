@@ -227,12 +227,18 @@ regenerable from reference.wav.
      a safety net but can no longer be violated by a well-behaved model.
    - **Local transport:** Ollama native `/api/chat` (the OpenAI `/v1` shim can't disable a
      reasoning model's thinking or set `num_ctx`); default model `qwen2.5:7b` (fits 8GB).
-   - **Known gaps (carry forward):** (a) long-range alias resolution is weak on a 7B
-     (un-merged `Darcy`/`Mr. Darcy`, occasional invented name) — flagged-not-merged per
-     spec; a dedicated resolution pass or the cloud finisher would help. (b) `thought`
-     segments are not emitted by the local span path (type is derived from quotes:
-     quoted→dialogue, prose→narration); the `Segment` schema still supports `thought` for a
-     future markup-aware or cloud pass.
+   - **Alias resolution:** a deterministic once-per-book post-pass (`attribute/aliases.py`)
+     merges only provably-same characters — honorific-strip exact match (`Darcy`→`Mr. Darcy`)
+     and subsumed-alias consolidation, gated by a gender/generation guard — and FLAGS the
+     ambiguous (Mr./Mrs. Bennet, Mr./Miss Bingley, Lady/Miss Lucas) to `registry_notes`,
+     never over-merging. An `AliasResolver` seam is left for a future opt-in LLM adjudication.
+   - **Known gaps (carry forward):** (a) cross-family conflations / hallucinated names (e.g.
+     a model-invented `Jane Lucas`) and first-name↔full-name / nickname links are
+     deliberately NOT auto-merged by the deterministic pass — they need the deferred LLM
+     adjudication (the `AliasResolver` seam) or the cloud finisher. (b) `thought` segments
+     are not emitted by the local span path (type is derived from quotes: quoted→dialogue,
+     prose→narration); the `Segment` schema still supports `thought` for a future
+     markup-aware or cloud pass.
 3. **M3 — Voices:** voice library + Chatterbox cloning (upload→curate→audition CLI),
    conds caching, seeds, Kokoro blends, text normalization stage. First multi-voice
    cloned render. GPU resource manager (LLM↔TTS handoff) lands here.
@@ -267,8 +273,10 @@ regenerable from reference.wav.
   model whose weights exceed usable 8GB VRAM (CPU spill, slow); qwen2.5:7b (non-thinking)
   fits fully and is the working default. Re-run the bake-off (incl. Gemma) if more VRAM is
   available; cache is keyed by model_id so results don't clobber.
-- Alias-resolution quality on small models: add a dedicated registry-resolution pass
-  (or escalate flagged merges to the cloud) — 7B leaves obvious aliases un-merged.
+- Alias-resolution quality on small models: *M2 update:* a deterministic registry post-pass
+  now merges honorific variants and flags ambiguous families (precision over recall). Still
+  open: an opt-in LLM adjudication of the flagged candidates (cross-family conflations,
+  nicknames, first-name↔full-name) via the `AliasResolver` seam.
 - Emotion handling: IndexTTS-2 emotion refs (M7), per-segment Chatterbox
   exaggeration, or skip for v1?
 - Cloud finisher default: ElevenLabs quality vs Fish Audio price; re-verify pricing

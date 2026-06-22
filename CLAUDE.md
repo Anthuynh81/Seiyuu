@@ -68,6 +68,11 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
   dialogue by that speaker, prose = narration), so the model never reproduces, splits, or
   counts text. This is what makes small local models usable; the reconstruction guard
   below then can't fail on a well-behaved splitter and stays as a safety net.
+- Alias resolution is a deterministic once-per-book post-pass (`attribute/aliases.py`) run
+  AFTER the running registry is built; it only auto-merges provably-same characters
+  (honorific-strip + subsumed-alias, gender/generation-guarded) and flags the ambiguous to
+  `registry_notes`. Precision over recall — never over-merge two distinct characters.
+  `resolve_chunk` (the per-chunk path) stays conservative and untouched.
 - Attribution invariants (hard validation, provider-independent, never skip):
   - Concatenated segment texts per block must reproduce the source block exactly
     (whitespace-normalized). The LLM may never drop, reorder, or paraphrase text.
