@@ -34,6 +34,10 @@ class TTSEngine(ABC):
     # so their output must pass whisper validation before assembly. Deterministic engines
     # (Kokoro) set this False and the render loop skips validation for them.
     requires_validation: bool = False
+    # Local engines hold a model on the single GPU and synthesize through the GPU manager;
+    # cloud engines (ElevenLabs) set this False so they don't needlessly unload a resident
+    # local model while waiting on the network.
+    uses_gpu: bool = True
 
     @property
     @abstractmethod

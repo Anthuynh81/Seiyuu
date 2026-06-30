@@ -26,6 +26,7 @@ _VOICE_SETTING_KEYS = ("stability", "similarity_boost", "style", "use_speaker_bo
 class ElevenLabsEngine(TTSEngine):
     engine_id = "elevenlabs"
     requires_validation = False  # paid: never auto-retry; whisper is an opt-in report only
+    uses_gpu = False  # cloud API; never touches the local GPU
 
     def __init__(
         self,
@@ -70,6 +71,11 @@ class ElevenLabsEngine(TTSEngine):
 
             self._client = ElevenLabs(api_key=self._api_key)
         return self._client
+
+    @property
+    def client(self) -> Any:
+        """The authenticated SDK client (the cloud-voice/slot manager shares it)."""
+        return self._get_client()
 
     def list_voices(self) -> list[EngineVoice]:
         resp = self._get_client().voices.get_all()

@@ -6,6 +6,7 @@ goes through the segment cache.
 """
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from seiyuu.voices import (
     VoiceAssignment,
     VoiceKind,
     VoiceLibrary,
+    ensure_cloud_voice,
     render_voice_args,
     resolve_voice,
 )
@@ -34,6 +36,25 @@ MANIFEST_NAME = "manifest.json"
 
 class RenderError(Exception):
     """Loud render failure naming book/chapter/block."""
+
+
+@dataclass
+class CostEstimate:
+    total_usd: float
+    paid_segments: int  # uncached segments that will cost money
+    cached_segments: int  # already rendered, free to reuse
+    free_segments: int  # uncached but local (free)
+
+
+def _gate_paid(engine: TTSEngine, text: str, allow_paid: bool, *, book_id, block_id, voice) -> None:
+    """Refuse a paid synthesis unless explicitly authorized — no automatic code path may bill."""
+    cost = engine.cost_estimate(text)
+    if cost > 0 and not allow_paid:
+        raise RenderError(
+            f"refusing paid synthesis (~${cost:.4f}) book={book_id} block={block_id} "
+            f"voice={voice} engine={engine.engine_id} without cost confirmation; confirm the "
+            f"estimate first (CLI: `seiyuu estimate-cost`, then render with --confirm-cost)"
+        )
 
 
 @dataclass
@@ -106,6 +127,7 @@ def render_book(
     progress: Callable[[str], None] | None = None,
     validator: Validator | None = None,
     validation_max_retries: int = 2,
+    allow_paid: bool = False,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice."""
     settings = settings or {}
@@ -149,12 +171,18 @@ def render_book(
                 validation = cache.get_validation(key)
                 attempts = 1
             else:
+                _gate_paid(
+                    engine, text, allow_paid,
+                    book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
+                )  # fmt: skip
                 try:
                     audio, validation, attempts = _synthesize_validated(
                         engine, text, voice_id, settings, seed,
                         validator=validator, max_retries=validation_max_retries,
                         cache_dir=cache.cache_dir,
                     )  # fmt: skip
+                except RenderError:
+                    raise
                 except Exception as exc:
                     raise RenderError(
                         f"synthesis failed: book={book.book_meta.book_id} "
@@ -221,6 +249,8 @@ def render_book_multivoice(
     gpu=None,
     validator: Validator | None = None,
     validation_max_retries: int = 2,
+    allow_paid: bool = False,
+    cloud_max_slots: int = 10,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -295,13 +325,29 @@ def render_book_multivoice(
                         validation = cache.get_validation(key)
                         attempts = 1
                     else:
+                        _gate_paid(
+                            engine, text, allow_paid,
+                            book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
+                        )  # fmt: skip
                         try:
-                            with gpu.acquire(engine, engine.engine_id):
+                            synth_voice = engine_voice
+                            if meta.engine == "elevenlabs":  # resolve/create the cloud voice
+                                synth_voice = ensure_cloud_voice(
+                                    meta, engine.client, library, max_slots=cloud_max_slots
+                                )
+                            ctx = (
+                                gpu.acquire(engine, engine.engine_id)
+                                if engine.uses_gpu
+                                else nullcontext()
+                            )
+                            with ctx:
                                 audio, validation, attempts = _synthesize_validated(
-                                    engine, text, engine_voice, settings, meta.seed,
+                                    engine, text, synth_voice, settings, meta.seed,
                                     validator=validator, max_retries=validation_max_retries,
                                     cache_dir=cache.cache_dir,
                                 )  # fmt: skip
+                        except RenderError:
+                            raise
                         except Exception as exc:
                             raise RenderError(
                                 f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
@@ -361,4 +407,75 @@ def render_book_multivoice(
         synthesized=synthesized,
         cache_hits=cache_hits,
         validation_failures=validation_failures,
+    )
+
+
+def estimate_render_cost(
+    report: AttributionReport,
+    book: NormalizedBook,
+    library: VoiceLibrary,
+    assignment: VoiceAssignment,
+    book_output_dir: Path,
+    *,
+    chapters: tuple[int, ...] = (),
+) -> CostEstimate:
+    """Pre-flight cost of a multi-voice render: USD over the segments that aren't already cached.
+
+    Read-only and offline — builds the same FROZEN SegmentKey as render_book_multivoice to count
+    cache hits exactly, and sums each uncached segment's engine.cost_estimate (no API key or
+    synthesis needed). What this returns is what the cost gate will let render bill.
+    """
+    book_output_dir = Path(book_output_dir)
+    cache = SegmentCache(book_output_dir / "cache")
+    wanted = set(chapters)
+    attributed = {ch.index: ch for ch in report.chapters}
+    engines: dict[str, TTSEngine] = {}
+    metas: dict[str, VoiceMeta] = {}
+
+    def engine_for(engine_id: str) -> TTSEngine:
+        if engine_id not in engines:
+            extra = {"voices_dir": library.voices_dir} if engine_id == "chatterbox" else {}
+            engines[engine_id] = get_engine(engine_id, **extra)
+        return engines[engine_id]
+
+    def meta_for(voice_id: str) -> VoiceMeta:
+        if voice_id not in metas:
+            metas[voice_id] = library.load(voice_id)
+        return metas[voice_id]
+
+    total = 0.0
+    paid = cached = free = 0
+    for ci, chapter in enumerate(book.chapters, start=1):
+        if (wanted and ci not in wanted) or ci not in attributed:
+            continue
+        by_block: dict[str, list] = {}
+        for seg in attributed[ci].segments:
+            by_block.setdefault(seg.block_id, []).append(seg)
+        for block in chapter.blocks:
+            if block.type is BlockType.SCENE_BREAK:
+                continue
+            for seg in by_block.get(block.id, []):
+                meta = meta_for(resolve_voice(seg, assignment))
+                engine = engine_for(meta.engine)
+                text = normalize_text(seg.text, profile=profile_for(meta.engine))
+                _, settings = render_voice_args(meta)
+                key = SegmentKey.build(
+                    engine=meta.engine,
+                    engine_model_version=engine.model_version,
+                    voice_id=meta.voice_id,
+                    settings=settings,
+                    seed=meta.seed,
+                    normalized_text=text,
+                )
+                if cache.get(key) is not None:
+                    cached += 1
+                    continue
+                cost = engine.cost_estimate(text)
+                if cost > 0:
+                    total += cost
+                    paid += 1
+                else:
+                    free += 1
+    return CostEstimate(
+        total_usd=round(total, 4), paid_segments=paid, cached_segments=cached, free_segments=free
     )
