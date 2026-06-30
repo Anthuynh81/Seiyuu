@@ -275,8 +275,23 @@ regenerable from reference.wav.
      FROZEN SegmentKey is unchanged — validation retries are an internal render detail; the
      best attempt is cached under the pinned-seed key. Target-duration tempo is applied only
      in `master` (the single-file audiobook), where the whole-book duration is known.
-5. **M5 — Cloud TTS:** ElevenLabs IVC adapter (slot-aware), cost gate,
-   draft-vs-final workflow. Fish Audio adapter optional.
+5. **M5 — Cloud TTS:** ✅ **done.** ElevenLabs adapter behind `TTSEngine` (pcm_24000 ==
+   canonical, real per-character `cost_estimate`, `requires_validation=False` + `uses_gpu=False`).
+   Cloud voice + slot manager (`voices/cloud.py`): stock voices passthrough; IVC clones cached
+   in an LRU registry (`voices/cloud_voices.json`, derived from reference.wav), recreated on
+   reclaim, LRU-evicted when the account is full; never errors on voice-not-found. Cost gate
+   (the keystone): `allow_paid=False` default — render refuses any `cost_estimate>0` segment
+   without explicit authorization; `estimate_render_cost` does an offline pre-flight over
+   uncached segments only. CLI: `voice add-cloud`/`voice clone`, `assign --stage/--map`,
+   `estimate-cost`, cost-confirmed `render`/`convert` (`--confirm-cost`), cloud-aware
+   `voice audition`. No voice-model or SegmentKey schema change (cloud handle is a derived
+   cache). Fish Audio deferred.
+   - **Design notes:** no automatic code path can bill — the gate is structural (a refusal),
+     and the CLI estimates + confirms before passing `allow_paid`. Whisper validation stays
+     OFF for the paid engine (no money-burning auto-retry; it's an opt-in report). Cloud voice
+     creation/resolution happens only on an authorized cache miss, so estimation and cached
+     reuse never hit the API or need a key. The default suite mocks the SDK end to end; a real
+     `ELEVENLABS_API_KEY` is needed only to run an actual cloud render.
 6. **M6 — Frontend:** FastAPI API + React UI.
 7. **M7 — IndexTTS-2:** second local cloning engine; emotion refs.
 8. **M8 — PDF ingestion.**
