@@ -40,6 +40,7 @@ class KokoroEngine(TTSEngine):
     def __init__(self, device: str | None = None) -> None:
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._pipelines: dict[str, Any] = {}  # lang_code -> KPipeline
+        self._blend_cache: dict[tuple, Any] = {}  # canonical recipe -> weighted voicepack
 
     @property
     def model_version(self) -> str:
@@ -60,6 +61,7 @@ class KokoroEngine(TTSEngine):
         import gc
 
         self._pipelines.clear()
+        self._blend_cache.clear()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -74,26 +76,49 @@ class KokoroEngine(TTSEngine):
             )
         return self._pipelines[lang_code]
 
+    def _blend_voicepack(self, lang_code: str, recipe: list[tuple[str, float]]) -> Any:
+        """Weighted sum of preset voicepacks (normalized), memoized by canonical recipe."""
+        key = tuple(recipe)
+        if key in self._blend_cache:
+            return self._blend_cache[key]
+        pipeline = self._pipeline(lang_code)
+        total = sum(w for _, w in recipe) or 1.0
+        pack = None
+        for preset_id, weight in recipe:
+            contribution = pipeline.load_single_voice(preset_id) * (weight / total)
+            pack = contribution if pack is None else pack + contribution
+        self._blend_cache[key] = pack
+        return pack
+
     def _synthesize_native(
         self, text: str, voice: str, settings: dict[str, Any]
     ) -> tuple[torch.Tensor, int]:
-        if voice not in _PRESETS:
-            raise SynthesisError(
-                f"kokoro: unknown voice {voice!r}; known presets: {', '.join(_PRESETS)}"
-            )
+        blend = settings.get("blend")
+        if blend:  # a weighted Kokoro blend (recipe folded into settings by render)
+            recipe = [(str(p), float(w)) for p, w in blend]
+            families = {p[:1] for p, _ in recipe}
+            if len(families) != 1:
+                raise SynthesisError(f"kokoro: blend mixes language families {sorted(families)}")
+            lang_code = recipe[0][0][0]
+            voice_arg: Any = self._blend_voicepack(lang_code, recipe)
+        else:
+            if voice not in _PRESETS:
+                raise SynthesisError(
+                    f"kokoro: unknown voice {voice!r}; known presets: {', '.join(_PRESETS)}"
+                )
+            lang_code, voice_arg = voice[0], voice
+
         seed = settings.get("seed")
         if seed is not None:
             torch.manual_seed(int(seed))  # Kokoro is deterministic; seeded for safety
         speed = float(settings.get("speed", 1.0))
 
-        pipeline = self._pipeline(voice[0])
+        pipeline = self._pipeline(lang_code)
         chunks: list[torch.Tensor] = []
         with torch.inference_mode():
-            for result in pipeline(text, voice=voice, speed=speed):
+            for result in pipeline(text, voice=voice_arg, speed=speed):
                 if result.audio is not None:
                     chunks.append(result.audio.detach().cpu())
         if not chunks:
-            raise SynthesisError(
-                f"kokoro: produced no audio for voice {voice!r} (text: {text[:80]!r})"
-            )
+            raise SynthesisError(f"kokoro: produced no audio (text: {text[:80]!r})")
         return torch.cat(chunks), KOKORO_SAMPLE_RATE
