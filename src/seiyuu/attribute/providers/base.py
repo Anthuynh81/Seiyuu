@@ -97,6 +97,9 @@ class AttributionLLM(ABC):
         self.prompts_dir = Path(prompts_dir)
         self.prompt_version = prompt_version
 
+    def unload(self) -> None:  # noqa: B027 — intentional no-op default; cloud providers override nothing
+        """Free GPU memory (GpuConsumer protocol). No-op default; cloud providers need nothing."""
+
     def attribute_chunk(
         self, chunk: Chunk, registry: CharacterRegistry, attempt: int = 0
     ) -> ChunkAttribution:

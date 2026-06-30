@@ -10,13 +10,15 @@ Two transports, selected by config (``attribution.ollama_transport``):
 - ``openai``: the OpenAI SDK pointed at ``/v1`` with ``response_format`` json_schema —
   fine for non-thinking models; kept for parity and easy migration.
 
-Both set ``keep_alive: 0`` so Ollama frees VRAM right after the call — the render stage
-must be able to load a TTS engine without contending for the single GPU (SPEC GPU
+The model stays resident between chunks (``keep_alive``, default '5m') for fast cross-chunk
+calls; the GPU resource manager forces an explicit ``unload()`` at the attribute->render
+handoff so a TTS engine can load without contending for the single GPU (SPEC GPU
 discipline). Ollama being unreachable is a clear, actionable error.
 """
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -54,6 +56,11 @@ def _urllib_post(url: str, payload: dict[str, Any], timeout: float) -> dict[str,
         return json.loads(response.read())
 
 
+def _urllib_get(url: str, timeout: float) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
 class OllamaProvider(AttributionLLM):
     provider_id = "local"
 
@@ -69,8 +76,10 @@ class OllamaProvider(AttributionLLM):
         num_ctx: int = 8192,
         keep_alive: str | int = "5m",
         timeout: float = 600.0,
+        unload_poll_timeout: float = 30.0,
         client: Any | None = None,  # OpenAI client (openai transport; injectable for tests)
         post: Callable[..., dict] | None = None,  # native HTTP POST (injectable for tests)
+        get: Callable[..., dict] | None = None,  # native HTTP GET (injectable for tests)
     ) -> None:
         super().__init__(model=model, prompts_dir=prompts_dir, prompt_version=prompt_version)
         if transport not in _TRANSPORTS:
@@ -81,10 +90,13 @@ class OllamaProvider(AttributionLLM):
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
         self.timeout = timeout
+        self.unload_poll_timeout = unload_poll_timeout
         self._client = client
         self._post = post or _urllib_post
+        self._get = get or _urllib_get
         # The native API lives at the server root, not under the /v1 OpenAI shim.
-        self.native_url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
+        self._root = base_url.rstrip("/").removesuffix("/v1")
+        self.native_url = self._root + "/api/chat"
 
     def _complete_json(
         self, prompt: str, schema: dict[str, Any], attempt: int = 0
@@ -158,6 +170,33 @@ class OllamaProvider(AttributionLLM):
         if not content:
             raise AttributionError(f"Ollama returned empty content for model {self.model_id!r}")
         return _parse_json(content, self.model_id)
+
+    def unload(self) -> None:
+        """Free the model from Ollama's VRAM before a TTS engine loads (GPU handoff).
+
+        Ollama's unload is asynchronous and has no /api/unload (0.x): request keep_alive 0 via
+        /api/generate, then poll /api/ps until the model is gone. If it never frees, raise
+        loudly — proceeding would let two heavy models co-reside and OOM the 8GB card.
+        """
+        try:
+            self._post(
+                f"{self._root}/api/generate",
+                {"model": self.model_id, "keep_alive": 0, "prompt": ""},
+                self.timeout,
+            )
+        except urllib.error.URLError:
+            return  # server unreachable -> nothing is resident to free
+        deadline = time.monotonic() + self.unload_poll_timeout
+        while True:
+            loaded = self._get(f"{self._root}/api/ps", 5.0).get("models", [])
+            if not any(m.get("model") == self.model_id for m in loaded):
+                return
+            if time.monotonic() >= deadline:
+                raise AttributionError(
+                    f"Ollama did not unload {self.model_id!r} within "
+                    f"{self.unload_poll_timeout}s; a TTS engine cannot safely load"
+                )
+            time.sleep(0.5)
 
     def _truncation_error(self) -> MalformedOutputError:
         # Retryable, not fatal: a single attempt can run long (e.g. a corrective retry

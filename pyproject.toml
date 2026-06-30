@@ -21,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "click>=8.4",
     "soundfile>=0.14",
+    "num2words>=0.5.14",
 ]
 
 [project.scripts]

@@ -51,6 +51,9 @@ class TTSEngine(ABC):
         """Optional: build engine-side voice assets from a reference clip (M3+)."""
         raise NotImplementedError(f"{self.engine_id} does not support voice cloning")
 
+    def unload(self) -> None:  # noqa: B027 — intentional no-op default; cloud engines override nothing
+        """Free GPU memory (GpuConsumer protocol). No-op default; cloud engines need nothing."""
+
     def synthesize(
         self, text: str, voice: str, settings: dict[str, Any] | None = None
     ) -> AudioFile:

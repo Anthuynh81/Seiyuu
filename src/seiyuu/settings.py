@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"
 
+    # Text normalization (M3). Output changes auto-invalidate the segment cache via
+    # normalized_text_hash; this string is for debuggability only, NOT part of the key.
+    normalization_version: str = "1"
+
+    # GPU resource management (M3). One heavy model resident at a time on a single GPU.
+    gpu_device: str = "cuda"
+    whisper_device: str = "cpu"  # faster-whisper stays on CPU (M4) so it never contends
+    gpu_unload_poll_timeout: float = 30.0  # wait for Ollama to free VRAM before loading TTS
+
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None
