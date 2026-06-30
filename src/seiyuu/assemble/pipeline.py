@@ -22,11 +22,18 @@ from seiyuu.render import MANIFEST_NAME, RenderedChapter, RenderManifest
 
 @dataclass(frozen=True)
 class PauseProfile:
-    """Silence durations in seconds. M1 defaults; tune freely."""
+    """Silence durations in seconds. Tune freely.
+
+    `dialogue` is the short beat between two consecutive dialogue turns (back-and-forth between
+    characters); the longer `paragraph` gap applies to narration and dialogue↔narration
+    transitions. Dialogue pacing only kicks in for multi-voice renders (it needs the narrator
+    voice id to tell dialogue from narration).
+    """
 
     paragraph: float = 0.6
     after_heading: float = 1.2
     scene_break: float = 1.8
+    dialogue: float = 0.35
     chapter_lead_in: float = 0.5
     chapter_lead_out: float = 1.0
 
@@ -45,16 +52,33 @@ def _silence(seconds: float) -> np.ndarray:
     return np.zeros(round(seconds * CANONICAL_SAMPLE_RATE), dtype=np.float32)
 
 
-def _chapter_samples(chapter: RenderedChapter, book_dir: Path, pauses: PauseProfile) -> np.ndarray:
+def _is_dialogue(seg, narrator_voice_id: str | None) -> bool:
+    """A segment voiced by a character (not the narrator) — multi-voice only. Single-voice
+    renders have no narrator id, so this is always False and dialogue pacing is skipped."""
+    return (
+        narrator_voice_id is not None
+        and seg.voice_id is not None
+        and seg.voice_id != narrator_voice_id
+    )
+
+
+def _chapter_samples(
+    chapter: RenderedChapter,
+    book_dir: Path,
+    pauses: PauseProfile,
+    narrator_voice_id: str | None = None,
+) -> np.ndarray:
     """Concatenate a chapter's segment audio with pause silences."""
     parts = [_silence(pauses.chapter_lead_in)]
     prev: BlockType | None = None
     prev_block_id: str | None = None
+    prev_dialogue = False
     pending_scene_break = False
     for seg in chapter.segments:
         if seg.type is BlockType.SCENE_BREAK:
             pending_scene_break = True
             continue
+        cur_dialogue = _is_dialogue(seg, narrator_voice_id)
         # A multi-voice paragraph yields several segments sharing one block_id; only insert a
         # pause when the BLOCK changes (single-voice has one segment per block, so identical).
         if prev is not None and seg.block_id != prev_block_id:
@@ -62,6 +86,8 @@ def _chapter_samples(chapter: RenderedChapter, book_dir: Path, pauses: PauseProf
                 gap = pauses.scene_break
             elif prev is BlockType.HEADING:
                 gap = pauses.after_heading
+            elif prev_dialogue and cur_dialogue:
+                gap = pauses.dialogue  # short beat in a character back-and-forth
             else:
                 gap = pauses.paragraph
             parts.append(_silence(gap))
@@ -82,6 +108,7 @@ def _chapter_samples(chapter: RenderedChapter, book_dir: Path, pauses: PauseProf
         parts.append(samples)
         prev = seg.type
         prev_block_id = seg.block_id
+        prev_dialogue = cur_dialogue
     parts.append(_silence(pauses.chapter_lead_out))
     return np.concatenate(parts)
 
@@ -121,11 +148,13 @@ def assemble_book(
     chapters_dir = book_output_dir / "chapters"
     chapters_dir.mkdir(parents=True, exist_ok=True)
     album = manifest.book_title or manifest.book_id
+    # narrator id (multi-voice only) lets the pause logic tell dialogue from narration
+    narrator_voice_id = (manifest.assignment or {}).get("narrator_voice_id")
 
     mp3_paths: list[Path] = []
     total_seconds = 0.0
     for chapter in manifest.chapters:
-        samples = _chapter_samples(chapter, book_output_dir, pauses)
+        samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
         tmp_wav = chapters_dir / f"ch{chapter.index:03d}.tmp.wav"
         mp3_path = chapters_dir / f"ch{chapter.index:03d}.mp3"
         try:

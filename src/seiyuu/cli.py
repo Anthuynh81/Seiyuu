@@ -837,6 +837,7 @@ def _pause_options(fn):
             ("--pause-paragraph", "Silence between paragraphs."),
             ("--pause-after-heading", "Silence after a chapter heading."),
             ("--pause-scene-break", "Silence at a scene break (replaces the paragraph gap)."),
+            ("--pause-dialogue", "Silence between consecutive dialogue turns (multi-voice)."),
             ("--pause-lead-in", "Silence at the start of each chapter."),
             ("--pause-lead-out", "Silence at the end of each chapter."),
         ]
@@ -855,6 +856,7 @@ def _build_pauses(**overrides):
         paragraph=overrides.get("pause_paragraph") or defaults.paragraph,
         after_heading=overrides.get("pause_after_heading") or defaults.after_heading,
         scene_break=overrides.get("pause_scene_break") or defaults.scene_break,
+        dialogue=overrides.get("pause_dialogue") or defaults.dialogue,
         chapter_lead_in=overrides.get("pause_lead_in") or defaults.chapter_lead_in,
         chapter_lead_out=overrides.get("pause_lead_out") or defaults.chapter_lead_out,
     )

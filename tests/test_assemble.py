@@ -38,12 +38,13 @@ def one_second_wav(book_dir, name) -> str:
     return rel
 
 
-def seg(block_id, kind, wav=None) -> RenderedSegment:
+def seg(block_id, kind, wav=None, voice=None) -> RenderedSegment:
     return RenderedSegment(
         block_id=block_id,
         type=kind,
         wav=wav,
         duration_seconds=1.0 if wav else 0.0,
+        voice_id=voice,
     )
 
 
@@ -107,6 +108,55 @@ def test_no_gap_between_segments_of_one_block(tmp_path) -> None:
     )
     samples = _chapter_samples(chapter, tmp_path, PAUSES)
     parts = [PAUSES.chapter_lead_in, 1.0, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+def test_dialogue_exchange_uses_short_gap(tmp_path) -> None:
+    # narration -> dialogue -> dialogue -> narration: only the dialogue<->dialogue transition
+    # gets the short beat; the others get the paragraph gap.
+    a = one_second_wav(tmp_path, "a")
+    b = one_second_wav(tmp_path, "b")
+    c = one_second_wav(tmp_path, "c")
+    d = one_second_wav(tmp_path, "d")
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="narr"),
+            seg("ch001_b0002", BlockType.PARAGRAPH, b, voice="alice"),
+            seg("ch001_b0003", BlockType.PARAGRAPH, c, voice="bob"),
+            seg("ch001_b0004", BlockType.PARAGRAPH, d, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
+    parts = [
+        PAUSES.chapter_lead_in,
+        1.0,
+        PAUSES.paragraph,  # narration -> dialogue
+        1.0,
+        PAUSES.dialogue,  # dialogue -> dialogue (the short beat)
+        1.0,
+        PAUSES.paragraph,  # dialogue -> narration
+        1.0,
+        PAUSES.chapter_lead_out,
+    ]
+    assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+def test_no_narrator_id_disables_dialogue_pacing(tmp_path) -> None:
+    # single-voice (no narrator id): two dialogue-looking blocks still get the paragraph gap
+    a = one_second_wav(tmp_path, "a")
+    b = one_second_wav(tmp_path, "b")
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="alice"),
+            seg("ch001_b0002", BlockType.PARAGRAPH, b, voice="bob"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)  # narrator_voice_id defaults to None
+    parts = [PAUSES.chapter_lead_in, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
     assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
 
 
