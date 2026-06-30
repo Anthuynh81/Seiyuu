@@ -11,6 +11,7 @@ on block_id transitions, not every segment.
 from pydantic import BaseModel, model_validator
 
 from seiyuu.ingest.models import BlockType
+from seiyuu.validate import ValidationResult
 
 
 class RenderedSegment(BaseModel):
@@ -22,6 +23,9 @@ class RenderedSegment(BaseModel):
     voice_id: str | None = None
     seed: int | None = None
     settings_hash: str | None = None
+    # M4 validation (optional; only LLM-style engines validate, so None for Kokoro/scene_break):
+    validation: ValidationResult | None = None
+    synth_attempts: int = 1  # synth tries this render (>1 means validation forced retries)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> "RenderedSegment":
@@ -63,3 +67,6 @@ class RenderManifest(BaseModel):
     # Multi-voice provenance:
     voices_used: dict[str, VoiceUse] = {}  # voice_id -> engine/model/kind
     assignment: dict | None = None  # VoiceAssignment snapshot
+    # M4 validation: count of validated segments that failed whisper (0 == all clean / none
+    # validated). Per-segment detail lives on RenderedSegment.validation.
+    validation_failures: int = 0

@@ -55,6 +55,14 @@ def test_convert_end_to_end(synthetic_epub, tmp_path, fake_engine) -> None:
     assert len(fake_engine.calls) > 0
 
 
+def test_convert_m4b_flag(synthetic_epub, tmp_path, fake_engine) -> None:
+    result = run_convert(tmp_path, synthetic_epub, "--m4b", "--no-loudness")
+    assert result.exit_code == 0, result.output
+    assert "== master ==" in result.output
+    out_book = find_book_dir(tmp_path / "out")
+    assert next(out_book.glob("*.m4b")).is_file()
+
+
 def test_convert_chapter_subset(synthetic_epub, tmp_path, fake_engine) -> None:
     result = run_convert(tmp_path, synthetic_epub, "--chapter", "3")
     assert result.exit_code == 0, result.output

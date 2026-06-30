@@ -6,8 +6,8 @@ from click.testing import CliRunner
 
 from factories import make_book
 from fake_engine import FakeEngine
-from seiyuu.assemble import AssembleError, PauseProfile, assemble_book
-from seiyuu.assemble.pipeline import _chapter_samples
+from seiyuu.assemble import AssembleError, LoudnessTarget, PauseProfile, assemble_book
+from seiyuu.assemble.pipeline import _chapter_samples, _loudnorm_filter, _measure_loudness
 from seiyuu.cli import main
 from seiyuu.engines import CANONICAL_SAMPLE_RATE, AudioFile
 from seiyuu.ingest.models import BlockType
@@ -38,12 +38,13 @@ def one_second_wav(book_dir, name) -> str:
     return rel
 
 
-def seg(block_id, kind, wav=None) -> RenderedSegment:
+def seg(block_id, kind, wav=None, voice=None) -> RenderedSegment:
     return RenderedSegment(
         block_id=block_id,
         type=kind,
         wav=wav,
         duration_seconds=1.0 if wav else 0.0,
+        voice_id=voice,
     )
 
 
@@ -108,6 +109,94 @@ def test_no_gap_between_segments_of_one_block(tmp_path) -> None:
     samples = _chapter_samples(chapter, tmp_path, PAUSES)
     parts = [PAUSES.chapter_lead_in, 1.0, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
     assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+def test_dialogue_exchange_uses_short_gap(tmp_path) -> None:
+    # narration -> dialogue -> dialogue -> narration: only the dialogue<->dialogue transition
+    # gets the short beat; the others get the paragraph gap.
+    a = one_second_wav(tmp_path, "a")
+    b = one_second_wav(tmp_path, "b")
+    c = one_second_wav(tmp_path, "c")
+    d = one_second_wav(tmp_path, "d")
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="narr"),
+            seg("ch001_b0002", BlockType.PARAGRAPH, b, voice="alice"),
+            seg("ch001_b0003", BlockType.PARAGRAPH, c, voice="bob"),
+            seg("ch001_b0004", BlockType.PARAGRAPH, d, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
+    parts = [
+        PAUSES.chapter_lead_in,
+        1.0,
+        PAUSES.paragraph,  # narration -> dialogue
+        1.0,
+        PAUSES.dialogue,  # dialogue -> dialogue (the short beat)
+        1.0,
+        PAUSES.paragraph,  # dialogue -> narration
+        1.0,
+        PAUSES.chapter_lead_out,
+    ]
+    assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+def test_no_narrator_id_disables_dialogue_pacing(tmp_path) -> None:
+    # single-voice (no narrator id): two dialogue-looking blocks still get the paragraph gap
+    a = one_second_wav(tmp_path, "a")
+    b = one_second_wav(tmp_path, "b")
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="alice"),
+            seg("ch001_b0002", BlockType.PARAGRAPH, b, voice="bob"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)  # narrator_voice_id defaults to None
+    parts = [PAUSES.chapter_lead_in, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+def test_loudnorm_filter_two_pass_includes_measured() -> None:
+    target = LoudnessTarget()
+    assert _loudnorm_filter(target) == "loudnorm=I=-18.0:TP=-1.5:LRA=11.0"
+    measured = {
+        "input_i": "-30.0",
+        "input_tp": "-9.0",
+        "input_lra": "5.0",
+        "input_thresh": "-40.0",
+        "target_offset": "0.5",
+    }
+    f = _loudnorm_filter(target, measured)
+    assert "measured_I=-30.0" in f and "offset=0.5" in f and "linear=true" in f
+
+
+def test_measure_loudness_parses_ffmpeg_json(tmp_path) -> None:
+    import soundfile as sf
+
+    wav = tmp_path / "tone.wav"
+    t = np.arange(CANONICAL_SAMPLE_RATE) / CANONICAL_SAMPLE_RATE
+    sf.write(
+        str(wav),
+        (0.3 * np.sin(2 * np.pi * 220 * t)).astype("float32"),
+        CANONICAL_SAMPLE_RATE,
+        subtype="PCM_16",
+    )
+    measured = _measure_loudness(wav, LoudnessTarget())
+    assert "input_i" in measured and "target_offset" in measured
+
+
+def test_assemble_with_loudness_preserves_duration(rendered_book_dir) -> None:
+    result = assemble_book(rendered_book_dir, loudness=LoudnessTarget())
+    assert [p.name for p in result.mp3_paths] == ["ch001.mp3", "ch002.mp3"]
+    for path in result.mp3_paths:
+        assert path.is_file()
+    # loudnorm changes gain, not length
+    probed = sum(ffprobe_duration(p) for p in result.mp3_paths)
+    assert probed == pytest.approx(result.total_seconds, abs=0.2)
 
 
 def test_assemble_end_to_end(rendered_book_dir) -> None:

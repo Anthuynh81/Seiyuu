@@ -3,8 +3,19 @@
 from seiyuu.assemble.pipeline import (
     AssembleError,
     AssembleResult,
+    LoudnessTarget,
+    MasterResult,
     PauseProfile,
     assemble_book,
+    master_book,
 )
 
-__all__ = ["AssembleError", "AssembleResult", "PauseProfile", "assemble_book"]
+__all__ = [
+    "AssembleError",
+    "AssembleResult",
+    "LoudnessTarget",
+    "MasterResult",
+    "PauseProfile",
+    "assemble_book",
+    "master_book",
+]

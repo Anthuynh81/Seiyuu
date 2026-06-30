@@ -19,6 +19,7 @@ from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
+from seiyuu.validate import ValidationResult, Validator
 from seiyuu.voices import (
     VoiceAssignment,
     VoiceKind,
@@ -41,10 +42,56 @@ class RenderResult:
     manifest_path: Path
     synthesized: int
     cache_hits: int
+    validation_failures: int = 0
 
     @property
     def total_audio_seconds(self) -> float:
         return sum(s.duration_seconds for c in self.manifest.chapters for s in c.segments)
+
+
+def _synthesize_validated(
+    engine: TTSEngine,
+    text: str,
+    voice_arg: str,
+    settings: dict[str, Any],
+    seed: int | None,
+    *,
+    validator: Validator | None,
+    max_retries: int,
+    cache_dir: Path,
+) -> tuple[Any, ValidationResult | None, int]:
+    """Synthesize one segment, returning (audio, validation, attempts).
+
+    Deterministic engines (or when no validator is supplied) synthesize once and skip
+    validation. LLM-style engines (`requires_validation`) transcribe each attempt and, on a
+    failure, retry with a fresh seed up to `max_retries` more times, keeping the best-scoring
+    attempt. A persistent failure is returned (not raised) so the caller can flag it for review
+    rather than silently ship — or drop — the segment.
+    """
+    base = dict(settings)
+    if not engine.requires_validation or validator is None:
+        synth = {**base, **({"seed": seed} if seed is not None else {})}
+        return engine.synthesize(text, voice_arg, synth), None, 1
+
+    tmp = Path(cache_dir) / "_validate.tmp.wav"
+    best_audio: Any = None
+    best_result: ValidationResult | None = None
+    attempts = 0
+    try:
+        for i in range(max_retries + 1):
+            attempts = i + 1
+            attempt_seed = seed if (i == 0 or seed is None) else seed + i
+            synth = {**base, **({"seed": attempt_seed} if attempt_seed is not None else {})}
+            audio = engine.synthesize(text, voice_arg, synth)
+            audio.save(tmp)
+            result = validator.validate(tmp, text)
+            if best_result is None or result.score > best_result.score:
+                best_audio, best_result = audio, result
+            if result.ok:
+                break
+    finally:
+        tmp.unlink(missing_ok=True)
+    return best_audio, best_result, attempts
 
 
 def render_book(
@@ -57,6 +104,8 @@ def render_book(
     seed: int | None = None,
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
+    validator: Validator | None = None,
+    validation_max_retries: int = 2,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice."""
     settings = settings or {}
@@ -74,7 +123,7 @@ def render_book(
 
     rendered_chapters: list[RenderedChapter] = []
     profile = profile_for(engine.engine_id)
-    synthesized = cache_hits = 0
+    synthesized = cache_hits = validation_failures = 0
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
             continue
@@ -97,11 +146,15 @@ def render_book(
             if wav_path is not None:
                 cache_hits += 1
                 duration = sf.info(str(wav_path)).duration
+                validation = cache.get_validation(key)
+                attempts = 1
             else:
                 try:
-                    audio = engine.synthesize(
-                        text, voice_id, settings | ({"seed": seed} if seed is not None else {})
-                    )
+                    audio, validation, attempts = _synthesize_validated(
+                        engine, text, voice_id, settings, seed,
+                        validator=validator, max_retries=validation_max_retries,
+                        cache_dir=cache.cache_dir,
+                    )  # fmt: skip
                 except Exception as exc:
                     raise RenderError(
                         f"synthesis failed: book={book.book_meta.book_id} "
@@ -109,8 +162,16 @@ def render_book(
                         f"engine={engine.engine_id} voice={voice_id}: {exc}"
                     ) from exc
                 wav_path = cache.put(key, audio)
+                if validation is not None:
+                    cache.put_validation(key, validation)
                 synthesized += 1
                 duration = audio.duration_seconds
+            if validation is not None and not validation.ok:
+                validation_failures += 1
+                say(
+                    f"  ! validation failed (score {validation.score}) block={block.id} "
+                    f"after {attempts} attempt(s) — flagged for review"
+                )
             segments.append(
                 RenderedSegment(
                     block_id=block.id,
@@ -120,6 +181,8 @@ def render_book(
                     voice_id=voice_id,
                     seed=seed,
                     settings_hash=key.settings_hash,
+                    validation=validation,
+                    synth_attempts=attempts,
                 )
             )
         rendered_chapters.append(RenderedChapter(index=ci, title=chapter.title, segments=segments))
@@ -133,6 +196,7 @@ def render_book(
         settings=settings,
         seed=seed,
         chapters=rendered_chapters,
+        validation_failures=validation_failures,
     )
     manifest_path = book_output_dir / MANIFEST_NAME
     manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
@@ -141,6 +205,7 @@ def render_book(
         manifest_path=manifest_path,
         synthesized=synthesized,
         cache_hits=cache_hits,
+        validation_failures=validation_failures,
     )
 
 
@@ -154,6 +219,8 @@ def render_book_multivoice(
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
     gpu=None,
+    validator: Validator | None = None,
+    validation_max_retries: int = 2,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -187,7 +254,7 @@ def render_book_multivoice(
         return metas[voice_id]
 
     rendered_chapters: list[RenderedChapter] = []
-    synthesized = cache_hits = 0
+    synthesized = cache_hits = validation_failures = 0
     try:
         for ci, chapter in enumerate(book.chapters, start=1):
             if (wanted and ci not in wanted) or ci not in attributed:
@@ -225,19 +292,32 @@ def render_book_multivoice(
                     if wav_path is not None:
                         cache_hits += 1
                         duration = sf.info(str(wav_path)).duration
+                        validation = cache.get_validation(key)
+                        attempts = 1
                     else:
                         try:
                             with gpu.acquire(engine, engine.engine_id):
-                                synth_settings = {**settings, "seed": meta.seed}
-                                audio = engine.synthesize(text, engine_voice, synth_settings)
+                                audio, validation, attempts = _synthesize_validated(
+                                    engine, text, engine_voice, settings, meta.seed,
+                                    validator=validator, max_retries=validation_max_retries,
+                                    cache_dir=cache.cache_dir,
+                                )  # fmt: skip
                         except Exception as exc:
                             raise RenderError(
                                 f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
                                 f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
                             ) from exc
                         wav_path = cache.put(key, audio)
+                        if validation is not None:
+                            cache.put_validation(key, validation)
                         synthesized += 1
                         duration = audio.duration_seconds
+                    if validation is not None and not validation.ok:
+                        validation_failures += 1
+                        say(
+                            f"  ! validation failed (score {validation.score}) block={block.id} "
+                            f"voice={voice_id} after {attempts} attempt(s) — flagged for review"
+                        )
                     voices_used.setdefault(
                         voice_id,
                         VoiceUse(
@@ -255,6 +335,8 @@ def render_book_multivoice(
                             voice_id=voice_id,
                             seed=meta.seed,
                             settings_hash=key.settings_hash,
+                            validation=validation,
+                            synth_attempts=attempts,
                         )
                     )
             rendered_chapters.append(
@@ -269,6 +351,7 @@ def render_book_multivoice(
         chapters=rendered_chapters,
         voices_used=voices_used,
         assignment=assignment.model_dump(mode="json"),
+        validation_failures=validation_failures,
     )
     manifest_path = book_output_dir / MANIFEST_NAME
     manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
@@ -277,4 +360,5 @@ def render_book_multivoice(
         manifest_path=manifest_path,
         synthesized=synthesized,
         cache_hits=cache_hits,
+        validation_failures=validation_failures,
     )

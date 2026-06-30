@@ -258,8 +258,23 @@ regenerable from reference.wav.
      (d) Multi-voice render synthesizes in reading order; mixing engines (kokoro↔chatterbox)
      within a chapter thrashes the single GPU — voice-grouped synthesis is a deferred
      optimization (output is already correct, only wall-clock is affected).
-4. **M4 — Validation + Assembly:** whisper validation loop (CPU), pause logic,
-   loudness normalization, .m4b with chapters, duration control.
+4. **M4 — Validation + Assembly:** ✅ **done.** Whisper validation stage (`validate/`,
+   faster-whisper CPU small/int8, folded fuzzy match) wired into the render loop for
+   LLM-style engines only (`requires_validation`; retry-with-seed up to N, keep best, flag
+   persistent failures, never silently ship/drop). Verdicts persist via a cache sidecar and
+   ride the manifest (per-segment `validation` + `synth_attempts`, manifest
+   `validation_failures`). Assembly: dialogue-aware pauses (narrator id from the assignment
+   distinguishes dialogue from narration), two-pass EBU R128 loudnorm (-18 LUFS). New
+   `master` stage builds a chaptered `.m4b` (AAC, single 24k→44.1k upsample, ffmpeg ipod
+   muxer, chapter markers + optional cover) streaming one chapter at a time. Duration:
+   word-count runtime estimate + optional `--target-minutes` via clamped `atempo` (0.85–1.3,
+   chapter marks rescaled). CLI: `validate`, `master`, `estimate`, `--m4b` on convert, and
+   loudness/duration/pause flags.
+   - **Design notes:** validation runs on CPU concurrently with a GPU TTS model (no
+     contention); the Validator loads lazily so Kokoro-only renders never touch whisper. The
+     FROZEN SegmentKey is unchanged — validation retries are an internal render detail; the
+     best attempt is cached under the pinned-seed key. Target-duration tempo is applied only
+     in `master` (the single-file audiobook), where the whole-book duration is known.
 5. **M5 — Cloud TTS:** ElevenLabs IVC adapter (slot-aware), cost gate,
    draft-vs-final workflow. Fish Audio adapter optional.
 6. **M6 — Frontend:** FastAPI API + React UI.
