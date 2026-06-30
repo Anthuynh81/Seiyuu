@@ -30,6 +30,10 @@ class SynthesisError(Exception):
 
 class TTSEngine(ABC):
     engine_id: str
+    # LLM-style engines (autoregressive: Chatterbox, Fish) can hallucinate/drop/repeat words,
+    # so their output must pass whisper validation before assembly. Deterministic engines
+    # (Kokoro) set this False and the render loop skips validation for them.
+    requires_validation: bool = False
 
     @property
     @abstractmethod

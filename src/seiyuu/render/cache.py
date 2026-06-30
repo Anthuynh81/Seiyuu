@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from seiyuu.engines import AudioFile
+from seiyuu.validate import ValidationResult
 
 
 def _sha256(text: str) -> str:
@@ -72,4 +73,20 @@ class SegmentCache:
         path = audio.save(self.path_for(key))
         sidecar = path.with_suffix(".json")
         sidecar.write_text(key.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def validation_path(self, key: SegmentKey) -> Path:
+        return self.cache_dir / f"{key.key_hash}.validation.json"
+
+    def get_validation(self, key: SegmentKey) -> ValidationResult | None:
+        """The cached whisper verdict, so a cache hit keeps its validation data in the manifest."""
+        path = self.validation_path(key)
+        if not path.is_file():
+            return None
+        return ValidationResult.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def put_validation(self, key: SegmentKey, result: ValidationResult) -> Path:
+        path = self.validation_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
         return path

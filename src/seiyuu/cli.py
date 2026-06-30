@@ -180,6 +180,8 @@ def render(
             seed=seed,
             chapters=chapter_indices,
             progress=click.echo,
+            validator=_build_validator(cfg),
+            validation_max_retries=cfg.validation_max_retries,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -189,6 +191,8 @@ def render(
         f"done: {result.synthesized} segments synthesized, "
         f"{result.cache_hits} from cache, {minutes:.1f} min of audio"
     )
+    if result.validation_failures:
+        click.echo(f"  {result.validation_failures} segment(s) failed whisper validation")
     click.echo(f"manifest: {result.manifest_path}")
 
 
@@ -206,6 +210,18 @@ def _build_provider(cfg, provider_id: str, model: str, prompt_version: str):
     elif provider_id == "anthropic":
         kwargs["api_key"] = cfg.anthropic_api_key
     return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)
+
+
+def _build_validator(cfg):
+    """A whisper validator from settings; loads lazily, so Kokoro-only renders never touch it."""
+    from seiyuu.validate import Validator
+
+    return Validator(
+        model_size=cfg.validation_model_size,
+        device=cfg.whisper_device,
+        compute_type=cfg.validation_compute_type,
+        min_ratio=cfg.validation_min_ratio,
+    )
 
 
 def _run_attribution(
@@ -339,6 +355,8 @@ def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_
             out_book_dir,
             chapters=chapter_indices,
             progress=click.echo,
+            validator=_build_validator(cfg),
+            validation_max_retries=cfg.validation_max_retries,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -348,6 +366,8 @@ def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_
         f"done: {result.synthesized} segments synthesized, {result.cache_hits} from cache, "
         f"{len(result.manifest.voices_used)} voices, {minutes:.1f} min of audio"
     )
+    if result.validation_failures:
+        click.echo(f"  {result.validation_failures} segment(s) failed whisper validation")
     click.echo(f"manifest: {result.manifest_path}")
     return result
 
@@ -998,12 +1018,15 @@ def convert(
                 seed=seed,
                 chapters=chapter_indices,
                 progress=click.echo,
+                validator=_build_validator(cfg),
+                validation_max_retries=cfg.validation_max_retries,
             )
         except (RenderError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo(
-            f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache"
-        )
+        msg = f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache"
+        if render_result.validation_failures:
+            msg += f", {render_result.validation_failures} failed validation"
+        click.echo(msg)
 
     click.echo("== assemble ==")
     try:
