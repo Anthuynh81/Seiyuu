@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"  # faster-whisper stays on CPU (M4) so it never contends
     gpu_unload_poll_timeout: float = 30.0  # wait for Ollama to free VRAM before loading TTS
 
+    # Whisper validation (M4). LLM-style TTS (Chatterbox/Fish) must pass before assembly;
+    # deterministic engines (Kokoro) skip it. CPU small/int8 so it never contends with TTS.
+    validation_model_size: str = "small"
+    validation_compute_type: str = "int8"
+    validation_min_ratio: float = 0.85  # folded fuzzy similarity below which a segment fails
+    validation_max_retries: int = 2  # re-synth attempts (new seed) before flagging for review
+
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None
