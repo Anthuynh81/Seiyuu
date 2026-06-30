@@ -239,9 +239,25 @@ regenerable from reference.wav.
      are not emitted by the local span path (type is derived from quotes: quoted→dialogue,
      prose→narration); the `Segment` schema still supports `thought` for a future
      markup-aware or cloud pass.
-3. **M3 — Voices:** voice library + Chatterbox cloning (upload→curate→audition CLI),
-   conds caching, seeds, Kokoro blends, text normalization stage. First multi-voice
-   cloned render. GPU resource manager (LLM↔TTS handoff) lands here.
+3. **M3 — Voices:** ✅ **done.** Text normalization stage (pure, fixture-tested; per-engine
+   profiles), GPU resource manager (one heavy model resident at a time, LLM↔TTS handoff),
+   voice library (`voices/{voice_id}/meta.json`, one model discriminated by `kind`:
+   preset/blend/cloned), Kokoro weighted-blend synthesis + deterministic auto-blend recipes,
+   Chatterbox cloning adapter (conds `.pt` cache keyed by engine+model_version, per-voice
+   pinned seed via `torch.manual_seed` before every sample), and the multi-voice render path
+   (`render_book_multivoice`) feeding an additive manifest (per-segment voice_id/seed/
+   settings_hash + `voices_used` provenance + assignment snapshot). CLI: `seiyuu voice
+   add-preset|blend|list|audition`, `seiyuu assign` (draft auto-assignment), and
+   `--multivoice` on `render`/`convert`.
+   - **Design notes (carry forward):** (a) the FROZEN `SegmentKey` is unchanged — blend
+     recipes are canonicalized (normalized, rounded, sorted) into settings so the same
+     intended voice always hits the same cache entry. (b) Assembly inserts paragraph pauses
+     on `block_id` transitions, not per segment, so a multi-voice paragraph reads as one
+     paragraph; segments are emitted in reading order (cache key makes synthesis order-
+     independent). (c) Cloned voices require `consent_attested=True` to be saved OR rendered.
+     (d) Multi-voice render synthesizes in reading order; mixing engines (kokoro↔chatterbox)
+     within a chapter thrashes the single GPU — voice-grouped synthesis is a deferred
+     optimization (output is already correct, only wall-clock is affected).
 4. **M4 — Validation + Assembly:** whisper validation loop (CPU), pause logic,
    loudness normalization, .m4b with chapters, duration control.
 5. **M5 — Cloud TTS:** ElevenLabs IVC adapter (slot-aware), cost gate,
@@ -265,8 +281,10 @@ regenerable from reference.wav.
 - Thoughts/internal monologue: character voice, narrator, or softened variant?
   *M2 update:* the `Segment` schema keeps a `thought` type, but the local span pipeline
   derives type from quotes only (quoted→dialogue, prose→narration), so it does not emit
-  `thought` today. Revisit with italics/markup-aware splitting or a cloud pass; the
-  voice-rendering choice is still deferred to M3 voice assignment.
+  `thought` today. Revisit with italics/markup-aware splitting or a cloud pass. *M3 update:*
+  the rendering choice is now wired — `VoiceAssignment.thought_voice_id` routes `thought`
+  segments to a dedicated voice, falling back to the speaker's own voice when unset
+  (`voices/assignment.py::resolve_voice`); it's inert until the pipeline emits `thought`.
 - Hybrid escalation defaults: confidence threshold, max local retries before
   escalating.
 - Which local model wins on attribution quality — *M2 finding:* qwen3.5:9b is a reasoning
