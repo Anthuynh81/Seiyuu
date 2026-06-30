@@ -7,6 +7,7 @@ these same normalized chapters. ffmpeg (on PATH) is the only way audio container
 """
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -57,6 +58,13 @@ class AssembleError(Exception):
 class AssembleResult:
     mp3_paths: list[Path]
     total_seconds: float
+
+
+@dataclass
+class MasterResult:
+    m4b_path: Path
+    total_seconds: float
+    chapters: int
 
 
 def _silence(seconds: float) -> np.ndarray:
@@ -218,3 +226,121 @@ def assemble_book(
         mp3_paths.append(mp3_path)
         say(f"chapter {chapter.index}: {mp3_path.name} ({seconds / 60:.1f} min)")
     return AssembleResult(mp3_paths=mp3_paths, total_seconds=total_seconds)
+
+
+def _escape_meta(value: str) -> str:
+    """Escape the ffmetadata special characters (= ; # \\ and newline)."""
+    return re.sub(r"([=;#\\\n])", r"\\\1", value)
+
+
+def _ffmetadata(title: str | None, chapters: list[tuple[str, int, int]]) -> str:
+    """An ffmpeg metadata file: a global title plus one [CHAPTER] block per chapter (ms)."""
+    lines = [";FFMETADATA1"]
+    if title:
+        lines.append(f"title={_escape_meta(title)}")
+    for chap_title, start_ms, end_ms in chapters:
+        lines += [
+            "",
+            "[CHAPTER]",
+            "TIMEBASE=1/1000",
+            f"START={start_ms}",
+            f"END={end_ms}",
+            f"title={_escape_meta(chap_title)}",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _encode_m4b(
+    book_wav: Path,
+    ffmeta: Path,
+    m4b_path: Path,
+    *,
+    af: str | None,
+    cover: Path | None,
+    bitrate: str,
+    sample_rate: int,
+) -> None:
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    cmd += ["-i", str(book_wav), "-i", str(ffmeta)]
+    if cover:
+        cmd += ["-i", str(cover)]
+    cmd += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
+    if cover:
+        cmd += ["-map", "2:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    if af:
+        cmd += ["-af", af]
+    # -f ipod: the MP4/iTunes audiobook muxer (chapters + cover); .m4b isn't auto-detected.
+    cmd += ["-c:a", "aac", "-b:a", bitrate, "-ar", str(sample_rate), "-f", "ipod", str(m4b_path)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise AssembleError(f"ffmpeg failed for {m4b_path.name}: {proc.stderr.strip()}")
+
+
+def master_book(
+    book_output_dir: Path,
+    *,
+    pauses: PauseProfile | None = None,
+    loudness: LoudnessTarget | None = None,
+    cover: Path | None = None,
+    bitrate: str = "64k",
+    sample_rate: int = 44_100,
+    progress: Callable[[str], None] | None = None,
+) -> MasterResult:
+    """Build one chaptered .m4b (AAC) audiobook from the render manifest.
+
+    Chapters are streamed into a single working WAV (peak memory = one chapter, so full books
+    fit), loudness-normalized over the whole book when `loudness` is given, then encoded to AAC
+    at `sample_rate` (the single 24kHz→44.1kHz upsample) with ffmpeg chapter markers and an
+    optional cover image.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise AssembleError("ffmpeg not found on PATH; install it and retry")
+    book_output_dir = Path(book_output_dir)
+    manifest_path = book_output_dir / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise AssembleError(f"no render manifest at {manifest_path}; run `seiyuu render` first")
+    manifest = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+
+    pauses = pauses or PauseProfile()
+    say = progress or (lambda _msg: None)
+    narrator_voice_id = (manifest.assignment or {}).get("narrator_voice_id")
+
+    work = book_output_dir / "master"
+    work.mkdir(parents=True, exist_ok=True)
+    book_wav = work / "book.wav"
+    ffmeta = work / "chapters.ffmeta"
+    m4b_path = book_output_dir / f"{manifest.book_id}.m4b"
+
+    chapter_marks: list[tuple[str, int, int]] = []
+    cursor_ms = 0
+    with sf.SoundFile(
+        str(book_wav), mode="w", samplerate=CANONICAL_SAMPLE_RATE, channels=1, subtype="PCM_16"
+    ) as out:
+        for chapter in manifest.chapters:
+            samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
+            out.write(samples)
+            dur_ms = round(len(samples) / CANONICAL_SAMPLE_RATE * 1000)
+            chapter_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))
+            cursor_ms += dur_ms
+            say(f"chapter {chapter.index}: {chapter.title} (+{dur_ms / 1000 / 60:.1f} min)")
+
+    ffmeta.write_text(
+        _ffmetadata(manifest.book_title or manifest.book_id, chapter_marks), encoding="utf-8"
+    )
+    try:
+        af = None
+        if loudness:
+            say("loudness: measuring...")
+            af = _loudnorm_filter(loudness, _measure_loudness(book_wav, loudness))
+        say(f"encoding {m4b_path.name}...")
+        _encode_m4b(
+            book_wav, ffmeta, m4b_path, af=af, cover=cover, bitrate=bitrate, sample_rate=sample_rate
+        )
+    finally:
+        book_wav.unlink(missing_ok=True)
+        ffmeta.unlink(missing_ok=True)
+        if not any(work.iterdir()):
+            work.rmdir()
+    return MasterResult(
+        m4b_path=m4b_path, total_seconds=cursor_ms / 1000, chapters=len(chapter_marks)
+    )
