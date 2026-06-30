@@ -9,6 +9,7 @@ from seiyuu.engines.base import EngineVoice, SynthesisError, TTSEngine
 # importing seiyuu.engines never pulls in an engine SDK.
 _ENGINES = {
     "kokoro": "seiyuu.engines.kokoro_engine:KokoroEngine",
+    "chatterbox": "seiyuu.engines.chatterbox_engine:ChatterboxEngine",
 }
 
 
