@@ -1,11 +1,12 @@
-"""Assembly stage (M1 minimal): manifest + cached segments → per-chapter MP3s.
+"""Assembly stage: manifest + cached segments → per-chapter MP3s.
 
-Pause logic is the M1 subset (scene_break → long, paragraph → medium, extra
-room after headings). Dialogue-aware pauses, loudness normalization, and the
-chaptered .m4b arrive in M4. ffmpeg (on PATH) is the only way audio containers
-are touched.
+Pause logic: scene_break → long, after-heading → extra, dialogue↔dialogue → short beat,
+otherwise the paragraph gap. Optional EBU R128 loudness normalization (two-pass loudnorm)
+brings each chapter to a target LUFS. The chaptered .m4b is built by the `master` stage from
+these same normalized chapters. ffmpeg (on PATH) is the only way audio containers are touched.
 """
 
+import json
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -36,6 +37,16 @@ class PauseProfile:
     dialogue: float = 0.35
     chapter_lead_in: float = 0.5
     chapter_lead_out: float = 1.0
+
+
+@dataclass(frozen=True)
+class LoudnessTarget:
+    """EBU R128 loudnorm targets. -18 LUFS integrated suits audiobooks (Audible guidance is
+    -18 to -20); TP is the true-peak ceiling (dBTP), LRA the allowed loudness range."""
+
+    i: float = -18.0
+    tp: float = -1.5
+    lra: float = 11.0
 
 
 class AssembleError(Exception):
@@ -113,10 +124,42 @@ def _chapter_samples(
     return np.concatenate(parts)
 
 
-def _encode_mp3(wav_path: Path, mp3_path: Path, title: str, track: int, album: str) -> None:
+def _loudnorm_filter(target: LoudnessTarget, measured: dict | None = None) -> str:
+    """The ffmpeg `loudnorm` filter string. Pass 1 (measured=None) just measures; pass 2 feeds
+    the measured values back with linear=true for a non-pumping, single correction."""
+    base = f"loudnorm=I={target.i}:TP={target.tp}:LRA={target.lra}"
+    if measured is None:
+        return base
+    return (
+        f"{base}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+        f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+        f":offset={measured['target_offset']}:linear=true"
+    )
+
+
+def _measure_loudness(wav_path: Path, target: LoudnessTarget) -> dict:
+    """Pass 1: run loudnorm in analysis mode and parse the JSON it prints to stderr."""
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(wav_path),
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(wav_path),
+        "-af", f"{_loudnorm_filter(target)}:print_format=json",
+        "-f", "null", "-",
+    ]  # fmt: skip
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    start, end = proc.stderr.rfind("{"), proc.stderr.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise AssembleError(
+            f"loudness measurement failed for {wav_path.name}: {proc.stderr.strip()[-400:]}"
+        )
+    return json.loads(proc.stderr[start : end + 1])
+
+
+def _encode_mp3(
+    wav_path: Path, mp3_path: Path, title: str, track: int, album: str, af: str | None = None
+) -> None:
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(wav_path)]
+    if af:
+        cmd += ["-af", af]
+    cmd += [
         "-codec:a", "libmp3lame", "-q:a", "4",
         "-metadata", f"title={title}",
         "-metadata", f"track={track}",
@@ -132,9 +175,14 @@ def assemble_book(
     book_output_dir: Path,
     *,
     pauses: PauseProfile | None = None,
+    loudness: LoudnessTarget | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> AssembleResult:
-    """Build chapters/ch{NNN}.mp3 for every chapter in the render manifest."""
+    """Build chapters/ch{NNN}.mp3 for every chapter in the render manifest.
+
+    When `loudness` is given, each chapter is two-pass loudnorm'd to that target before
+    encoding (None = leave levels untouched).
+    """
     if shutil.which("ffmpeg") is None:
         raise AssembleError("ffmpeg not found on PATH; install it and retry")
     book_output_dir = Path(book_output_dir)
@@ -159,7 +207,10 @@ def assemble_book(
         mp3_path = chapters_dir / f"ch{chapter.index:03d}.mp3"
         try:
             sf.write(str(tmp_wav), samples, CANONICAL_SAMPLE_RATE, subtype="PCM_16")
-            _encode_mp3(tmp_wav, mp3_path, chapter.title, chapter.index, album)
+            af = None
+            if loudness:
+                af = _loudnorm_filter(loudness, _measure_loudness(tmp_wav, loudness))
+            _encode_mp3(tmp_wav, mp3_path, chapter.title, chapter.index, album, af=af)
         finally:
             tmp_wav.unlink(missing_ok=True)
         seconds = len(samples) / CANONICAL_SAMPLE_RATE

@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     validation_min_ratio: float = 0.85  # folded fuzzy similarity below which a segment fails
     validation_max_retries: int = 2  # re-synth attempts (new seed) before flagging for review
 
+    # Assembly loudness normalization (M4). EBU R128 loudnorm; -18 LUFS suits audiobooks.
+    loudness_enabled: bool = True
+    loudness_target_lufs: float = -18.0
+    loudness_true_peak: float = -1.5
+    loudness_range: float = 11.0
+
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None

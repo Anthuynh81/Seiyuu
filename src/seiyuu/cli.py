@@ -862,6 +862,34 @@ def _build_pauses(**overrides):
     )
 
 
+def _loudness_options(fn):
+    """Loudness-normalization flags shared by `assemble` and `convert`."""
+    fn = click.option(
+        "--target-lufs", type=float, default=None, help="Integrated loudness target (LUFS)."
+    )(fn)
+    fn = click.option(
+        "--loudness/--no-loudness",
+        "loudness",
+        default=None,
+        help="Loudness-normalize chapters to the target LUFS (default: on).",
+    )(fn)
+    return fn
+
+
+def _build_loudness(cfg, **overrides):
+    from seiyuu.assemble import LoudnessTarget
+
+    enabled = cfg.loudness_enabled if overrides.get("loudness") is None else overrides["loudness"]
+    if not enabled:
+        return None
+    target = overrides.get("target_lufs")
+    return LoudnessTarget(
+        i=cfg.loudness_target_lufs if target is None else target,
+        tp=cfg.loudness_true_peak,
+        lra=cfg.loudness_range,
+    )
+
+
 @main.command()
 @click.argument("book_id")
 @click.option(
@@ -871,7 +899,8 @@ def _build_pauses(**overrides):
     help="Render output root (default: settings.output_dir).",
 )
 @_pause_options
-def assemble(book_id: str, output_dir: Path | None, **pause_overrides) -> None:
+@_loudness_options
+def assemble(book_id: str, output_dir: Path | None, **overrides) -> None:
     """Assemble rendered segments into per-chapter MP3s (output/{book}/chapters/)."""
     from seiyuu.assemble import AssembleError, assemble_book
     from seiyuu.render import MANIFEST_NAME
@@ -883,7 +912,10 @@ def assemble(book_id: str, output_dir: Path | None, **pause_overrides) -> None:
     )
     try:
         result = assemble_book(
-            book_dir, pauses=_build_pauses(**pause_overrides), progress=click.echo
+            book_dir,
+            pauses=_build_pauses(**overrides),
+            loudness=_build_loudness(cfg, **overrides),
+            progress=click.echo,
         )
     except AssembleError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -941,6 +973,7 @@ FULL_RENDER_CONFIRM_BLOCKS = 300
 )
 @_voices_dir_option
 @_pause_options
+@_loudness_options
 def convert(
     epub_path: Path,
     engine_id: str | None,
@@ -1033,7 +1066,10 @@ def convert(
     click.echo("== assemble ==")
     try:
         assemble_result = assemble_book(
-            book_dir, pauses=_build_pauses(**pause_overrides), progress=click.echo
+            book_dir,
+            pauses=_build_pauses(**pause_overrides),
+            loudness=_build_loudness(cfg, **pause_overrides),
+            progress=click.echo,
         )
     except AssembleError as exc:
         raise click.ClickException(str(exc)) from exc
