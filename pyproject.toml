@@ -22,6 +22,7 @@ dependencies = [
     "click>=8.4",
     "soundfile>=0.14",
     "num2words>=0.5.14",
+    "elevenlabs>=2.55.0",
 ]
 
 [project.scripts]
