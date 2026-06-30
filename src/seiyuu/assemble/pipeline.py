@@ -63,8 +63,9 @@ class AssembleResult:
 @dataclass
 class MasterResult:
     m4b_path: Path
-    total_seconds: float
+    total_seconds: float  # final runtime after any target-duration tempo change
     chapters: int
+    tempo: float = 1.0  # atempo applied (1.0 == none)
 
 
 def _silence(seconds: float) -> np.ndarray:
@@ -284,6 +285,8 @@ def master_book(
     cover: Path | None = None,
     bitrate: str = "64k",
     sample_rate: int = 44_100,
+    target_seconds: float | None = None,
+    tempo_bounds: tuple[float, float] = (0.85, 1.3),
     progress: Callable[[str], None] | None = None,
 ) -> MasterResult:
     """Build one chaptered .m4b (AAC) audiobook from the render manifest.
@@ -291,8 +294,11 @@ def master_book(
     Chapters are streamed into a single working WAV (peak memory = one chapter, so full books
     fit), loudness-normalized over the whole book when `loudness` is given, then encoded to AAC
     at `sample_rate` (the single 24kHz→44.1kHz upsample) with ffmpeg chapter markers and an
-    optional cover image.
+    optional cover image. When `target_seconds` is set, a single clamped `atempo` nudges the
+    whole book toward that runtime and the chapter markers are scaled to match.
     """
+    from seiyuu.duration import tempo_for_target
+
     if shutil.which("ffmpeg") is None:
         raise AssembleError("ffmpeg not found on PATH; install it and retry")
     book_output_dir = Path(book_output_dir)
@@ -311,7 +317,7 @@ def master_book(
     ffmeta = work / "chapters.ffmeta"
     m4b_path = book_output_dir / f"{manifest.book_id}.m4b"
 
-    chapter_marks: list[tuple[str, int, int]] = []
+    raw_marks: list[tuple[str, int, int]] = []
     cursor_ms = 0
     with sf.SoundFile(
         str(book_wav), mode="w", samplerate=CANONICAL_SAMPLE_RATE, channels=1, subtype="PCM_16"
@@ -320,21 +326,34 @@ def master_book(
             samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
             out.write(samples)
             dur_ms = round(len(samples) / CANONICAL_SAMPLE_RATE * 1000)
-            chapter_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))
+            raw_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))
             cursor_ms += dur_ms
             say(f"chapter {chapter.index}: {chapter.title} (+{dur_ms / 1000 / 60:.1f} min)")
 
-    ffmeta.write_text(
-        _ffmetadata(manifest.book_title or manifest.book_id, chapter_marks), encoding="utf-8"
-    )
+    # target-duration: one clamped atempo over the whole book; scale chapter marks to match.
+    tempo = 1.0
+    if target_seconds:
+        lo, hi = tempo_bounds
+        tempo = tempo_for_target(cursor_ms / 1000, target_seconds, lo=lo, hi=hi)
+        say(f"target-duration: atempo={tempo:.4f}")
+    marks = [(t, round(s / tempo), round(e / tempo)) for t, s, e in raw_marks]
+    ffmeta.write_text(_ffmetadata(manifest.book_title or manifest.book_id, marks), encoding="utf-8")
     try:
-        af = None
+        filters: list[str] = []
         if loudness:
             say("loudness: measuring...")
-            af = _loudnorm_filter(loudness, _measure_loudness(book_wav, loudness))
+            filters.append(_loudnorm_filter(loudness, _measure_loudness(book_wav, loudness)))
+        if abs(tempo - 1.0) > 1e-3:
+            filters.append(f"atempo={tempo:.4f}")
         say(f"encoding {m4b_path.name}...")
         _encode_m4b(
-            book_wav, ffmeta, m4b_path, af=af, cover=cover, bitrate=bitrate, sample_rate=sample_rate
+            book_wav,
+            ffmeta,
+            m4b_path,
+            af=",".join(filters) or None,
+            cover=cover,
+            bitrate=bitrate,
+            sample_rate=sample_rate,
         )
     finally:
         book_wav.unlink(missing_ok=True)
@@ -342,5 +361,8 @@ def master_book(
         if not any(work.iterdir()):
             work.rmdir()
     return MasterResult(
-        m4b_path=m4b_path, total_seconds=cursor_ms / 1000, chapters=len(chapter_marks)
+        m4b_path=m4b_path,
+        total_seconds=cursor_ms / 1000 / tempo,
+        chapters=len(raw_marks),
+        tempo=tempo,
     )

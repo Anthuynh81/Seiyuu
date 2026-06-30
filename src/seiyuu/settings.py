@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     loudness_true_peak: float = -1.5
     loudness_range: float = 11.0
 
+    # Duration (M4): narration pace for runtime estimates; atempo clamp for target-duration.
+    narration_wpm: float = 150.0
+    tempo_min: float = 0.85
+    tempo_max: float = 1.3
+
     # Cloud keys: optional until their providers are explicitly enabled.
     anthropic_api_key: str | None = None
     elevenlabs_api_key: str | None = None

@@ -54,6 +54,19 @@ def test_master_audio_is_aac_44100(book_dir):
     assert audio["sample_rate"] == "44100"
 
 
+def test_master_target_duration_applies_tempo(book_dir):
+    natural = master_book(book_dir, loudness=None)
+    target = natural.total_seconds * 0.9  # ask for 10% shorter -> speed up ~1.11x
+    sped = master_book(book_dir, loudness=None, target_seconds=target)
+    assert sped.tempo > 1.0
+    assert sped.total_seconds < natural.total_seconds
+    actual = _ffprobe(sped.m4b_path, "-show_format")["format"]["duration"]
+    assert abs(float(actual) - target) < 0.3  # output runtime lands near the target
+    # chapter markers were scaled to the sped-up timeline
+    last_end = int(_ffprobe(sped.m4b_path, "-show_chapters")["chapters"][-1]["end"])
+    assert abs(last_end / 1000 - target) < 0.3
+
+
 def test_master_embeds_cover(book_dir, tmp_path):
     cover = tmp_path / "cover.jpg"
     subprocess.run(

@@ -940,10 +940,21 @@ def assemble(book_id: str, output_dir: Path | None, **overrides) -> None:
     help="Cover image (jpg/png) embedded in the .m4b.",
 )
 @click.option("--bitrate", default="64k", show_default=True, help="AAC bitrate.")
+@click.option(
+    "--target-minutes",
+    type=float,
+    default=None,
+    help="Nudge total runtime toward this many minutes (clamped tempo).",
+)
 @_pause_options
 @_loudness_options
 def master(
-    book_id: str, output_dir: Path | None, cover: Path | None, bitrate: str, **overrides
+    book_id: str,
+    output_dir: Path | None,
+    cover: Path | None,
+    bitrate: str,
+    target_minutes: float | None,
+    **overrides,
 ) -> None:
     """Build a chaptered .m4b audiobook (output/{book}/{book_id}.m4b) from the render manifest."""
     from seiyuu.assemble import AssembleError, master_book
@@ -961,14 +972,54 @@ def master(
             loudness=_build_loudness(cfg, **overrides),
             cover=cover,
             bitrate=bitrate,
+            target_seconds=target_minutes * 60 if target_minutes else None,
+            tempo_bounds=(cfg.tempo_min, cfg.tempo_max),
             progress=click.echo,
         )
     except AssembleError as exc:
         raise click.ClickException(str(exc)) from exc
+    tempo_note = f" (atempo {result.tempo:.3f})" if abs(result.tempo - 1.0) > 1e-3 else ""
     click.echo(
         f"done: {result.m4b_path.name} — {result.chapters} chapters, "
-        f"{result.total_seconds / 60:.1f} min -> {result.m4b_path}"
+        f"{result.total_seconds / 60:.1f} min{tempo_note} -> {result.m4b_path}"
     )
+
+
+@main.command()
+@click.argument("book_id")
+@click.option("--wpm", type=float, default=None, help="Narration pace (default from settings).")
+@click.option(
+    "--chapter",
+    "chapter_indices",
+    multiple=True,
+    type=int,
+    help="Estimate only these 1-based chapters (repeatable). Default: all.",
+)
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+def estimate(
+    book_id: str, wpm: float | None, chapter_indices: tuple[int, ...], books_dir: Path | None
+) -> None:
+    """Estimate audiobook runtime from word count (pre-render)."""
+    from seiyuu.duration import estimate_runtime_seconds, format_hms
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, "normalized.json", "Run `seiyuu ingest` first."
+    )
+    book = NormalizedBook.model_validate_json(
+        (book_dir / "normalized.json").read_text(encoding="utf-8")
+    )
+    pace = wpm or cfg.narration_wpm
+    seconds = estimate_runtime_seconds(book, wpm=pace, chapters=chapter_indices)
+    scope = f"chapters {sorted(chapter_indices)}" if chapter_indices else "whole book"
+    click.echo(f"estimated runtime ({scope}): {format_hms(seconds)} at {pace:.0f} wpm")
 
 
 # A full-book render is a long GPU job; above this many segments, confirm.
@@ -1065,10 +1116,12 @@ def convert(
         if b.is_speakable and (not wanted or ci in wanted)
     )
     if not chapter_indices and speakable > FULL_RENDER_CONFIRM_BLOCKS and not yes:
-        words = sum(len(b.text.split()) for c in book.chapters for b in c.blocks)
+        from seiyuu.duration import estimate_runtime_seconds, format_hms
+
+        runtime = format_hms(estimate_runtime_seconds(book, wpm=cfg.narration_wpm))
         click.confirm(
-            f"Full-book render: {speakable} segments, roughly {words / 150 / 60:.1f} hours "
-            f"of audio to synthesize. Continue?",
+            f"Full-book render: {speakable} segments, roughly {runtime} of audio to "
+            f"synthesize. Continue?",
             abort=True,
         )
 
