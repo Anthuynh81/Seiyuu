@@ -1022,6 +1022,50 @@ def estimate(
     click.echo(f"estimated runtime ({scope}): {format_hms(seconds)} at {pace:.0f} wpm")
 
 
+@main.command()
+@click.argument("book_id")
+@click.option(
+    "--all", "show_all", is_flag=True, help="List every validated segment, not just failures."
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+def validate(book_id: str, show_all: bool, output_dir: Path | None) -> None:
+    """Report whisper validation results recorded in a render (failures, scores, transcripts)."""
+    import textwrap
+
+    from seiyuu.render import MANIFEST_NAME, RenderManifest
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        output_dir or cfg.output_dir, book_id, MANIFEST_NAME, "Run `seiyuu render` first."
+    )
+    manifest = RenderManifest.model_validate_json(
+        (book_dir / MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    validated = [
+        (c.index, s) for c in manifest.chapters for s in c.segments if s.validation is not None
+    ]
+    if not validated:
+        click.echo(
+            "no validated segments — validation runs only for LLM-style engines (e.g. chatterbox)"
+        )
+        return
+    failures = [(ci, s) for ci, s in validated if not s.validation.ok]
+    click.echo(f"validated segments: {len(validated)}, failures: {len(failures)}")
+    for ci, seg in validated if show_all else failures:
+        v = seg.validation
+        mark = "" if v.ok else "  FAIL"
+        click.echo(f"  ch{ci} {seg.block_id} voice={seg.voice_id} score={v.score}{mark}")
+        if not v.ok:
+            click.echo(f"      expected: {textwrap.shorten(v.expected, 70)}")
+            click.echo(f"      heard:    {textwrap.shorten(v.transcript, 70)}")
+
+
 # A full-book render is a long GPU job; above this many segments, confirm.
 FULL_RENDER_CONFIRM_BLOCKS = 300
 
@@ -1068,6 +1112,7 @@ FULL_RENDER_CONFIRM_BLOCKS = 300
     default=None,
     help="Multi-voice: escalate chunks that fail local attribution to anthropic (paid).",
 )
+@click.option("--m4b", is_flag=True, help="Also build the chaptered .m4b audiobook.")
 @_voices_dir_option
 @_pause_options
 @_loudness_options
@@ -1086,11 +1131,12 @@ def convert(
     thought_voice_id: str | None,
     accent: str,
     hybrid: bool | None,
+    m4b: bool,
     voices_dir: Path | None,
     **pause_overrides,
 ) -> None:
     """Full pipeline: EPUB -> normalized JSON -> render (single- or multi-voice) -> chapter MP3s."""
-    from seiyuu.assemble import AssembleError, assemble_book
+    from seiyuu.assemble import AssembleError, assemble_book, master_book
     from seiyuu.engines import get_engine
     from seiyuu.ingest import IngestError, parse_epub, write_normalized
     from seiyuu.render import RenderError, render_book
@@ -1176,6 +1222,22 @@ def convert(
         f"done: {len(assemble_result.mp3_paths)} chapter MP3s, "
         f"{assemble_result.total_seconds / 60:.1f} min total -> {book_dir / 'chapters'}"
     )
+
+    if m4b:
+        click.echo("== master ==")
+        try:
+            master_result = master_book(
+                book_dir,
+                pauses=_build_pauses(**pause_overrides),
+                loudness=_build_loudness(cfg, **pause_overrides),
+                progress=click.echo,
+            )
+        except AssembleError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(
+            f"done: {master_result.m4b_path.name} — {master_result.chapters} chapters "
+            f"-> {master_result.m4b_path}"
+        )
 
 
 if __name__ == "__main__":
