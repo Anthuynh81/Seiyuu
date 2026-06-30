@@ -12,11 +12,21 @@ from typing import Any
 
 import soundfile as sf
 
-from seiyuu.engines import TTSEngine
+from seiyuu.attribute.models import AttributionReport
+from seiyuu.engines import TTSEngine, get_engine
+from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
-from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest
+from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
+from seiyuu.voices import (
+    VoiceAssignment,
+    VoiceKind,
+    VoiceLibrary,
+    canonical_recipe,
+    resolve_voice,
+)
+from seiyuu.voices.models import VoiceMeta
 
 MANIFEST_NAME = "manifest.json"
 
@@ -107,6 +117,9 @@ def render_book(
                     type=block.type,
                     wav=wav_path.relative_to(book_output_dir).as_posix(),
                     duration_seconds=round(duration, 3),
+                    voice_id=voice_id,
+                    seed=seed,
+                    settings_hash=key.settings_hash,
                 )
             )
         rendered_chapters.append(RenderedChapter(index=ci, title=chapter.title, segments=segments))
@@ -120,6 +133,145 @@ def render_book(
         settings=settings,
         seed=seed,
         chapters=rendered_chapters,
+    )
+    manifest_path = book_output_dir / MANIFEST_NAME
+    manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    return RenderResult(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        synthesized=synthesized,
+        cache_hits=cache_hits,
+    )
+
+
+def render_book_multivoice(
+    report: AttributionReport,
+    book: NormalizedBook,
+    library: VoiceLibrary,
+    assignment: VoiceAssignment,
+    book_output_dir: Path,
+    *,
+    chapters: tuple[int, ...] = (),
+    progress: Callable[[str], None] | None = None,
+    gpu=None,
+) -> RenderResult:
+    """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
+
+    Reads the attribution report (segments + resolved speaker ids), the normalized book
+    (scene-break pause markers + reading order), the voice library, and the assignment. Each
+    segment's voice is resolved, its engine acquired through the GPU manager (one heavy model
+    resident at a time), its text normalized per the engine profile, and synthesized through
+    the FROZEN SegmentKey. Segments are emitted in reading order; the per-segment cache key
+    makes that order-independent for caching.
+    """
+    book_output_dir = Path(book_output_dir)
+    cache = SegmentCache(book_output_dir / "cache")
+    say = progress or (lambda _msg: None)
+    gpu = gpu or get_gpu_manager()
+
+    wanted = set(chapters)
+    attributed = {ch.index: ch for ch in report.chapters}
+    engines: dict[str, TTSEngine] = {}
+    metas: dict[str, VoiceMeta] = {}
+    voices_used: dict[str, VoiceUse] = {}
+
+    def engine_for(engine_id: str) -> TTSEngine:
+        if engine_id not in engines:
+            extra = {"voices_dir": library.voices_dir} if engine_id == "chatterbox" else {}
+            engines[engine_id] = get_engine(engine_id, **extra)
+        return engines[engine_id]
+
+    def meta_for(voice_id: str) -> VoiceMeta:
+        if voice_id not in metas:
+            metas[voice_id] = library.load(voice_id)
+        return metas[voice_id]
+
+    rendered_chapters: list[RenderedChapter] = []
+    synthesized = cache_hits = 0
+    try:
+        for ci, chapter in enumerate(book.chapters, start=1):
+            if (wanted and ci not in wanted) or ci not in attributed:
+                continue
+            say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
+            by_block: dict[str, list] = {}
+            for seg in attributed[ci].segments:
+                by_block.setdefault(seg.block_id, []).append(seg)
+
+            rendered: list[RenderedSegment] = []
+            for block in chapter.blocks:
+                if block.type is BlockType.SCENE_BREAK:
+                    rendered.append(RenderedSegment(block_id=block.id, type=block.type))
+                    continue
+                for seg in by_block.get(block.id, []):
+                    voice_id = resolve_voice(seg, assignment)
+                    meta = meta_for(voice_id)
+                    if meta.kind is VoiceKind.CLONED and not meta.consent_attested:
+                        raise RenderError(
+                            f"voice {voice_id!r} (cloned) has no consent attestation; "
+                            f"refusing to render"
+                        )
+                    engine = engine_for(meta.engine)
+                    text = normalize_text(seg.text, profile=profile_for(meta.engine))
+                    settings = meta.engine_settings()
+                    if meta.kind is VoiceKind.BLEND and meta.blend:
+                        recipe = [list(pw) for pw in canonical_recipe(meta.blend)]
+                        settings = {**settings, "blend": recipe}
+                    key = SegmentKey.build(
+                        engine=meta.engine,
+                        engine_model_version=engine.model_version,
+                        voice_id=voice_id,
+                        settings=settings,
+                        seed=meta.seed,
+                        normalized_text=text,
+                    )
+                    wav_path = cache.get(key)
+                    if wav_path is not None:
+                        cache_hits += 1
+                        duration = sf.info(str(wav_path)).duration
+                    else:
+                        try:
+                            with gpu.acquire(engine, engine.engine_id):
+                                synth_settings = {**settings, "seed": meta.seed}
+                                audio = engine.synthesize(text, voice_id, synth_settings)
+                        except Exception as exc:
+                            raise RenderError(
+                                f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
+                                f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
+                            ) from exc
+                        wav_path = cache.put(key, audio)
+                        synthesized += 1
+                        duration = audio.duration_seconds
+                    voices_used.setdefault(
+                        voice_id,
+                        VoiceUse(
+                            engine=meta.engine,
+                            engine_model_version=engine.model_version,
+                            kind=meta.kind.value,
+                        ),
+                    )
+                    rendered.append(
+                        RenderedSegment(
+                            block_id=block.id,
+                            type=block.type,
+                            wav=wav_path.relative_to(book_output_dir).as_posix(),
+                            duration_seconds=round(duration, 3),
+                            voice_id=voice_id,
+                            seed=meta.seed,
+                            settings_hash=key.settings_hash,
+                        )
+                    )
+            rendered_chapters.append(
+                RenderedChapter(index=ci, title=chapter.title, segments=rendered)
+            )
+    finally:
+        gpu.free_all()  # free the GPU for the next stage/process
+
+    manifest = RenderManifest(
+        book_id=book.book_meta.book_id,
+        book_title=book.book_meta.title,
+        chapters=rendered_chapters,
+        voices_used=voices_used,
+        assignment=assignment.model_dump(mode="json"),
     )
     manifest_path = book_output_dir / MANIFEST_NAME
     manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")

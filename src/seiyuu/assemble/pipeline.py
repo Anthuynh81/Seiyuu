@@ -49,12 +49,15 @@ def _chapter_samples(chapter: RenderedChapter, book_dir: Path, pauses: PauseProf
     """Concatenate a chapter's segment audio with pause silences."""
     parts = [_silence(pauses.chapter_lead_in)]
     prev: BlockType | None = None
+    prev_block_id: str | None = None
     pending_scene_break = False
     for seg in chapter.segments:
         if seg.type is BlockType.SCENE_BREAK:
             pending_scene_break = True
             continue
-        if prev is not None:
+        # A multi-voice paragraph yields several segments sharing one block_id; only insert a
+        # pause when the BLOCK changes (single-voice has one segment per block, so identical).
+        if prev is not None and seg.block_id != prev_block_id:
             if pending_scene_break:
                 gap = pauses.scene_break
             elif prev is BlockType.HEADING:
@@ -78,6 +81,7 @@ def _chapter_samples(chapter: RenderedChapter, book_dir: Path, pauses: PauseProf
             )
         parts.append(samples)
         prev = seg.type
+        prev_block_id = seg.block_id
     parts.append(_silence(pauses.chapter_lead_out))
     return np.concatenate(parts)
 

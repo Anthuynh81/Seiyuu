@@ -90,6 +90,26 @@ def test_paragraph_gap_between_paragraphs(tmp_path) -> None:
     assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
 
 
+def test_no_gap_between_segments_of_one_block(tmp_path) -> None:
+    # A multi-voice paragraph yields two segments sharing one block_id: no pause between them,
+    # but the normal paragraph gap before the next block.
+    a = one_second_wav(tmp_path, "a")
+    b = one_second_wav(tmp_path, "b")
+    c = one_second_wav(tmp_path, "c")
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b),  # same block, second voice
+            seg("ch001_b0002", BlockType.PARAGRAPH, c),  # next block
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)
+    parts = [PAUSES.chapter_lead_in, 1.0, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
 def test_assemble_end_to_end(rendered_book_dir) -> None:
     result = assemble_book(rendered_book_dir)
     assert [p.name for p in result.mp3_paths] == ["ch001.mp3", "ch002.mp3"]
