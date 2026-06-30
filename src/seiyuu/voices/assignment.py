@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from seiyuu.attribute.models import Segment, SegmentType
 from seiyuu.voices.models import today_iso
 
+ASSIGNMENT_NAME = "assignments.json"
+
 
 class AssignmentStage(StrEnum):
     DRAFT = "draft"

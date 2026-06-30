@@ -94,6 +94,16 @@ def _resolve_book_dir(root: Path, book_id: str, marker: str, hint: str) -> Path:
     raise click.ClickException(f"book {book_id!r} {problem}; candidates: {known}. {hint}")
 
 
+def _voices_dir_option(fn):
+    """Shared --voices-dir flag (the voice library root)."""
+    return click.option(
+        "--voices-dir",
+        type=click.Path(file_okay=False, path_type=Path),
+        default=None,
+        help="Voice library root (default: settings.voices_dir).",
+    )(fn)
+
+
 @main.command()
 @click.argument("book_id")
 @click.option("--engine", "engine_id", default=None, help="TTS engine (default from settings).")
@@ -108,6 +118,12 @@ def _resolve_book_dir(root: Path, book_id: str, marker: str, hint: str) -> Path:
 @click.option("--speed", default=1.0, show_default=True, help="Speech speed multiplier.")
 @click.option("--seed", default=41172, show_default=True, help="Synthesis seed.")
 @click.option(
+    "--multivoice",
+    is_flag=True,
+    help="Multi-voice: render per-character voices from attribution.json + assignments.json "
+    "(ignores --engine/--voice/--speed/--seed; each voice carries its own).",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -119,6 +135,7 @@ def _resolve_book_dir(root: Path, book_id: str, marker: str, hint: str) -> Path:
     default=None,
     help="Render output root (default: settings.output_dir).",
 )
+@_voices_dir_option
 def render(
     book_id: str,
     engine_id: str | None,
@@ -126,13 +143,13 @@ def render(
     chapter_indices: tuple[int, ...],
     speed: float,
     seed: int,
+    multivoice: bool,
     books_dir: Path | None,
     output_dir: Path | None,
+    voices_dir: Path | None,
 ) -> None:
-    """Render a book single-voice: cached segment WAVs + manifest.json."""
-    from seiyuu.engines import get_engine
+    """Render a book single- or multi-voice: cached segment WAVs + manifest.json."""
     from seiyuu.ingest.models import NormalizedBook
-    from seiyuu.render import RenderError, render_book
     from seiyuu.settings import get_settings
 
     cfg = get_settings()
@@ -142,6 +159,13 @@ def render(
     book = NormalizedBook.model_validate_json(
         (book_dir / "normalized.json").read_text(encoding="utf-8")
     )
+
+    if multivoice:
+        _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_indices)
+        return
+
+    from seiyuu.engines import get_engine
+    from seiyuu.render import RenderError, render_book
 
     engine_id = engine_id or cfg.tts_engine
     voice = voice or cfg.kokoro_default_voice
@@ -184,6 +208,210 @@ def _build_provider(cfg, provider_id: str, model: str, prompt_version: str):
     return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)
 
 
+def _run_attribution(
+    cfg,
+    book,
+    book_dir: Path,
+    *,
+    provider_id: str,
+    model: str,
+    prompt_version: str,
+    use_hybrid: bool,
+    chapter_indices: tuple[int, ...],
+    progress,
+):
+    """Attribute `book`, write attribution.json + the cache DB, return (report, provider).
+
+    Shared by `seiyuu attribute` and `seiyuu convert --multivoice`. Does NOT unload the
+    provider — the caller frees Ollama VRAM before any TTS engine loads (GPU discipline).
+    """
+    from seiyuu.attribute import AttributionCache, attribute_book, write_attribution
+
+    provider = _build_provider(cfg, provider_id, model, prompt_version)
+    escalation = None
+    if use_hybrid and provider_id != "anthropic":
+        escalation = _build_provider(cfg, "anthropic", cfg.anthropic_model, prompt_version)
+    with AttributionCache(book_dir / "attribution.db") as cache:
+        report = attribute_book(
+            book,
+            provider,
+            cache=cache,
+            budget_tokens=cfg.attribution_chunk_tokens,
+            overlap_blocks=cfg.attribution_chunk_overlap_blocks,
+            max_local_retries=cfg.attribution_max_local_retries,
+            escalation_provider=escalation,
+            chapters=chapter_indices,
+            progress=progress,
+        )
+    write_attribution(report, book_dir)
+    return report, provider
+
+
+def _auto_assign(report, lib, *, narrator_voice_id, thought_voice_id, accent, default_preset):
+    """Build a draft VoiceAssignment, creating any missing draft voices in `lib`.
+
+    Narrator is an explicit existing voice or an auto preset for `default_preset`. Each
+    character gets a deterministic auto-blend voice keyed by its character id, so re-running
+    `assign` reproduces the same draft voices (and therefore the same segment cache entries).
+    """
+    from seiyuu.voices import (
+        BlendComponent,
+        VoiceAssignment,
+        VoiceKind,
+        VoiceMeta,
+        auto_blend_recipe,
+        slugify,
+    )
+
+    if narrator_voice_id is None:
+        narrator_voice_id = f"narrator_{slugify(default_preset)}"
+        if not lib.meta_path(narrator_voice_id).is_file():
+            lib.save(
+                VoiceMeta(
+                    voice_id=narrator_voice_id,
+                    name="Narrator",
+                    kind=VoiceKind.PRESET,
+                    engine="kokoro",
+                    preset_id=default_preset,
+                    source="preset",
+                )
+            )
+    elif not lib.meta_path(narrator_voice_id).is_file():
+        raise click.ClickException(f"narrator voice {narrator_voice_id!r} not in the library")
+    if thought_voice_id is not None and not lib.meta_path(thought_voice_id).is_file():
+        raise click.ClickException(f"thought voice {thought_voice_id!r} not in the library")
+
+    assignments: dict[str, str] = {}
+    for char in report.registry.characters:
+        voice_id = f"{char.id}_auto"
+        if not lib.meta_path(voice_id).is_file():
+            recipe = auto_blend_recipe(char.canonical_name, char.gender, accent=accent)
+            blend = [BlendComponent(preset_id=p, weight=w) for p, w in recipe]
+            lib.save(
+                VoiceMeta(
+                    voice_id=voice_id,
+                    name=char.canonical_name,
+                    kind=VoiceKind.BLEND,
+                    engine="kokoro",
+                    blend=blend,
+                    source="auto_blend",
+                )
+            )
+        assignments[char.id] = voice_id
+
+    return VoiceAssignment(
+        book_id=report.book_id,
+        narrator_voice_id=narrator_voice_id,
+        assignments=assignments,
+        thought_voice_id=thought_voice_id,
+    )
+
+
+def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_indices):
+    """Shared multi-voice render: load attribution + assignment + library, render, echo summary."""
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
+    from seiyuu.render import RenderError, render_book_multivoice
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
+
+    book_id = book.book_meta.book_id
+    attr_path = book_dir / ATTRIBUTION_NAME
+    if not attr_path.is_file():
+        raise click.ClickException(
+            f"no attribution at {attr_path}; run `seiyuu attribute {book_id}` first"
+        )
+    report = AttributionReport.model_validate_json(attr_path.read_text(encoding="utf-8"))
+
+    out_book_dir = (output_dir or get_settings().output_dir) / book_id
+    assign_path = out_book_dir / ASSIGNMENT_NAME
+    if not assign_path.is_file():
+        raise click.ClickException(
+            f"no assignment at {assign_path}; run `seiyuu assign {book_id}` first"
+        )
+    assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    try:
+        result = render_book_multivoice(
+            report,
+            book,
+            lib,
+            assignment,
+            out_book_dir,
+            chapters=chapter_indices,
+            progress=click.echo,
+        )
+    except (RenderError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    minutes = result.total_audio_seconds / 60
+    click.echo(
+        f"done: {result.synthesized} segments synthesized, {result.cache_hits} from cache, "
+        f"{len(result.manifest.voices_used)} voices, {minutes:.1f} min of audio"
+    )
+    click.echo(f"manifest: {result.manifest_path}")
+    return result
+
+
+def _convert_multivoice(
+    cfg,
+    book,
+    attr_book_dir: Path,
+    output_dir: Path | None,
+    voices_dir: Path | None,
+    chapter_indices: tuple[int, ...],
+    *,
+    narrator_voice_id: str | None,
+    thought_voice_id: str | None,
+    accent: str,
+    hybrid: bool | None,
+):
+    """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
+    from seiyuu.attribute import AttributionError
+    from seiyuu.voices import ASSIGNMENT_NAME, VoiceLibrary
+
+    click.echo("== attribute ==")
+    use_hybrid = cfg.attribution_hybrid if hybrid is None else hybrid
+    try:
+        report, provider = _run_attribution(
+            cfg,
+            book,
+            attr_book_dir,
+            provider_id=cfg.attribution_provider,
+            model=cfg.attribution_model,
+            prompt_version=cfg.attribution_prompt_version,
+            use_hybrid=use_hybrid,
+            chapter_indices=chapter_indices,
+            progress=click.echo,
+        )
+    except (AttributionError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    provider.unload()  # free Ollama VRAM before the TTS engine loads (GPU discipline)
+    flagged = f", {len(report.flagged)} flagged" if report.flagged else ""
+    click.echo(f"{len(report.registry.characters)} characters{flagged}")
+
+    click.echo("== assign ==")
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    assignment = _auto_assign(
+        report,
+        lib,
+        narrator_voice_id=narrator_voice_id,
+        thought_voice_id=thought_voice_id,
+        accent=accent,
+        default_preset=cfg.kokoro_default_voice,
+    )
+    out_book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
+    out_book_dir.mkdir(parents=True, exist_ok=True)
+    (out_book_dir / ASSIGNMENT_NAME).write_text(
+        assignment.model_dump_json(indent=2), encoding="utf-8"
+    )
+    click.echo(
+        f"narrator {assignment.narrator_voice_id}, {len(assignment.assignments)} character voices"
+    )
+
+    click.echo("== render (multi-voice) ==")
+    _render_multivoice_cli(cfg, book, attr_book_dir, output_dir, voices_dir, chapter_indices)
+
+
 @main.command()
 @click.argument("book_id")
 @click.option(
@@ -219,13 +447,7 @@ def attribute(
     books_dir: Path | None,
 ) -> None:
     """Attribute speakers with the local LLM: writes attribution.json + a cache DB."""
-    from seiyuu.attribute import (
-        ATTRIBUTION_NAME,
-        AttributionCache,
-        AttributionError,
-        attribute_book,
-        write_attribution,
-    )
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionError
     from seiyuu.ingest.models import NormalizedBook
     from seiyuu.settings import get_settings
 
@@ -243,26 +465,20 @@ def attribute(
     use_hybrid = cfg.attribution_hybrid if hybrid is None else hybrid
 
     try:
-        provider = _build_provider(cfg, provider_id, model, prompt_version)
-        escalation = None
-        if use_hybrid and provider_id != "anthropic":
-            escalation = _build_provider(cfg, "anthropic", cfg.anthropic_model, prompt_version)
-        with AttributionCache(book_dir / "attribution.db") as cache:
-            report = attribute_book(
-                book,
-                provider,
-                cache=cache,
-                budget_tokens=cfg.attribution_chunk_tokens,
-                overlap_blocks=cfg.attribution_chunk_overlap_blocks,
-                max_local_retries=cfg.attribution_max_local_retries,
-                escalation_provider=escalation,
-                chapters=chapter_indices,
-                progress=click.echo,
-            )
+        report, provider = _run_attribution(
+            cfg,
+            book,
+            book_dir,
+            provider_id=provider_id,
+            model=model,
+            prompt_version=prompt_version,
+            use_hybrid=use_hybrid,
+            chapter_indices=chapter_indices,
+            progress=click.echo,
+        )
     except (AttributionError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    write_attribution(report, book_dir)
     n_segments = sum(len(c.segments) for c in report.chapters)
     click.echo(
         f"done: {len(report.registry.characters)} characters, {n_segments} segments "
@@ -338,6 +554,262 @@ def characters(book_id: str, sample_lines: int, books_dir: Path | None) -> None:
             click.echo(f"  ch{fb.chapter_index} {fb.block_id}: {fb.reason}")
     for note in report.registry_notes:
         click.echo(f"note: {note}")
+
+
+@main.group()
+def voice() -> None:
+    """Manage the voice library (voices/{voice_id}/)."""
+
+
+@voice.command("list")
+@_voices_dir_option
+def voice_list(voices_dir: Path | None) -> None:
+    """List voices in the library."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceLibrary
+
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    metas = lib.list_voices()
+    if not metas:
+        click.echo("no voices yet — try `seiyuu voice add-preset` or `seiyuu voice blend`")
+        return
+    for m in metas:
+        if m.blend:
+            detail = " + ".join(f"{c.preset_id}:{c.weight:g}" for c in m.blend)
+        else:
+            detail = m.preset_id or m.reference_audio or "—"
+        click.echo(f"  {m.voice_id}  [{m.kind}/{m.engine}]  {m.name}  ({detail})  seed={m.seed}")
+
+
+@voice.command("add-preset")
+@click.argument("name")
+@click.argument("preset_id")
+@click.option("--engine", default="kokoro", show_default=True, help="TTS engine.")
+@click.option("--seed", default=41172, show_default=True, help="Pinned synthesis seed.")
+@click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
+@_voices_dir_option
+def voice_add_preset(
+    name: str, preset_id: str, engine: str, seed: int, voice_id: str | None, voices_dir: Path | None
+) -> None:
+    """Create a single-preset voice, e.g. `voice add-preset Narrator af_heart`."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, VoiceMeta
+
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    vid = voice_id or lib.new_voice_id(name)
+    try:
+        lib.save(
+            VoiceMeta(
+                voice_id=vid,
+                name=name,
+                kind=VoiceKind.PRESET,
+                engine=engine,
+                preset_id=preset_id,
+                seed=seed,
+                source="preset",
+            )
+        )
+    except (VoiceLibraryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"added preset voice {vid} -> {preset_id}")
+
+
+@voice.command("blend")
+@click.argument("name")
+@click.option(
+    "--component",
+    "components",
+    multiple=True,
+    help="preset_id:weight (repeatable; >=2 components). Omit to auto-draft from --gender.",
+)
+@click.option(
+    "--gender", default=None, help="Auto-draft: same-family 2-preset blend for this gender."
+)
+@click.option(
+    "--accent",
+    default="a",
+    show_default=True,
+    help="Auto-draft accent: a (American) / b (British).",
+)
+@click.option("--seed", default=41172, show_default=True, help="Pinned synthesis seed.")
+@click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
+@_voices_dir_option
+def voice_blend(
+    name: str,
+    components: tuple[str, ...],
+    gender: str | None,
+    accent: str,
+    seed: int,
+    voice_id: str | None,
+    voices_dir: Path | None,
+) -> None:
+    """Create a Kokoro blend voice from explicit components or an auto-draft."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import (
+        BlendComponent,
+        VoiceKind,
+        VoiceLibrary,
+        VoiceLibraryError,
+        VoiceMeta,
+        auto_blend_recipe,
+        canonical_recipe,
+    )
+
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    if components:
+        parsed = []
+        for spec in components:
+            preset, _, weight = spec.partition(":")
+            try:
+                parsed.append((preset, float(weight)))
+            except ValueError as exc:
+                raise click.ClickException(
+                    f"bad --component {spec!r}; expected preset_id:weight"
+                ) from exc
+        recipe = canonical_recipe(parsed)
+        source = "manual_blend"
+    else:
+        recipe = auto_blend_recipe(name, gender, accent=accent)
+        source = "auto_blend"
+
+    blend = [BlendComponent(preset_id=p, weight=w) for p, w in recipe]
+    vid = voice_id or lib.new_voice_id(name)
+    try:
+        lib.save(
+            VoiceMeta(
+                voice_id=vid,
+                name=name,
+                kind=VoiceKind.BLEND,
+                engine="kokoro",
+                blend=blend,
+                seed=seed,
+                source=source,
+            )
+        )
+    except (VoiceLibraryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"added blend voice {vid}: {', '.join(f'{p}:{w:g}' for p, w in recipe)}")
+
+
+@voice.command("audition")
+@click.argument("voice_id")
+@click.option(
+    "--text",
+    default='The quick brown fox jumps over the lazy dog. "Well," she said, "how about that?"',
+    help="Sample line to synthesize.",
+)
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Output WAV (default: voices/{voice_id}/audition.wav).",
+)
+@_voices_dir_option
+def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path | None) -> None:
+    """Synthesize a sample line with a voice so you can hear it (loads a TTS engine)."""
+    from seiyuu.engines import get_engine
+    from seiyuu.gpu import get_gpu_manager
+    from seiyuu.normalize import normalize_text, profile_for
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, canonical_recipe
+
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    try:
+        meta = lib.load(voice_id)
+    except VoiceLibraryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if meta.kind is VoiceKind.CLONED and not meta.consent_attested:
+        raise click.ClickException(f"voice {voice_id} (cloned) has no consent attestation")
+
+    extra = {"voices_dir": lib.voices_dir} if meta.engine == "chatterbox" else {}
+    engine = get_engine(meta.engine, **extra)
+    settings = meta.engine_settings()
+    if meta.kind is VoiceKind.BLEND and meta.blend:
+        settings = {**settings, "blend": [list(pw) for pw in canonical_recipe(meta.blend)]}
+    norm = normalize_text(text, profile=profile_for(meta.engine))
+
+    gpu = get_gpu_manager()
+    try:
+        with gpu.acquire(engine, engine.engine_id):
+            audio = engine.synthesize(norm, voice_id, {**settings, "seed": meta.seed})
+    finally:
+        gpu.free_all()
+    out_path = Path(out) if out else lib.dir_for(voice_id) / "audition.wav"
+    audio.save(out_path)
+    click.echo(f"wrote {out_path} ({audio.duration_seconds:.1f}s)")
+
+
+@main.command()
+@click.argument("book_id")
+@click.option(
+    "--narrator",
+    "narrator_voice_id",
+    default=None,
+    help="Narration voice id (default: auto preset).",
+)
+@click.option(
+    "--thought",
+    "thought_voice_id",
+    default=None,
+    help="Interior-thought voice id (default: speaker's own).",
+)
+@click.option(
+    "--accent", default="a", show_default=True, help="Auto-draft accent for character voices."
+)
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where attributed books live (default: settings.books_dir).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where assignments.json is written (default: settings.output_dir).",
+)
+@_voices_dir_option
+def assign(
+    book_id: str,
+    narrator_voice_id: str | None,
+    thought_voice_id: str | None,
+    accent: str,
+    books_dir: Path | None,
+    output_dir: Path | None,
+    voices_dir: Path | None,
+) -> None:
+    """Build a draft character→voice assignment (auto-creating draft voices)."""
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import ASSIGNMENT_NAME, VoiceLibrary
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    report = AttributionReport.model_validate_json(
+        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
+    )
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    assignment = _auto_assign(
+        report,
+        lib,
+        narrator_voice_id=narrator_voice_id,
+        thought_voice_id=thought_voice_id,
+        accent=accent,
+        default_preset=cfg.kokoro_default_voice,
+    )
+    out_dir = (output_dir or cfg.output_dir) / report.book_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / ASSIGNMENT_NAME
+    path.write_text(assignment.model_dump_json(indent=2), encoding="utf-8")
+
+    click.echo(f"narrator: {assignment.narrator_voice_id}")
+    for char in report.registry.characters:
+        click.echo(f"  {char.canonical_name} [{char.id}] -> {assignment.assignments[char.id]}")
+    if assignment.thought_voice_id:
+        click.echo(f"thoughts: {assignment.thought_voice_id}")
+    click.echo(f"wrote: {path}")
 
 
 def _pause_options(fn):
@@ -427,6 +899,27 @@ FULL_RENDER_CONFIRM_BLOCKS = 300
     "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
     help="Render output root (default: settings.output_dir).",
 )  # fmt: skip
+@click.option(
+    "--multivoice",
+    is_flag=True,
+    help="Multi-voice: attribute speakers (local LLM), auto-assign draft voices, then render "
+    "per character (ignores --engine/--voice/--speed/--seed).",
+)
+@click.option(
+    "--narrator", "narrator_voice_id", default=None, help="Multi-voice narration voice id."
+)
+@click.option(
+    "--thought", "thought_voice_id", default=None, help="Multi-voice interior-thought voice id."
+)
+@click.option(
+    "--accent", default="a", show_default=True, help="Multi-voice auto-draft accent (a/b)."
+)
+@click.option(
+    "--hybrid/--no-hybrid",
+    default=None,
+    help="Multi-voice: escalate chunks that fail local attribution to anthropic (paid).",
+)
+@_voices_dir_option
 @_pause_options
 def convert(
     epub_path: Path,
@@ -438,9 +931,15 @@ def convert(
     yes: bool,
     books_dir: Path | None,
     output_dir: Path | None,
+    multivoice: bool,
+    narrator_voice_id: str | None,
+    thought_voice_id: str | None,
+    accent: str,
+    hybrid: bool | None,
+    voices_dir: Path | None,
     **pause_overrides,
 ) -> None:
-    """Full pipeline: EPUB -> normalized JSON -> single-voice render -> chapter MP3s."""
+    """Full pipeline: EPUB -> normalized JSON -> render (single- or multi-voice) -> chapter MP3s."""
     from seiyuu.assemble import AssembleError, assemble_book
     from seiyuu.engines import get_engine
     from seiyuu.ingest import IngestError, parse_epub, write_normalized
@@ -455,7 +954,8 @@ def convert(
     except IngestError as exc:
         raise click.ClickException(str(exc)) from exc
     book = ingest_result.book
-    write_normalized(book, books_dir or cfg.books_dir)
+    book_books_dir = books_dir or cfg.books_dir
+    write_normalized(book, book_books_dir)
     click.echo(f"{book.book_meta.book_id}: {len(book.chapters)} chapters")
 
     wanted = set(chapter_indices)
@@ -473,23 +973,39 @@ def convert(
             abort=True,
         )
 
-    click.echo("== render ==")
     book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
-    try:
-        engine = get_engine(engine_id or cfg.tts_engine)
-        render_result = render_book(
+    if multivoice:
+        _convert_multivoice(
+            cfg,
             book,
-            engine,
-            voice or cfg.kokoro_default_voice,
-            book_dir,
-            settings={"speed": speed},
-            seed=seed,
-            chapters=chapter_indices,
-            progress=click.echo,
+            book_books_dir / book.book_meta.book_id,
+            output_dir,
+            voices_dir,
+            chapter_indices,
+            narrator_voice_id=narrator_voice_id,
+            thought_voice_id=thought_voice_id,
+            accent=accent,
+            hybrid=hybrid,
         )
-    except (RenderError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache")
+    else:
+        click.echo("== render ==")
+        try:
+            engine = get_engine(engine_id or cfg.tts_engine)
+            render_result = render_book(
+                book,
+                engine,
+                voice or cfg.kokoro_default_voice,
+                book_dir,
+                settings={"speed": speed},
+                seed=seed,
+                chapters=chapter_indices,
+                progress=click.echo,
+            )
+        except (RenderError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(
+            f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache"
+        )
 
     click.echo("== assemble ==")
     try:
