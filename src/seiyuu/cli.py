@@ -711,7 +711,7 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     from seiyuu.gpu import get_gpu_manager
     from seiyuu.normalize import normalize_text, profile_for
     from seiyuu.settings import get_settings
-    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, canonical_recipe
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, render_voice_args
 
     lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
     try:
@@ -723,15 +723,13 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
 
     extra = {"voices_dir": lib.voices_dir} if meta.engine == "chatterbox" else {}
     engine = get_engine(meta.engine, **extra)
-    settings = meta.engine_settings()
-    if meta.kind is VoiceKind.BLEND and meta.blend:
-        settings = {**settings, "blend": [list(pw) for pw in canonical_recipe(meta.blend)]}
+    engine_voice, settings = render_voice_args(meta)
     norm = normalize_text(text, profile=profile_for(meta.engine))
 
     gpu = get_gpu_manager()
     try:
         with gpu.acquire(engine, engine.engine_id):
-            audio = engine.synthesize(norm, voice_id, {**settings, "seed": meta.seed})
+            audio = engine.synthesize(norm, engine_voice, {**settings, "seed": meta.seed})
     finally:
         gpu.free_all()
     out_path = Path(out) if out else lib.dir_for(voice_id) / "audition.wav"

@@ -112,6 +112,10 @@ def test_multivoice_resolves_voices_and_passes_scene_break(tmp_path, monkeypatch
     assert set(result.manifest.voices_used) == {"narrator_v", "alice_v"}
     assert result.manifest.assignment["narrator_voice_id"] == "narrator_v"
     assert result.manifest.engine is None  # multi-voice: manifest-level voice fields unset
+    # the engine is handed the PRESET name, not the library voice_id (the regression a live
+    # Kokoro smoke render caught: 'unknown voice narrator_v')
+    sent_voices = {v for _, v in fake.calls}
+    assert sent_voices == {"af_heart", "af_bella"}
 
 
 def test_multivoice_manifest_round_trips(tmp_path, monkeypatch):
@@ -173,6 +177,42 @@ def test_cloned_without_consent_is_refused(tmp_path, monkeypatch):
         render_book_multivoice(
             _report(), make_book(), lib, assignment, tmp_path / "out", gpu=GpuResourceManager()
         )
+
+
+def test_render_voice_args_addresses_each_kind():
+    from seiyuu.voices import VoiceMeta, render_voice_args
+    from seiyuu.voices.models import BlendComponent
+
+    preset = VoiceMeta(
+        voice_id="narr_x", name="N", kind=VoiceKind.PRESET, engine="kokoro", preset_id="af_heart"
+    )
+    voice, settings = render_voice_args(preset)
+    assert voice == "af_heart" and "blend" not in settings  # preset addressed by preset_id
+
+    blend = VoiceMeta(
+        voice_id="liz_x",
+        name="L",
+        kind=VoiceKind.BLEND,
+        engine="kokoro",
+        blend=[
+            BlendComponent(preset_id="af_bella", weight=1),
+            BlendComponent(preset_id="af_sky", weight=1),
+        ],
+    )
+    voice, settings = render_voice_args(blend)
+    assert voice == "liz_x"  # blend addressed by voice_id; recipe rides in settings
+    assert settings["blend"] == [["af_bella", 0.5], ["af_sky", 0.5]]
+
+    cloned = VoiceMeta(
+        voice_id="bob_x",
+        name="B",
+        kind=VoiceKind.CLONED,
+        engine="chatterbox",
+        reference_audio="reference.wav",
+        consent_attested=True,
+    )
+    voice, settings = render_voice_args(cloned)
+    assert voice == "bob_x" and "blend" not in settings  # cloned addressed by voice_id (conds)
 
 
 def test_segments_cached_on_second_run(tmp_path, monkeypatch):

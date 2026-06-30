@@ -9,7 +9,7 @@ the same draft voices.
 
 import hashlib
 
-from seiyuu.voices.models import BlendComponent
+from seiyuu.voices.models import BlendComponent, VoiceKind, VoiceMeta
 
 _WEIGHT_PRECISION = 4
 
@@ -33,6 +33,25 @@ def canonical_recipe(components) -> list[tuple[str, float]]:
     return sorted(
         ((p, round(w / total, _WEIGHT_PRECISION)) for p, w in pairs), key=lambda pw: pw[0]
     )
+
+
+def render_voice_args(meta: VoiceMeta) -> tuple[str, dict]:
+    """The (engine voice arg, settings) an adapter needs to synthesize `meta`.
+
+    The FROZEN SegmentKey still keys on ``meta.voice_id`` — this is ONLY the adapter-facing
+    pair. A Kokoro preset is addressed by its ``preset_id`` (not the library voice_id, which
+    the engine doesn't know); a blend folds its canonical recipe into settings (and the engine
+    builds the weighted voicepack from it); a cloned voice is addressed by voice_id (the engine
+    resolves its conds cache from that). The returned settings are used for BOTH the cache key
+    and the synth call, so the recipe stays part of the key for blends.
+    """
+    settings = meta.engine_settings()
+    if meta.kind is VoiceKind.PRESET and meta.preset_id:
+        return meta.preset_id, settings
+    if meta.kind is VoiceKind.BLEND and meta.blend:
+        recipe = [list(pw) for pw in canonical_recipe(meta.blend)]
+        return meta.voice_id, {**settings, "blend": recipe}
+    return meta.voice_id, settings
 
 
 def auto_blend_recipe(

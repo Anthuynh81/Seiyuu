@@ -23,7 +23,7 @@ from seiyuu.voices import (
     VoiceAssignment,
     VoiceKind,
     VoiceLibrary,
-    canonical_recipe,
+    render_voice_args,
     resolve_voice,
 )
 from seiyuu.voices.models import VoiceMeta
@@ -212,10 +212,7 @@ def render_book_multivoice(
                         )
                     engine = engine_for(meta.engine)
                     text = normalize_text(seg.text, profile=profile_for(meta.engine))
-                    settings = meta.engine_settings()
-                    if meta.kind is VoiceKind.BLEND and meta.blend:
-                        recipe = [list(pw) for pw in canonical_recipe(meta.blend)]
-                        settings = {**settings, "blend": recipe}
+                    engine_voice, settings = render_voice_args(meta)
                     key = SegmentKey.build(
                         engine=meta.engine,
                         engine_model_version=engine.model_version,
@@ -232,7 +229,7 @@ def render_book_multivoice(
                         try:
                             with gpu.acquire(engine, engine.engine_id):
                                 synth_settings = {**settings, "seed": meta.seed}
-                                audio = engine.synthesize(text, voice_id, synth_settings)
+                                audio = engine.synthesize(text, engine_voice, synth_settings)
                         except Exception as exc:
                             raise RenderError(
                                 f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "

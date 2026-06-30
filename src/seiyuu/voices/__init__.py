@@ -6,7 +6,7 @@ from seiyuu.voices.assignment import (
     VoiceAssignment,
     resolve_voice,
 )
-from seiyuu.voices.blends import auto_blend_recipe, canonical_recipe
+from seiyuu.voices.blends import auto_blend_recipe, canonical_recipe, render_voice_args
 from seiyuu.voices.library import VoiceLibrary, VoiceLibraryError, slugify
 from seiyuu.voices.models import BlendComponent, VoiceKind, VoiceMeta
 
@@ -21,6 +21,7 @@ __all__ = [
     "VoiceMeta",
     "auto_blend_recipe",
     "canonical_recipe",
+    "render_voice_args",
     "resolve_voice",
     "slugify",
 ]
