@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     output_dir: Path = REPO_ROOT / "output"
     voices_dir: Path = REPO_ROOT / "voices"
     prompts_dir: Path = REPO_ROOT / "prompts"
+    # Server-side operational state (M6: jobs.db) — global, not per-book artifacts.
+    data_dir: Path = REPO_ROOT / "data"
 
     # Local attribution LLM (used from M2).
     ollama_base_url: str = "http://localhost:11434/v1"

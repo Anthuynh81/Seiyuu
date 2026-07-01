@@ -29,7 +29,7 @@ CHAPTERS_DIR = "chapters"
 
 
 class RepositoryError(Exception):
-    """Loud registry failure (book not found, ambiguous prefix)."""
+    """Loud repository failure (unknown book/job, ambiguous prefix, illegal transition)."""
 
 
 class BookStatus(BaseModel):
