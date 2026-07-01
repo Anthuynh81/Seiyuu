@@ -8,6 +8,7 @@ import re
 import secrets
 from pathlib import Path
 
+from seiyuu.repository import atomic_write_text
 from seiyuu.voices.models import VoiceKind, VoiceMeta
 
 _SLUG = re.compile(r"[^a-z0-9]+")
@@ -45,10 +46,7 @@ class VoiceLibrary:
             raise VoiceLibraryError(
                 f"refusing to save cloned voice {meta.voice_id!r} without consent attestation"
             )
-        self.dir_for(meta.voice_id).mkdir(parents=True, exist_ok=True)
-        path = self.meta_path(meta.voice_id)
-        path.write_text(meta.model_dump_json(indent=2), encoding="utf-8")
-        return path
+        return atomic_write_text(self.meta_path(meta.voice_id), meta.model_dump_json(indent=2))
 
     def list_voices(self) -> list[VoiceMeta]:
         if not self.voices_dir.is_dir():

@@ -14,6 +14,7 @@ exposes one), so the slot logic stays unit-testable with a fake.
 import json
 from pathlib import Path
 
+from seiyuu.repository import atomic_write_text
 from seiyuu.voices.models import VoiceKind, VoiceMeta
 
 REGISTRY_NAME = "cloud_voices.json"
@@ -36,8 +37,7 @@ class CloudVoiceRegistry:
         return {"voices": {}, "next_seq": 0}
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        atomic_write_text(self.path, json.dumps(self._data, indent=2))
 
     def get(self, voice_id: str) -> str | None:
         entry = self._data["voices"].get(voice_id)

@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from ebooklib import ITEM_DOCUMENT, epub
 
 from seiyuu.ingest.models import Block, BlockType, BookMeta, Chapter, NormalizedBook
+from seiyuu.repository import atomic_write_text
 
 # Spine items that are never narration (covers, navigation, wrappers). Matched
 # as whole name tokens — substring matching falsely skipped chapters like
@@ -264,8 +265,5 @@ def parse_epub(
 
 
 def write_normalized(book: NormalizedBook, books_dir: Path) -> Path:
-    out_dir = Path(books_dir) / book.book_meta.book_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "normalized.json"
-    out_path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
-    return out_path
+    out_path = Path(books_dir) / book.book_meta.book_id / "normalized.json"
+    return atomic_write_text(out_path, book.model_dump_json(indent=2))

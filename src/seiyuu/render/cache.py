@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from seiyuu.engines import AudioFile
+from seiyuu.repository import atomic_write_text
 from seiyuu.validate import ValidationResult
 
 
@@ -72,7 +73,7 @@ class SegmentCache:
     def put(self, key: SegmentKey, audio: AudioFile) -> Path:
         path = audio.save(self.path_for(key))
         sidecar = path.with_suffix(".json")
-        sidecar.write_text(key.model_dump_json(indent=2), encoding="utf-8")
+        atomic_write_text(sidecar, key.model_dump_json(indent=2))
         return path
 
     def validation_path(self, key: SegmentKey) -> Path:
@@ -86,7 +87,4 @@ class SegmentCache:
         return ValidationResult.model_validate_json(path.read_text(encoding="utf-8"))
 
     def put_validation(self, key: SegmentKey, result: ValidationResult) -> Path:
-        path = self.validation_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-        return path
+        return atomic_write_text(self.validation_path(key), result.model_dump_json(indent=2))

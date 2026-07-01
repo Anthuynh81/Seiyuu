@@ -20,6 +20,7 @@ from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
+from seiyuu.repository import atomic_write_text
 from seiyuu.validate import ValidationResult, Validator
 from seiyuu.voices import (
     VoiceAssignment,
@@ -227,7 +228,7 @@ def render_book(
         validation_failures=validation_failures,
     )
     manifest_path = book_output_dir / MANIFEST_NAME
-    manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(
         manifest=manifest,
         manifest_path=manifest_path,
@@ -400,7 +401,7 @@ def render_book_multivoice(
         validation_failures=validation_failures,
     )
     manifest_path = book_output_dir / MANIFEST_NAME
-    manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(
         manifest=manifest,
         manifest_path=manifest_path,

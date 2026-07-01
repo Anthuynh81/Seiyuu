@@ -416,6 +416,7 @@ def _convert_multivoice(
 ):
     """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
     from seiyuu.attribute import AttributionError
+    from seiyuu.repository import atomic_write_text
     from seiyuu.voices import ASSIGNMENT_NAME, VoiceLibrary
 
     click.echo("== attribute ==")
@@ -449,10 +450,7 @@ def _convert_multivoice(
         default_preset=cfg.kokoro_default_voice,
     )
     out_book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
-    out_book_dir.mkdir(parents=True, exist_ok=True)
-    (out_book_dir / ASSIGNMENT_NAME).write_text(
-        assignment.model_dump_json(indent=2), encoding="utf-8"
-    )
+    atomic_write_text(out_book_dir / ASSIGNMENT_NAME, assignment.model_dump_json(indent=2))
     click.echo(
         f"narrator {assignment.narrator_voice_id}, {len(assignment.assignments)} character voices"
     )
@@ -952,6 +950,7 @@ def assign(
 ) -> None:
     """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
+    from seiyuu.repository import atomic_write_text
     from seiyuu.settings import get_settings
     from seiyuu.voices import ASSIGNMENT_NAME, AssignmentStage, VoiceLibrary
 
@@ -983,10 +982,8 @@ def assign(
         assignment.assignments[char_id] = vid
     assignment.stage = AssignmentStage(stage)
 
-    out_dir = (output_dir or cfg.output_dir) / report.book_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / ASSIGNMENT_NAME
-    path.write_text(assignment.model_dump_json(indent=2), encoding="utf-8")
+    path = (output_dir or cfg.output_dir) / report.book_id / ASSIGNMENT_NAME
+    atomic_write_text(path, assignment.model_dump_json(indent=2))
 
     click.echo(f"stage: {assignment.stage.value}  narrator: {assignment.narrator_voice_id}")
     for char in report.registry.characters:

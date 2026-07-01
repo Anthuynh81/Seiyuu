@@ -33,6 +33,7 @@ from seiyuu.attribute.providers.base import (
 from seiyuu.attribute.registry import resolve_chunk
 from seiyuu.attribute.validate import ReconstructionFailure, find_reconstruction_failures
 from seiyuu.ingest.models import Block, BlockType, NormalizedBook
+from seiyuu.repository import atomic_write_text
 
 ATTRIBUTION_NAME = "attribution.json"
 
@@ -217,5 +218,4 @@ def attribute_book(
 
 def write_attribution(report: AttributionReport, book_dir: Path) -> Path:
     path = Path(book_dir) / ATTRIBUTION_NAME
-    path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
-    return path
+    return atomic_write_text(path, report.model_dump_json(indent=2))
