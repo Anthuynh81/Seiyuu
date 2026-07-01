@@ -10,6 +10,7 @@ from seiyuu.engines.base import EngineVoice, SynthesisError, TTSEngine
 _ENGINES = {
     "kokoro": "seiyuu.engines.kokoro_engine:KokoroEngine",
     "chatterbox": "seiyuu.engines.chatterbox_engine:ChatterboxEngine",
+    "elevenlabs": "seiyuu.engines.elevenlabs_engine:ElevenLabsEngine",
 }
 
 

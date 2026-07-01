@@ -124,6 +124,11 @@ def _voices_dir_option(fn):
     "(ignores --engine/--voice/--speed/--seed; each voice carries its own).",
 )
 @click.option(
+    "--confirm-cost",
+    is_flag=True,
+    help="Authorize paid cloud (ElevenLabs) synthesis without the interactive prompt.",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -144,6 +149,7 @@ def render(
     speed: float,
     seed: int,
     multivoice: bool,
+    confirm_cost: bool,
     books_dir: Path | None,
     output_dir: Path | None,
     voices_dir: Path | None,
@@ -161,7 +167,9 @@ def render(
     )
 
     if multivoice:
-        _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_indices)
+        _render_multivoice_cli(
+            cfg, book, book_dir, output_dir, voices_dir, chapter_indices, confirm_cost=confirm_cost
+        )
         return
 
     from seiyuu.engines import get_engine
@@ -182,6 +190,7 @@ def render(
             progress=click.echo,
             validator=_build_validator(cfg),
             validation_max_retries=cfg.validation_max_retries,
+            allow_paid=confirm_cost,  # single-voice cloud needs explicit --confirm-cost
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -323,10 +332,12 @@ def _auto_assign(report, lib, *, narrator_voice_id, thought_voice_id, accent, de
     )
 
 
-def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_indices):
-    """Shared multi-voice render: load attribution + assignment + library, render, echo summary."""
+def _render_multivoice_cli(
+    cfg, book, book_dir, output_dir, voices_dir, chapter_indices, *, confirm_cost=False
+):
+    """Shared multi-voice render: load inputs, cost-gate paid engines, render, echo summary."""
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
-    from seiyuu.render import RenderError, render_book_multivoice
+    from seiyuu.render import RenderError, estimate_render_cost, render_book_multivoice
     from seiyuu.settings import get_settings
     from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
 
@@ -346,6 +357,21 @@ def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_
         )
     assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+
+    # cost gate: estimate first; paid segments require explicit confirmation before any API call
+    est = estimate_render_cost(
+        report, book, lib, assignment, out_book_dir, chapters=chapter_indices
+    )
+    allow_paid = False
+    if est.total_usd > 0:
+        click.echo(
+            f"cost estimate: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s) "
+            f"({est.cached_segments} cached)"
+        )
+        if not confirm_cost:
+            click.confirm("This makes paid cloud API calls. Continue?", abort=True)
+        allow_paid = True
+
     try:
         result = render_book_multivoice(
             report,
@@ -357,6 +383,8 @@ def _render_multivoice_cli(cfg, book, book_dir, output_dir, voices_dir, chapter_
             progress=click.echo,
             validator=_build_validator(cfg),
             validation_max_retries=cfg.validation_max_retries,
+            allow_paid=allow_paid,
+            cloud_max_slots=cfg.elevenlabs_max_voice_slots,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -384,6 +412,7 @@ def _convert_multivoice(
     thought_voice_id: str | None,
     accent: str,
     hybrid: bool | None,
+    confirm_cost: bool = False,
 ):
     """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
     from seiyuu.attribute import AttributionError
@@ -429,7 +458,10 @@ def _convert_multivoice(
     )
 
     click.echo("== render (multi-voice) ==")
-    _render_multivoice_cli(cfg, book, attr_book_dir, output_dir, voices_dir, chapter_indices)
+    _render_multivoice_cli(
+        cfg, book, attr_book_dir, output_dir, voices_dir, chapter_indices,
+        confirm_cost=confirm_cost,
+    )  # fmt: skip
 
 
 @main.command()
@@ -727,13 +759,23 @@ def voice_blend(
 @_voices_dir_option
 def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path | None) -> None:
     """Synthesize a sample line with a voice so you can hear it (loads a TTS engine)."""
+    from contextlib import nullcontext
+
     from seiyuu.engines import get_engine
+    from seiyuu.engines.base import SynthesisError
     from seiyuu.gpu import get_gpu_manager
     from seiyuu.normalize import normalize_text, profile_for
     from seiyuu.settings import get_settings
-    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, render_voice_args
+    from seiyuu.voices import (
+        VoiceKind,
+        VoiceLibrary,
+        VoiceLibraryError,
+        ensure_cloud_voice,
+        render_voice_args,
+    )
 
-    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     try:
         meta = lib.load(voice_id)
     except VoiceLibraryError as exc:
@@ -746,15 +788,112 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     engine_voice, settings = render_voice_args(meta)
     norm = normalize_text(text, profile=profile_for(meta.engine))
 
+    # cloud voices are paid: confirm the (small) cost and resolve the cloud handle first
+    cost = engine.cost_estimate(norm)
+    if cost > 0:
+        click.confirm(
+            f"Auditioning {voice_id} is a paid call (~${cost:.4f}). Continue?", abort=True
+        )
+        if meta.engine == "elevenlabs" and meta.kind is VoiceKind.CLONED:
+            try:
+                engine_voice = ensure_cloud_voice(
+                    meta, engine.client, lib, max_slots=cfg.elevenlabs_max_voice_slots
+                )
+            except SynthesisError as exc:
+                raise click.ClickException(str(exc)) from exc
+
     gpu = get_gpu_manager()
+    ctx = gpu.acquire(engine, engine.engine_id) if engine.uses_gpu else nullcontext()
     try:
-        with gpu.acquire(engine, engine.engine_id):
+        with ctx:
             audio = engine.synthesize(norm, engine_voice, {**settings, "seed": meta.seed})
+    except SynthesisError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
-        gpu.free_all()
+        if engine.uses_gpu:
+            gpu.free_all()
     out_path = Path(out) if out else lib.dir_for(voice_id) / "audition.wav"
     audio.save(out_path)
     click.echo(f"wrote {out_path} ({audio.duration_seconds:.1f}s)")
+
+
+@voice.command("add-cloud")
+@click.argument("name")
+@click.argument("remote_voice_id")
+@click.option("--engine", default="elevenlabs", show_default=True, help="Cloud engine.")
+@click.option("--seed", default=41172, show_default=True, help="Pinned synthesis seed.")
+@click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
+@_voices_dir_option
+def voice_add_cloud(
+    name: str, remote_voice_id: str, engine: str, seed: int, voice_id: str | None,
+    voices_dir: Path | None,
+) -> None:  # fmt: skip
+    """Add a stock cloud voice, e.g. `voice add-cloud Rachel EXAVITQu` (a preset on the cloud)."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, VoiceMeta
+
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    vid = voice_id or lib.new_voice_id(name)
+    try:
+        lib.save(
+            VoiceMeta(
+                voice_id=vid,
+                name=name,
+                kind=VoiceKind.PRESET,
+                engine=engine,
+                preset_id=remote_voice_id,
+                seed=seed,
+                source="preset",
+            )  # fmt: skip
+        )
+    except (VoiceLibraryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"added cloud voice {vid} -> {engine}:{remote_voice_id}")
+
+
+@voice.command("clone")
+@click.argument("name")
+@click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--engine", default="chatterbox", show_default=True, help="Cloning engine.")
+@click.option(
+    "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
+)
+@click.option("--seed", default=41172, show_default=True, help="Pinned synthesis seed.")
+@click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
+@_voices_dir_option
+def voice_clone(
+    name: str, reference: Path, engine: str, consent: bool, seed: int, voice_id: str | None,
+    voices_dir: Path | None,
+) -> None:  # fmt: skip
+    """Create a cloned voice from a reference clip (chatterbox local or elevenlabs IVC)."""
+    import shutil
+
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, VoiceMeta
+
+    if not consent:
+        raise click.ClickException(
+            "cloning requires --consent; you must have the rights/permission to clone this voice"
+        )
+    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    vid = voice_id or lib.new_voice_id(name)
+    try:
+        lib.save(
+            VoiceMeta(
+                voice_id=vid,
+                name=name,
+                kind=VoiceKind.CLONED,
+                engine=engine,
+                reference_audio="reference.wav",
+                consent_attested=True,
+                seed=seed,
+                source="user_upload",
+            )  # fmt: skip
+        )
+    except (VoiceLibraryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    shutil.copyfile(reference, lib.reference_path(vid))  # reference.wav is the source of truth
+    click.echo(f"cloned voice {vid} ({engine}) from {reference.name}")
 
 
 @main.command()
@@ -775,6 +914,19 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     "--accent", default="a", show_default=True, help="Auto-draft accent for character voices."
 )
 @click.option(
+    "--stage",
+    type=click.Choice(["draft", "final"]),
+    default="draft",
+    show_default=True,
+    help="Assignment stage (final typically maps characters to cloud voices via --map).",
+)
+@click.option(
+    "--map",
+    "maps",
+    multiple=True,
+    help="Override a character's voice: CHARACTER_ID=VOICE_ID (repeatable).",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -792,14 +944,16 @@ def assign(
     narrator_voice_id: str | None,
     thought_voice_id: str | None,
     accent: str,
+    stage: str,
+    maps: tuple[str, ...],
     books_dir: Path | None,
     output_dir: Path | None,
     voices_dir: Path | None,
 ) -> None:
-    """Build a draft character→voice assignment (auto-creating draft voices)."""
+    """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
     from seiyuu.settings import get_settings
-    from seiyuu.voices import ASSIGNMENT_NAME, VoiceLibrary
+    from seiyuu.voices import ASSIGNMENT_NAME, AssignmentStage, VoiceLibrary
 
     cfg = get_settings()
     book_dir = _resolve_book_dir(
@@ -817,12 +971,24 @@ def assign(
         accent=accent,
         default_preset=cfg.kokoro_default_voice,
     )
+    known_ids = {c.id for c in report.registry.characters}
+    for entry in maps:
+        char_id, _, vid = entry.partition("=")
+        if not vid:
+            raise click.ClickException(f"bad --map {entry!r}; expected CHARACTER_ID=VOICE_ID")
+        if char_id not in known_ids:
+            raise click.ClickException(f"--map: unknown character {char_id!r}")
+        if not lib.meta_path(vid).is_file():
+            raise click.ClickException(f"--map: voice {vid!r} not in the library")
+        assignment.assignments[char_id] = vid
+    assignment.stage = AssignmentStage(stage)
+
     out_dir = (output_dir or cfg.output_dir) / report.book_id
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / ASSIGNMENT_NAME
     path.write_text(assignment.model_dump_json(indent=2), encoding="utf-8")
 
-    click.echo(f"narrator: {assignment.narrator_voice_id}")
+    click.echo(f"stage: {assignment.stage.value}  narrator: {assignment.narrator_voice_id}")
     for char in report.registry.characters:
         click.echo(f"  {char.canonical_name} [{char.id}] -> {assignment.assignments[char.id]}")
     if assignment.thought_voice_id:
@@ -1022,6 +1188,69 @@ def estimate(
     click.echo(f"estimated runtime ({scope}): {format_hms(seconds)} at {pace:.0f} wpm")
 
 
+def _load_multivoice_inputs(cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices):
+    """Shared loader for the multi-voice cost/render path: (report, book, lib, assignment, dir)."""
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
+
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    report = AttributionReport.model_validate_json(
+        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
+    )
+    book = NormalizedBook.model_validate_json(
+        (book_dir / "normalized.json").read_text(encoding="utf-8")
+    )
+    out_book_dir = (output_dir or cfg.output_dir) / report.book_id
+    assign_path = out_book_dir / ASSIGNMENT_NAME
+    if not assign_path.is_file():
+        raise click.ClickException(f"no assignment at {assign_path}; run `seiyuu assign {book_id}`")
+    assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    return report, book, lib, assignment, out_book_dir
+
+
+@main.command("estimate-cost")
+@click.argument("book_id")
+@click.option(
+    "--chapter", "chapter_indices", multiple=True, type=int,
+    help="Estimate only these 1-based chapters (repeatable). Default: all.",
+)  # fmt: skip
+@click.option(
+    "--books-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Where attributed books live (default: settings.books_dir).",
+)  # fmt: skip
+@click.option(
+    "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Render output root (default: settings.output_dir).",
+)  # fmt: skip
+@_voices_dir_option
+def estimate_cost(
+    book_id: str,
+    chapter_indices: tuple[int, ...],
+    books_dir: Path | None,
+    output_dir: Path | None,
+    voices_dir: Path | None,
+) -> None:
+    """Estimate the USD cost of a multi-voice render (only uncached, paid segments cost money)."""
+    from seiyuu.render import estimate_render_cost
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    report, book, lib, assignment, out_book_dir = _load_multivoice_inputs(
+        cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices
+    )
+    est = estimate_render_cost(
+        report, book, lib, assignment, out_book_dir, chapters=chapter_indices
+    )
+    click.echo(
+        f"estimated cost: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s); "
+        f"{est.cached_segments} cached, {est.free_segments} free (local)"
+    )
+
+
 @main.command()
 @click.argument("book_id")
 @click.option(
@@ -1113,6 +1342,11 @@ FULL_RENDER_CONFIRM_BLOCKS = 300
     help="Multi-voice: escalate chunks that fail local attribution to anthropic (paid).",
 )
 @click.option("--m4b", is_flag=True, help="Also build the chaptered .m4b audiobook.")
+@click.option(
+    "--confirm-cost",
+    is_flag=True,
+    help="Authorize paid cloud (ElevenLabs) synthesis without the interactive prompt.",
+)
 @_voices_dir_option
 @_pause_options
 @_loudness_options
@@ -1132,6 +1366,7 @@ def convert(
     accent: str,
     hybrid: bool | None,
     m4b: bool,
+    confirm_cost: bool,
     voices_dir: Path | None,
     **pause_overrides,
 ) -> None:
@@ -1184,6 +1419,7 @@ def convert(
             thought_voice_id=thought_voice_id,
             accent=accent,
             hybrid=hybrid,
+            confirm_cost=confirm_cost,
         )
     else:
         click.echo("== render ==")
@@ -1200,6 +1436,7 @@ def convert(
                 progress=click.echo,
                 validator=_build_validator(cfg),
                 validation_max_retries=cfg.validation_max_retries,
+                allow_paid=confirm_cost,
             )
         except (RenderError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc

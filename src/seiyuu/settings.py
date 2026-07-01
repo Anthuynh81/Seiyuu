@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     # Premium attribution model (anthropic provider / hybrid escalation).
     anthropic_model: str = "claude-opus-4-8"
 
+    # Cloud TTS (M5, ElevenLabs). Paid; renders go through the explicit cost gate. The key's
+    # absence must not raise until the provider is actually used.
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
+    elevenlabs_price_per_1k_chars: float = 0.30  # conservative USD/1k chars for the cost gate
+    elevenlabs_max_voice_slots: int = 10  # tier-limited; evict LRU seiyuu voices past this
+
 
 @lru_cache
 def get_settings() -> Settings:
