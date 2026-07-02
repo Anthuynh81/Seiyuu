@@ -235,22 +235,6 @@ def render(
     click.echo(f"manifest: {result.manifest_path}")
 
 
-def _build_provider(cfg, provider_id: str, model: str, prompt_version: str):
-    """Construct an attribution provider, passing only the kwargs each backend needs."""
-    from seiyuu.attribute.providers import get_provider
-
-    kwargs = {"prompt_version": prompt_version}
-    if provider_id == "local":
-        kwargs["base_url"] = cfg.ollama_base_url
-        kwargs["transport"] = cfg.ollama_transport
-        kwargs["num_ctx"] = cfg.ollama_num_ctx
-        kwargs["keep_alive"] = cfg.ollama_keep_alive
-        kwargs["unload_poll_timeout"] = cfg.gpu_unload_poll_timeout
-    elif provider_id == "anthropic":
-        kwargs["api_key"] = cfg.anthropic_api_key
-    return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)
-
-
 def _build_validator(cfg):
     """A whisper validator from settings; loads lazily, so Kokoro-only renders never touch it."""
     from seiyuu.validate import Validator
@@ -260,105 +244,6 @@ def _build_validator(cfg):
         device=cfg.whisper_device,
         compute_type=cfg.validation_compute_type,
         min_ratio=cfg.validation_min_ratio,
-    )
-
-
-def _run_attribution(
-    cfg,
-    book,
-    book_dir: Path,
-    *,
-    provider_id: str,
-    model: str,
-    prompt_version: str,
-    use_hybrid: bool,
-    chapter_indices: tuple[int, ...],
-    progress,
-):
-    """Attribute `book`, write attribution.json + the cache DB, return (report, provider).
-
-    Shared by `seiyuu attribute` and `seiyuu convert --multivoice`. Does NOT unload the
-    provider — the caller frees Ollama VRAM before any TTS engine loads (GPU discipline).
-    """
-    from seiyuu.attribute import AttributionCache, attribute_book, write_attribution
-
-    provider = _build_provider(cfg, provider_id, model, prompt_version)
-    escalation = None
-    if use_hybrid and provider_id != "anthropic":
-        escalation = _build_provider(cfg, "anthropic", cfg.anthropic_model, prompt_version)
-    with AttributionCache(book_dir / "attribution.db") as cache:
-        report = attribute_book(
-            book,
-            provider,
-            cache=cache,
-            budget_tokens=cfg.attribution_chunk_tokens,
-            overlap_blocks=cfg.attribution_chunk_overlap_blocks,
-            max_local_retries=cfg.attribution_max_local_retries,
-            escalation_provider=escalation,
-            chapters=chapter_indices,
-            progress=progress,
-        )
-    write_attribution(report, book_dir)
-    return report, provider
-
-
-def _auto_assign(report, lib, *, narrator_voice_id, thought_voice_id, accent, default_preset):
-    """Build a draft VoiceAssignment, creating any missing draft voices in `lib`.
-
-    Narrator is an explicit existing voice or an auto preset for `default_preset`. Each
-    character gets a deterministic auto-blend voice keyed by its character id, so re-running
-    `assign` reproduces the same draft voices (and therefore the same segment cache entries).
-    """
-    from seiyuu.voices import (
-        BlendComponent,
-        VoiceAssignment,
-        VoiceKind,
-        VoiceMeta,
-        auto_blend_recipe,
-        slugify,
-    )
-
-    if narrator_voice_id is None:
-        narrator_voice_id = f"narrator_{slugify(default_preset)}"
-        if not lib.meta_path(narrator_voice_id).is_file():
-            lib.save(
-                VoiceMeta(
-                    voice_id=narrator_voice_id,
-                    name="Narrator",
-                    kind=VoiceKind.PRESET,
-                    engine="kokoro",
-                    preset_id=default_preset,
-                    source="preset",
-                )
-            )
-    elif not lib.meta_path(narrator_voice_id).is_file():
-        raise click.ClickException(f"narrator voice {narrator_voice_id!r} not in the library")
-    if thought_voice_id is not None and not lib.meta_path(thought_voice_id).is_file():
-        raise click.ClickException(f"thought voice {thought_voice_id!r} not in the library")
-
-    assignments: dict[str, str] = {}
-    for char in report.registry.characters:
-        voice_id = f"{char.id}_auto"
-        if not lib.meta_path(voice_id).is_file():
-            recipe = auto_blend_recipe(char.canonical_name, char.gender, accent=accent)
-            blend = [BlendComponent(preset_id=p, weight=w) for p, w in recipe]
-            lib.save(
-                VoiceMeta(
-                    voice_id=voice_id,
-                    name=char.canonical_name,
-                    kind=VoiceKind.BLEND,
-                    engine="kokoro",
-                    blend=blend,
-                    source="auto_blend",
-                )
-            )
-        assignments[char.id] = voice_id
-
-    return VoiceAssignment(
-        book_id=report.book_id,
-        narrator_voice_id=narrator_voice_id,
-        assignments=assignments,
-        thought_voice_id=thought_voice_id,
     )
 
 
@@ -407,31 +292,25 @@ def _render_multivoice_cli(
     confirm_cost=False, cost_token=None,
 ):  # fmt: skip
     """Shared multi-voice render: load inputs, cost-gate paid engines, render, echo summary."""
-    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
     from seiyuu.render import (
         RenderError,
         estimate_render_cost,
         hash_assignment,
         render_book_multivoice,
     )
+    from seiyuu.services import ServiceError, load_assignment, load_report
     from seiyuu.settings import get_settings
-    from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
+    from seiyuu.voices import VoiceLibrary
 
     book_id = book.book_meta.book_id
-    attr_path = book_dir / ATTRIBUTION_NAME
-    if not attr_path.is_file():
-        raise click.ClickException(
-            f"no attribution at {attr_path}; run `seiyuu attribute {book_id}` first"
-        )
-    report = AttributionReport.model_validate_json(attr_path.read_text(encoding="utf-8"))
-
+    try:
+        report, edit_warnings = load_report(book_dir)  # manual edits applied
+        assignment = load_assignment(output_dir or get_settings().output_dir, book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for warning in edit_warnings:
+        click.echo(f"edit overlay: {warning}")
     out_book_dir = (output_dir or get_settings().output_dir) / book_id
-    assign_path = out_book_dir / ASSIGNMENT_NAME
-    if not assign_path.is_file():
-        raise click.ClickException(
-            f"no assignment at {assign_path}; run `seiyuu assign {book_id}` first"
-        )
-    assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
 
     # cost gate: estimate first; paid segments require the ceiling + explicit approval
@@ -492,41 +371,38 @@ def _convert_multivoice(
 ):
     """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
     from seiyuu.attribute import AttributionError
-    from seiyuu.repository import atomic_write_text
-    from seiyuu.voices import ASSIGNMENT_NAME, VoiceLibrary
+    from seiyuu.services import ServiceError, draft_assignment, run_attribution, save_assignment
+    from seiyuu.voices import VoiceLibrary
 
     click.echo("== attribute ==")
-    use_hybrid = cfg.attribution_hybrid if hybrid is None else hybrid
     try:
-        report, provider = _run_attribution(
-            cfg,
+        report = run_attribution(
             book,
             attr_book_dir,
-            provider_id=cfg.attribution_provider,
-            model=cfg.attribution_model,
-            prompt_version=cfg.attribution_prompt_version,
-            use_hybrid=use_hybrid,
-            chapter_indices=chapter_indices,
+            cfg=cfg,
+            use_hybrid=hybrid,
+            chapters=chapter_indices,
             progress=click.echo,
-        )
+        )  # Ollama VRAM freed inside, before the TTS engine loads (GPU discipline)
     except (AttributionError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    provider.unload()  # free Ollama VRAM before the TTS engine loads (GPU discipline)
     flagged = f", {len(report.flagged)} flagged" if report.flagged else ""
     click.echo(f"{len(report.registry.characters)} characters{flagged}")
 
     click.echo("== assign ==")
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
-    assignment = _auto_assign(
-        report,
-        lib,
-        narrator_voice_id=narrator_voice_id,
-        thought_voice_id=thought_voice_id,
-        accent=accent,
-        default_preset=cfg.kokoro_default_voice,
-    )
-    out_book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
-    atomic_write_text(out_book_dir / ASSIGNMENT_NAME, assignment.model_dump_json(indent=2))
+    try:
+        assignment = draft_assignment(
+            report,
+            lib,
+            narrator_voice_id=narrator_voice_id,
+            thought_voice_id=thought_voice_id,
+            accent=accent,
+            default_preset=cfg.kokoro_default_voice,
+        )
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    save_assignment(assignment, output_dir or cfg.output_dir)
     click.echo(
         f"narrator {assignment.narrator_voice_id}, {len(assignment.assignments)} character voices"
     )
@@ -585,21 +461,18 @@ def attribute(
         (book_dir / "normalized.json").read_text(encoding="utf-8")
     )
 
-    provider_id = provider_id or cfg.attribution_provider
-    model = model or cfg.attribution_model
-    prompt_version = prompt_version or cfg.attribution_prompt_version
-    use_hybrid = cfg.attribution_hybrid if hybrid is None else hybrid
+    from seiyuu.services import run_attribution
 
     try:
-        report, provider = _run_attribution(
-            cfg,
+        report = run_attribution(
             book,
             book_dir,
+            cfg=cfg,
             provider_id=provider_id,
             model=model,
             prompt_version=prompt_version,
-            use_hybrid=use_hybrid,
-            chapter_indices=chapter_indices,
+            use_hybrid=hybrid,
+            chapters=chapter_indices,
             progress=click.echo,
         )
     except (AttributionError, ValueError) as exc:
@@ -608,7 +481,7 @@ def attribute(
     n_segments = sum(len(c.segments) for c in report.chapters)
     click.echo(
         f"done: {len(report.registry.characters)} characters, {n_segments} segments "
-        f"({provider.provider_id}/{provider.model_id}, prompt {prompt_version})"
+        f"({report.provider_id}/{report.model_id}, prompt {report.prompt_version})"
     )
     if report.flagged:
         click.echo(f"  {len(report.flagged)} blocks flagged for review — see `seiyuu characters`")
@@ -625,61 +498,171 @@ def attribute(
     help="Where normalized books live (default: settings.books_dir).",
 )
 def characters(book_id: str, sample_lines: int, books_dir: Path | None) -> None:
-    """Report attributed characters, sample lines, and review flags (reads attribution.json)."""
+    """Report attributed characters, sample lines, and review flags (edits applied)."""
     import textwrap
-    from collections import Counter
 
-    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport, SegmentType
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import ServiceError, characters_overview
     from seiyuu.settings import get_settings
 
     cfg = get_settings()
     book_dir = _resolve_book_dir(
         books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
     )
-    report = AttributionReport.model_validate_json(
-        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
-    )
+    try:
+        overview = characters_overview(
+            book_dir,
+            confidence_threshold=cfg.attribution_confidence_threshold,
+            sample_lines=sample_lines,
+        )
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    threshold = cfg.attribution_confidence_threshold
-    counts: Counter[str] = Counter()
-    samples: dict[str, list[str]] = {}
-    narration = low_confidence = 0
-    for chapter in report.chapters:
-        for seg in chapter.segments:
-            if seg.speaker is None:
-                narration += 1
-                continue
-            counts[seg.speaker] += 1
-            if seg.confidence < threshold:
-                low_confidence += 1
-            if (
-                seg.type is SegmentType.DIALOGUE
-                and len(samples.setdefault(seg.speaker, [])) < sample_lines
-            ):
-                samples[seg.speaker].append(seg.text)
+    provenance = f"{overview.provider_id}/{overview.model_id}, prompt {overview.prompt_version}"
+    click.echo(f"{overview.book_id}  ({provenance})")
+    click.echo(f"narration segments: {overview.narration_segments}")
+    click.echo(f"characters: {len(overview.characters)}\n")
 
-    provenance = f"{report.provider_id}/{report.model_id}, prompt {report.prompt_version}"
-    click.echo(f"{report.book_id}  ({provenance})")
-    click.echo(f"narration segments: {narration}")
-    click.echo(f"characters: {len(report.registry.characters)}\n")
-
-    for char in sorted(report.registry.characters, key=lambda c: counts[c.id], reverse=True):
+    for char in overview.characters:
         meta = ", ".join(filter(None, [char.gender, char.age_hint])) or "—"
         aliases = f"  aka {', '.join(char.aliases)}" if char.aliases else ""
-        click.echo(
-            f"  {char.canonical_name} [{char.id}] ({meta}) — {counts[char.id]} lines{aliases}"
-        )
-        for line in samples.get(char.id, []):
+        click.echo(f"  {char.name} [{char.id}] ({meta}) — {char.line_count} lines{aliases}")
+        for line in char.sample_lines:
             click.echo(f"      “{textwrap.shorten(line, width=72)}”")
 
-    if low_confidence:
-        click.echo(f"\nlow-confidence speaker calls (< {threshold}): {low_confidence}")
-    if report.flagged:
-        click.echo(f"\nflagged for review: {len(report.flagged)} blocks")
-        for fb in report.flagged[:10]:
+    if overview.low_confidence_segments:
+        click.echo(
+            f"\nlow-confidence speaker calls (< {overview.confidence_threshold}): "
+            f"{overview.low_confidence_segments}"
+        )
+    if overview.flagged:
+        click.echo(f"\nflagged for review: {len(overview.flagged)} blocks")
+        for fb in overview.flagged[:10]:
             click.echo(f"  ch{fb.chapter_index} {fb.block_id}: {fb.reason}")
-    for note in report.registry_notes:
+    for note in overview.notes:
         click.echo(f"note: {note}")
+    for warning in overview.edit_warnings:
+        click.echo(f"edit overlay: {warning}")
+
+
+@main.group()
+def edit() -> None:
+    """Manual attribution edits — a durable overlay that survives re-attribution."""
+
+
+def _edit_book_dir(book_id: str, books_dir: Path | None) -> Path:
+    from seiyuu.settings import get_settings
+
+    return _resolve_book_dir(
+        books_dir or get_settings().books_dir,
+        book_id,
+        "attribution.json",
+        "Run `seiyuu attribute` first.",
+    )
+
+
+def _edit_books_dir_option(fn):
+    return click.option(
+        "--books-dir",
+        type=click.Path(file_okay=False, path_type=Path),
+        default=None,
+        help="Where attributed books live (default: settings.books_dir).",
+    )(fn)
+
+
+@edit.command("rename")
+@click.argument("book_id")
+@click.argument("character_id")
+@click.argument("new_name")
+@_edit_books_dir_option
+def edit_rename(book_id: str, character_id: str, new_name: str, books_dir: Path | None) -> None:
+    """Rename a character (the old name is kept as an alias)."""
+    from seiyuu.services import RenameCharacter, ServiceError, record_edit
+
+    book_dir = _edit_book_dir(book_id, books_dir)
+    try:
+        record_edit(book_dir, RenameCharacter(character_id=character_id, new_name=new_name))
+    except (ServiceError, ValueError) as exc:  # ValueError: pydantic op validation
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"renamed {character_id} -> {new_name!r} (durable; survives re-attribution)")
+
+
+@edit.command("merge")
+@click.argument("book_id")
+@click.argument("loser_id")
+@click.argument("winner_id")
+@_edit_books_dir_option
+def edit_merge(book_id: str, loser_id: str, winner_id: str, books_dir: Path | None) -> None:
+    """Merge LOSER into WINNER: segments move over, names become aliases."""
+    from seiyuu.services import MergeCharacters, ServiceError, record_edit
+
+    book_dir = _edit_book_dir(book_id, books_dir)
+    try:
+        record_edit(book_dir, MergeCharacters(loser_id=loser_id, winner_id=winner_id))
+    except (ServiceError, ValueError) as exc:  # ValueError: pydantic op validation
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"merged {loser_id} into {winner_id} (durable; survives re-attribution)")
+
+
+@edit.command("reassign")
+@click.argument("book_id")
+@click.argument("block_id")
+@click.argument("segment_index", type=int)
+@click.option("--speaker", default=None, help="Character id to assign the segment to.")
+@click.option("--narration", is_flag=True, help="Make the segment narration instead.")
+@_edit_books_dir_option
+def edit_reassign(
+    book_id: str,
+    block_id: str,
+    segment_index: int,
+    speaker: str | None,
+    narration: bool,
+    books_dir: Path | None,
+) -> None:
+    """Reassign one segment's speaker (SEGMENT_INDEX is within the block, 0-based)."""
+    from seiyuu.services import ReassignSegment, ServiceError, record_edit
+
+    if (speaker is None) == (not narration):  # exactly one of the two must be given
+        raise click.ClickException("pass exactly one of --speaker CHARACTER_ID or --narration")
+    book_dir = _edit_book_dir(book_id, books_dir)
+    try:
+        record_edit(
+            book_dir,
+            ReassignSegment(block_id=block_id, segment_index=segment_index, speaker=speaker),
+        )
+    except (ServiceError, ValueError) as exc:  # ValueError: pydantic op validation (index<0)
+        raise click.ClickException(str(exc)) from exc
+    target = speaker if speaker is not None else "narration"
+    click.echo(f"reassigned {block_id}[{segment_index}] -> {target} (durable)")
+
+
+@edit.command("list")
+@click.argument("book_id")
+@_edit_books_dir_option
+def edit_list(book_id: str, books_dir: Path | None) -> None:
+    """Show the edit overlay ops in order."""
+    from seiyuu.services import load_edits
+
+    log = load_edits(_edit_book_dir(book_id, books_dir))
+    if not log.ops:
+        click.echo("no manual edits")
+        return
+    for i, op in enumerate(log.ops):
+        click.echo(f"  {i}: {op.model_dump_json()}")
+
+
+@edit.command("undo")
+@click.argument("book_id")
+@_edit_books_dir_option
+def edit_undo(book_id: str, books_dir: Path | None) -> None:
+    """Remove the most recent edit op."""
+    from seiyuu.services import undo_edit
+
+    op = undo_edit(_edit_book_dir(book_id, books_dir))
+    if op is None:
+        click.echo("no manual edits to undo")
+        return
+    click.echo(f"removed: {op.model_dump_json()}")
 
 
 @main.group()
@@ -930,6 +913,40 @@ def voice_add_cloud(
     click.echo(f"added cloud voice {vid} -> {engine}:{remote_voice_id}")
 
 
+@voice.command("delete")
+@click.argument("voice_id")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root scanned for assignments (default: settings.output_dir). "
+    "Only THIS root is scanned — assignments under other --output-dir roots are not seen.",
+)
+@_voices_dir_option
+def voice_delete(
+    voice_id: str, yes: bool, output_dir: Path | None, voices_dir: Path | None
+) -> None:
+    """Delete a voice (refused while any book's assignment still references it)."""
+    from seiyuu.services import ServiceError, delete_voice
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceLibrary
+
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    if not yes:
+        click.confirm(
+            f"Delete voice {voice_id!r} and its directory (including any reference.wav — "
+            f"the consent-attested source of a clone)?",
+            abort=True,
+        )
+    try:
+        gone = delete_voice(voice_id, library=lib, output_dir=output_dir or cfg.output_dir)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"deleted {gone}")
+
+
 @voice.command("clone")
 @click.argument("name")
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
@@ -1066,41 +1083,40 @@ def assign(
     voices_dir: Path | None,
 ) -> None:
     """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
-    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
-    from seiyuu.repository import atomic_write_text
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
     from seiyuu.settings import get_settings
-    from seiyuu.voices import ASSIGNMENT_NAME, AssignmentStage, VoiceLibrary
+    from seiyuu.voices import AssignmentStage, VoiceLibrary
 
     cfg = get_settings()
     book_dir = _resolve_book_dir(
         books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
     )
-    report = AttributionReport.model_validate_json(
-        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
-    )
-    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
-    assignment = _auto_assign(
-        report,
-        lib,
-        narrator_voice_id=narrator_voice_id,
-        thought_voice_id=thought_voice_id,
-        accent=accent,
-        default_preset=cfg.kokoro_default_voice,
-    )
-    known_ids = {c.id for c in report.registry.characters}
+    overrides: dict[str, str] = {}
     for entry in maps:
         char_id, _, vid = entry.partition("=")
         if not vid:
             raise click.ClickException(f"bad --map {entry!r}; expected CHARACTER_ID=VOICE_ID")
-        if char_id not in known_ids:
-            raise click.ClickException(f"--map: unknown character {char_id!r}")
-        if not lib.meta_path(vid).is_file():
-            raise click.ClickException(f"--map: voice {vid!r} not in the library")
-        assignment.assignments[char_id] = vid
-    assignment.stage = AssignmentStage(stage)
+        overrides[char_id] = vid
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    try:
+        report, edit_warnings = load_report(book_dir)
+        assignment = draft_assignment(
+            report,
+            lib,
+            narrator_voice_id=narrator_voice_id,
+            thought_voice_id=thought_voice_id,
+            accent=accent,
+            default_preset=cfg.kokoro_default_voice,
+            stage=AssignmentStage(stage),
+            overrides=overrides,
+        )
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for warning in edit_warnings:
+        click.echo(f"edit overlay: {warning}")
 
-    path = (output_dir or cfg.output_dir) / report.book_id / ASSIGNMENT_NAME
-    atomic_write_text(path, assignment.model_dump_json(indent=2))
+    path = save_assignment(assignment, output_dir or cfg.output_dir)
 
     click.echo(f"stage: {assignment.stage.value}  narrator: {assignment.narrator_voice_id}")
     for char in report.registry.characters:
@@ -1304,24 +1320,29 @@ def estimate(
 
 def _load_multivoice_inputs(cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices):
     """Shared loader for the multi-voice cost/render path: (report, book, lib, assignment, dir)."""
-    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
+    from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.ingest.models import NormalizedBook
-    from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
+    from seiyuu.services import ServiceError, load_assignment, load_report
+    from seiyuu.voices import VoiceLibrary
 
     book_dir = _resolve_book_dir(
         books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
     )
-    report = AttributionReport.model_validate_json(
-        (book_dir / ATTRIBUTION_NAME).read_text(encoding="utf-8")
-    )
+    # the EFFECTIVE report (manual edits applied): cost estimation and the render must
+    # both see the same segments or the gate's fingerprint would never match
+    try:
+        report, edit_warnings = load_report(book_dir)
+        assignment = load_assignment(output_dir or cfg.output_dir, report.book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for warning in edit_warnings:
+        # a skipped edit means the paid work being estimated does NOT contain the
+        # user's fix — say so before they approve a quote for it
+        click.echo(f"edit overlay: {warning}")
     book = NormalizedBook.model_validate_json(
         (book_dir / "normalized.json").read_text(encoding="utf-8")
     )
     out_book_dir = (output_dir or cfg.output_dir) / report.book_id
-    assign_path = out_book_dir / ASSIGNMENT_NAME
-    if not assign_path.is_file():
-        raise click.ClickException(f"no assignment at {assign_path}; run `seiyuu assign {book_id}`")
-    assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     return report, book, lib, assignment, out_book_dir
 

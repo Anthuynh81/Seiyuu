@@ -91,6 +91,11 @@ def render_prompt(template: str, registry: CharacterRegistry, chunk: Chunk) -> s
 
 class AttributionLLM(ABC):
     provider_id: str
+    # Local providers hold model weights in VRAM (via Ollama) and must go through the GPU
+    # resource manager; cloud providers (anthropic) set False so a network-only attribution
+    # run never evicts a resident TTS model or serializes the manager. Default True: an
+    # unknown future provider is presumed heavy until it says otherwise.
+    uses_gpu: bool = True
 
     def __init__(self, *, model: str, prompts_dir: Path, prompt_version: str = "v1") -> None:
         self.model_id = model

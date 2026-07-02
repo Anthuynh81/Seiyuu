@@ -22,6 +22,7 @@ _MAX_TOKENS = 16000
 
 class AnthropicProvider(AttributionLLM):
     provider_id = "anthropic"
+    uses_gpu = False  # pure network: must never evict/serialize the local GPU manager
 
     def __init__(
         self,
