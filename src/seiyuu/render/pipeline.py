@@ -129,12 +129,19 @@ def render_book(
     validator: Validator | None = None,
     validation_max_retries: int = 2,
     allow_paid: bool = False,
+    check_cancel: Callable[[], None] | None = None,
 ) -> RenderResult:
-    """Render a book (or a 1-based subset of `chapters`) with one voice."""
+    """Render a book (or a 1-based subset of `chapters`) with one voice.
+
+    ``check_cancel`` (when given) is called between chapters and between blocks and may
+    raise to abort cooperatively; synthesized segments are already cached and no manifest
+    is written, so a re-run resumes from the cache.
+    """
     settings = settings or {}
     book_output_dir = Path(book_output_dir)
     cache = SegmentCache(book_output_dir / "cache")
     say = progress or (lambda _msg: None)
+    check = check_cancel or (lambda: None)
 
     wanted = set(chapters)
     unknown = wanted - set(range(1, len(book.chapters) + 1))
@@ -150,9 +157,11 @@ def render_book(
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
             continue
+        check()
         say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
         segments: list[RenderedSegment] = []
         for block in chapter.blocks:
+            check()
             if block.type is BlockType.SCENE_BREAK:
                 segments.append(RenderedSegment(block_id=block.id, type=block.type))
                 continue
@@ -252,6 +261,7 @@ def render_book_multivoice(
     validation_max_retries: int = 2,
     allow_paid: bool = False,
     cloud_max_slots: int = 10,
+    check_cancel: Callable[[], None] | None = None,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -261,10 +271,15 @@ def render_book_multivoice(
     resident at a time), its text normalized per the engine profile, and synthesized through
     the FROZEN SegmentKey. Segments are emitted in reading order; the per-segment cache key
     makes that order-independent for caching.
+
+    ``check_cancel`` (when given) is called between chapters and between segments and may
+    raise to abort cooperatively; synthesized segments are already cached and no manifest
+    is written, so a re-run resumes from the cache. The GPU is freed either way.
     """
     book_output_dir = Path(book_output_dir)
     cache = SegmentCache(book_output_dir / "cache")
     say = progress or (lambda _msg: None)
+    check = check_cancel or (lambda: None)
     gpu = gpu or get_gpu_manager()
 
     wanted = set(chapters)
@@ -290,6 +305,7 @@ def render_book_multivoice(
         for ci, chapter in enumerate(book.chapters, start=1):
             if (wanted and ci not in wanted) or ci not in attributed:
                 continue
+            check()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
             by_block: dict[str, list] = {}
             for seg in attributed[ci].segments:
@@ -301,6 +317,7 @@ def render_book_multivoice(
                     rendered.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
                 for seg in by_block.get(block.id, []):
+                    check()
                     voice_id = resolve_voice(seg, assignment)
                     meta = meta_for(voice_id)
                     if meta.kind is VoiceKind.CLONED and not meta.consent_attested:

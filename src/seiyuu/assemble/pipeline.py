@@ -7,6 +7,7 @@ these same normalized chapters. ffmpeg (on PATH) is the only way audio container
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -165,6 +166,10 @@ def _measure_loudness(wav_path: Path, target: LoudnessTarget) -> dict:
 def _encode_mp3(
     wav_path: Path, mp3_path: Path, title: str, track: int, album: str, af: str | None = None
 ) -> None:
+    # Encode to a .part sibling and replace on success: a failed/killed encode must never
+    # leave a truncated file at the final name (the book registry infers `assembled` from
+    # chapters/*.mp3 existence). The .part suffix hides the extension, so -f is explicit.
+    tmp = mp3_path.with_name(mp3_path.name + ".part")
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(wav_path)]
     if af:
         cmd += ["-af", af]
@@ -173,11 +178,14 @@ def _encode_mp3(
         "-metadata", f"title={title}",
         "-metadata", f"track={track}",
         "-metadata", f"album={album}",
-        str(mp3_path),
+        "-f", "mp3",
+        str(tmp),
     ]  # fmt: skip
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise AssembleError(f"ffmpeg failed for {mp3_path.name}: {proc.stderr.strip()}")
+    os.replace(tmp, mp3_path)
 
 
 def assemble_book(
@@ -186,11 +194,13 @@ def assemble_book(
     pauses: PauseProfile | None = None,
     loudness: LoudnessTarget | None = None,
     progress: Callable[[str], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> AssembleResult:
     """Build chapters/ch{NNN}.mp3 for every chapter in the render manifest.
 
     When `loudness` is given, each chapter is two-pass loudnorm'd to that target before
-    encoding (None = leave levels untouched).
+    encoding (None = leave levels untouched). ``check_cancel`` (when given) is called
+    between chapters and may raise to abort cooperatively; finished chapter MP3s remain.
     """
     if shutil.which("ffmpeg") is None:
         raise AssembleError("ffmpeg not found on PATH; install it and retry")
@@ -202,6 +212,7 @@ def assemble_book(
 
     pauses = pauses or PauseProfile()
     say = progress or (lambda _msg: None)
+    check = check_cancel or (lambda: None)
     chapters_dir = book_output_dir / "chapters"
     chapters_dir.mkdir(parents=True, exist_ok=True)
     album = manifest.book_title or manifest.book_id
@@ -211,6 +222,7 @@ def assemble_book(
     mp3_paths: list[Path] = []
     total_seconds = 0.0
     for chapter in manifest.chapters:
+        check()
         samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
         tmp_wav = chapters_dir / f"ch{chapter.index:03d}.tmp.wav"
         mp3_path = chapters_dir / f"ch{chapter.index:03d}.mp3"
@@ -270,11 +282,16 @@ def _encode_m4b(
         cmd += ["-map", "2:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
     if af:
         cmd += ["-af", af]
-    # -f ipod: the MP4/iTunes audiobook muxer (chapters + cover); .m4b isn't auto-detected.
-    cmd += ["-c:a", "aac", "-b:a", bitrate, "-ar", str(sample_rate), "-f", "ipod", str(m4b_path)]
+    # Encode to a .part sibling and replace on success: the registry infers `mastered` from
+    # {book_id}.m4b existence, and -y would otherwise truncate a previous good m4b before a
+    # re-master that then fails. -f ipod: the MP4/iTunes audiobook muxer (chapters + cover).
+    tmp = m4b_path.with_name(m4b_path.name + ".part")
+    cmd += ["-c:a", "aac", "-b:a", bitrate, "-ar", str(sample_rate), "-f", "ipod", str(tmp)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise AssembleError(f"ffmpeg failed for {m4b_path.name}: {proc.stderr.strip()}")
+    os.replace(tmp, m4b_path)
 
 
 def master_book(
@@ -288,6 +305,7 @@ def master_book(
     target_seconds: float | None = None,
     tempo_bounds: tuple[float, float] = (0.85, 1.3),
     progress: Callable[[str], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> MasterResult:
     """Build one chaptered .m4b (AAC) audiobook from the render manifest.
 
@@ -296,6 +314,11 @@ def master_book(
     at `sample_rate` (the single 24kHz→44.1kHz upsample) with ffmpeg chapter markers and an
     optional cover image. When `target_seconds` is set, a single clamped `atempo` nudges the
     whole book toward that runtime and the chapter markers are scaled to match.
+
+    ``check_cancel`` (when given) is called between chapters during streaming, after
+    streaming, and before the encode, and may raise to abort cooperatively; the working
+    WAV is removed either way. Only the final ffmpeg passes are uninterruptible, and the
+    m4b lands at its final name atomically (encode to .part, replace on success).
     """
     from seiyuu.duration import tempo_for_target
 
@@ -309,6 +332,7 @@ def master_book(
 
     pauses = pauses or PauseProfile()
     say = progress or (lambda _msg: None)
+    check = check_cancel or (lambda: None)
     narrator_voice_id = (manifest.assignment or {}).get("narrator_voice_id")
 
     work = book_output_dir / "master"
@@ -319,32 +343,39 @@ def master_book(
 
     raw_marks: list[tuple[str, int, int]] = []
     cursor_ms = 0
-    with sf.SoundFile(
-        str(book_wav), mode="w", samplerate=CANONICAL_SAMPLE_RATE, channels=1, subtype="PCM_16"
-    ) as out:
-        for chapter in manifest.chapters:
-            samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
-            out.write(samples)
-            dur_ms = round(len(samples) / CANONICAL_SAMPLE_RATE * 1000)
-            raw_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))
-            cursor_ms += dur_ms
-            say(f"chapter {chapter.index}: {chapter.title} (+{dur_ms / 1000 / 60:.1f} min)")
-
-    # target-duration: one clamped atempo over the whole book; scale chapter marks to match.
-    tempo = 1.0
-    if target_seconds:
-        lo, hi = tempo_bounds
-        tempo = tempo_for_target(cursor_ms / 1000, target_seconds, lo=lo, hi=hi)
-        say(f"target-duration: atempo={tempo:.4f}")
-    marks = [(t, round(s / tempo), round(e / tempo)) for t, s, e in raw_marks]
-    ffmeta.write_text(_ffmetadata(manifest.book_title or manifest.book_id, marks), encoding="utf-8")
+    # One try around streaming AND encoding: a cancel/failure mid-stream must still remove
+    # the working WAV (it is the whole book, potentially many GB).
     try:
+        with sf.SoundFile(
+            str(book_wav), mode="w", samplerate=CANONICAL_SAMPLE_RATE, channels=1, subtype="PCM_16"
+        ) as out:
+            for chapter in manifest.chapters:
+                check()
+                samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
+                out.write(samples)
+                dur_ms = round(len(samples) / CANONICAL_SAMPLE_RATE * 1000)
+                raw_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))
+                cursor_ms += dur_ms
+                say(f"chapter {chapter.index}: {chapter.title} (+{dur_ms / 1000 / 60:.1f} min)")
+
+        check()  # last chance before the two full-book ffmpeg passes (measure + encode)
+        # target-duration: one clamped atempo over the whole book; scale chapter marks to match.
+        tempo = 1.0
+        if target_seconds:
+            lo, hi = tempo_bounds
+            tempo = tempo_for_target(cursor_ms / 1000, target_seconds, lo=lo, hi=hi)
+            say(f"target-duration: atempo={tempo:.4f}")
+        marks = [(t, round(s / tempo), round(e / tempo)) for t, s, e in raw_marks]
+        ffmeta.write_text(
+            _ffmetadata(manifest.book_title or manifest.book_id, marks), encoding="utf-8"
+        )
         filters: list[str] = []
         if loudness:
             say("loudness: measuring...")
             filters.append(_loudnorm_filter(loudness, _measure_loudness(book_wav, loudness)))
         if abs(tempo - 1.0) > 1e-3:
             filters.append(f"atempo={tempo:.4f}")
+        check()  # the encode itself is the one uninterruptible step
         say(f"encoding {m4b_path.name}...")
         _encode_m4b(
             book_wav,

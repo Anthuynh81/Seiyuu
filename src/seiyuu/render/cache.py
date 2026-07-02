@@ -7,6 +7,7 @@ sidecar holding the full key for debuggability.
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,21 @@ class SegmentCache:
         return path if path.is_file() else None
 
     def put(self, key: SegmentKey, audio: AudioFile) -> Path:
-        path = audio.save(self.path_for(key))
+        # Crash-atomic: get() checks only existence and the key never changes, so a process
+        # killed mid-write must never leave a truncated wav at the final name — it would
+        # poison this segment forever (silently short audio, or a deterministic re-fail).
+        # Same temp+fsync+replace as repository.atomic; the temp keeps a .wav suffix so
+        # libsndfile picks the format, and get() never matches it.
+        path = self.path_for(key)
+        tmp = path.with_name(f"{path.stem}.part.wav")
+        try:
+            audio.save(tmp)
+            with open(tmp, "rb+") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         sidecar = path.with_suffix(".json")
         atomic_write_text(sidecar, key.model_dump_json(indent=2))
         return path

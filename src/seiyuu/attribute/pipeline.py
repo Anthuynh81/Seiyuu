@@ -108,9 +108,16 @@ def attribute_book(
     escalation_provider: AttributionLLM | None = None,
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> AttributionReport:
-    """Attribute a book (or a 1-based subset of ``chapters``) into segments + a registry."""
+    """Attribute a book (or a 1-based subset of ``chapters``) into segments + a registry.
+
+    ``check_cancel`` (when given) is called between chapters and between chunks and may
+    raise to abort cooperatively; completed chunks are already cached and no report is
+    written, so a re-run resumes from the cache.
+    """
     say = progress or (lambda _msg: None)
+    check = check_cancel or (lambda: None)
     wanted = set(chapters)
     unknown = wanted - set(range(1, len(book.chapters) + 1))
     if unknown:
@@ -127,6 +134,7 @@ def attribute_book(
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
             continue
+        check()
         say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
 
         paragraphs = [b for b in chapter.blocks if b.type is BlockType.PARAGRAPH]
@@ -136,6 +144,7 @@ def attribute_book(
         by_block: dict[str, list[Segment]] = {}
 
         for chunk in chunks:
+            check()
             key = ChunkCacheKey(
                 book_id=book.book_meta.book_id,
                 chapter_index=ci,

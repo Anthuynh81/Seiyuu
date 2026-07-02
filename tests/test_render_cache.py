@@ -1,7 +1,9 @@
 import numpy as np
+import pytest
 
 from seiyuu.engines import CANONICAL_SAMPLE_RATE, AudioFile
 from seiyuu.render import SegmentCache, SegmentKey
+from seiyuu.render import cache as cache_mod
 
 
 def make_key(**overrides) -> SegmentKey:
@@ -50,6 +52,28 @@ def test_cache_roundtrip(tmp_path) -> None:
     assert sidecar.is_file()
     assert SegmentKey.model_validate_json(sidecar.read_text(encoding="utf-8")) == key
     assert cache.get(make_key(seed=7)) is None
+
+
+def test_put_is_crash_atomic(tmp_path, monkeypatch) -> None:
+    """A failed put must leave neither a final wav (get() would take it as a hit against
+    an unchanging key, poisoning the segment forever) nor a stray temp file."""
+    cache = SegmentCache(tmp_path / "cache")
+    key = make_key()
+    audio = AudioFile(samples=np.zeros(2400, dtype=np.float32))
+
+    def boom(src, dst):
+        raise OSError("simulated crash at publish")
+
+    monkeypatch.setattr(cache_mod.os, "replace", boom)
+    with pytest.raises(OSError, match="simulated crash"):
+        cache.put(key, audio)
+    assert cache.get(key) is None  # no torn wav at the final name
+    assert list((tmp_path / "cache").iterdir()) == []  # no orphan temp either
+
+    monkeypatch.undo()
+    cache.put(key, audio)
+    assert cache.get(key) is not None
+    assert not any(p.name.endswith(".part.wav") for p in (tmp_path / "cache").iterdir())
 
 
 def test_canonical_rate_constant_unchanged() -> None:
