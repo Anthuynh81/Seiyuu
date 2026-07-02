@@ -4,12 +4,23 @@ No SQLite in M3 (matching the M1/M2 file-first convention). The consent gate liv
 cloned voice cannot be persisted (or, in M3 §6, rendered) without consent_attested=True.
 """
 
+import hashlib
 import re
 import secrets
 from pathlib import Path
 
 from seiyuu.repository import atomic_write_text
 from seiyuu.voices.models import VoiceKind, VoiceMeta
+
+
+def sha256_file(path: Path) -> str:
+    """Streaming sha256 of a file (reference clips can be minutes of WAV)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 _SLUG = re.compile(r"[^a-z0-9]+")
 
@@ -55,6 +66,31 @@ class VoiceLibrary:
                 f"refusing to save cloned voice {meta.voice_id!r} without consent attestation"
             )
         return atomic_write_text(self.meta_path(meta.voice_id), meta.model_dump_json(indent=2))
+
+    def verify_consent(self, meta: VoiceMeta) -> None:
+        """Gate for cloned voices: consent must be attested, and when a structured record
+        exists the reference audio on disk must hash-match it — consent binds to THE
+        audio, not to a voice_id someone can swap files under. Metas that predate the
+        record (bool only) are grandfathered. Call before any use of the clone (local
+        synthesis or shipping reference.wav to a cloud engine)."""
+        if meta.kind is not VoiceKind.CLONED:
+            return
+        if not meta.consent_attested:
+            raise VoiceLibraryError(f"voice {meta.voice_id!r} (cloned) has no consent attestation")
+        if meta.consent is None:
+            return  # pre-M6a voice: bool-only consent, grandfathered
+        reference = self.reference_path(meta.voice_id)
+        if not reference.is_file():
+            raise VoiceLibraryError(
+                f"voice {meta.voice_id!r}: consent was attested for reference audio "
+                f"but {reference} is missing"
+            )
+        if sha256_file(reference) != meta.consent.reference_sha256:
+            raise VoiceLibraryError(
+                f"voice {meta.voice_id!r}: reference.wav does not match its consent "
+                f"attestation (the audio changed since consent was recorded); "
+                f"re-clone the voice with fresh consent"
+            )
 
     def list_voices(self) -> list[VoiceMeta]:
         if not self.voices_dir.is_dir():

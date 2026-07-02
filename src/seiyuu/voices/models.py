@@ -29,6 +29,23 @@ class BlendComponent(BaseModel):
     weight: float = Field(gt=0)  # normalized at render; only relative weights matter
 
 
+CONSENT_STATEMENT = (
+    "I attest that I hold the rights and the speaker's permission to clone this voice "
+    "from the supplied reference audio."
+)
+
+
+class ConsentAttestation(BaseModel):
+    """Structured consent for a cloned voice (M6a): binds WHO attested WHAT to the EXACT
+    reference audio via its sha256, so consent cannot be silently transplanted onto
+    different audio by swapping reference.wav under an attested voice_id."""
+
+    attested_by: str
+    statement: str = CONSENT_STATEMENT
+    reference_sha256: str
+    attested_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class VoiceMeta(BaseModel):
     schema_version: int = 1
     voice_id: str
@@ -42,6 +59,9 @@ class VoiceMeta(BaseModel):
     seed: int = 41172  # pinned per voice; renders must use it
     language: str | None = None
     consent_attested: bool = False  # required True before a cloned voice may be saved/rendered
+    # Structured attestation (M6a). New clones always carry one; metas that predate it
+    # (bool only) stay valid and are grandfathered by VoiceLibrary.verify_consent.
+    consent: ConsentAttestation | None = None
     source: str = "user_upload"  # user_upload | preset | auto_blend | manual_blend
     created_at: str = Field(default_factory=today_iso)
 

@@ -52,9 +52,35 @@ def test_model_version_native_rate_and_listing(tmp_path):
     assert eng.list_voices() == [] and eng.cost_estimate("x") == 0.0
 
 
-def test_conds_path_embeds_model_version(tmp_path):
-    eng = ChatterboxEngine(device="cpu", voices_dir=tmp_path, model=_FakeModel())
-    assert eng.conds_path("v").name == f"conds_{eng.model_version}.pt"
+def test_conds_path_embeds_model_version_and_reference_hash(tmp_path):
+    import hashlib
+
+    voices = _voice(tmp_path)
+    eng = ChatterboxEngine(device="cpu", voices_dir=voices, model=_FakeModel())
+    ref = hashlib.sha256(b"RIFFfake").hexdigest()[:12]
+    assert eng.conds_path("elena_9f3a").name == f"conds_{eng.model_version}_{ref}.pt"
+    # no reference -> no conds identity: a conds-only voice dir can no longer synthesize
+    with pytest.raises(SynthesisError, match="no reference.wav"):
+        eng.conds_path("missing_voice")
+
+
+def test_stale_conds_from_old_reference_are_never_spoken(tmp_path):
+    """Consent binds to reference.wav; conds derived from PREVIOUS audio (re-clone under
+    the same voice_id, or a hand-swapped .pt) must be ignored and regenerated."""
+    voices = _voice(tmp_path)
+    model = _FakeModel()
+    eng = ChatterboxEngine(device="cpu", voices_dir=voices, model=model)
+    eng.synthesize("Hi.", "elena_9f3a", {"seed": 1})
+    old_conds = eng.conds_path("elena_9f3a")
+    assert old_conds.is_file()
+
+    # the reference audio is replaced (fresh clone, new attestation)
+    (voices / "elena_9f3a" / "reference.wav").write_bytes(b"RIFFother")
+    fresh = ChatterboxEngine(device="cpu", voices_dir=voices, model=model)
+    model.prepared = None
+    fresh.synthesize("Hi.", "elena_9f3a", {"seed": 1})
+    assert model.prepared is not None  # re-prepared from the NEW reference
+    assert fresh.conds_path("elena_9f3a") != old_conds  # old .pt can never match again
 
 
 def test_prepares_and_caches_conds_then_generates_with_seed(tmp_path):

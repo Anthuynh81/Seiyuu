@@ -12,9 +12,13 @@ exposes one), so the slot logic stays unit-testable with a fake.
 """
 
 import json
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from seiyuu.repository import atomic_write_text
+from seiyuu.repository import atomic_write_text, file_lock
+from seiyuu.voices.library import VoiceLibraryError
 from seiyuu.voices.models import VoiceKind, VoiceMeta
 
 REGISTRY_NAME = "cloud_voices.json"
@@ -31,13 +35,36 @@ class CloudVoiceRegistry:
         self.path = Path(voices_dir) / REGISTRY_NAME
         self._data = self._load()
 
+    @contextmanager
+    def locked(self, *, timeout: float = 600.0) -> Iterator["CloudVoiceRegistry"]:
+        """Cross-process critical section for a whole slot transaction: re-reads the
+        registry under an exclusive file lock so two creators can never both count the
+        same free slot (ElevenLabs slots are tier-limited and eviction is destructive).
+        The default timeout is sized for the slowest legitimate holder — an IVC upload
+        of a minutes-long reference clip — not for a quick JSON edit; a waiter timing
+        out at 30s would wrongly abort a healthy concurrent render."""
+        with file_lock(self.path.with_name(REGISTRY_NAME + ".lock"), timeout=timeout):
+            self._data = self._load()  # another process may have written since __init__
+            yield self
+
     def _load(self) -> dict:
         if self.path.is_file():
             return json.loads(self.path.read_text(encoding="utf-8"))
         return {"voices": {}, "next_seq": 0}
 
     def _save(self) -> None:
-        atomic_write_text(self.path, json.dumps(self._data, indent=2))
+        # On Windows, os.replace fails with PermissionError while another handle has the
+        # JSON open for reading (no FILE_SHARE_DELETE) — e.g. a second process's __init__
+        # load racing the lock holder's save. Readers are transient, so retry briefly
+        # rather than aborting a slot transaction that may have already evicted a voice.
+        for attempt in range(5):
+            try:
+                atomic_write_text(self.path, json.dumps(self._data, indent=2))
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
 
     def get(self, voice_id: str) -> str | None:
         entry = self._data["voices"].get(voice_id)
@@ -113,26 +140,31 @@ def ensure_cloud_voice(
         raise CloudVoiceError(
             f"voice {meta.voice_id!r}: kind {meta.kind.value!r} not supported on elevenlabs"
         )
-    if not meta.consent_attested:
-        raise CloudVoiceError(f"voice {meta.voice_id!r} (cloned) has no consent attestation")
+    # consent gates the upload itself: reference.wav is about to ship to a third party,
+    # so the attestation (and, for M6a records, its hash binding) must hold NOW
+    try:
+        library.verify_consent(meta)
+    except VoiceLibraryError as exc:
+        raise CloudVoiceError(str(exc)) from exc
 
     registry = registry or CloudVoiceRegistry(library.voices_dir)
-    cloud_id = registry.get(meta.voice_id)
-    if cloud_id and _voice_exists(client, cloud_id):
-        registry.touch(meta.voice_id, cloud_id)  # refresh LRU
-        return cloud_id
+    with registry.locked():  # one slot transaction at a time, across processes
+        cloud_id = registry.get(meta.voice_id)
+        if cloud_id and _voice_exists(client, cloud_id):
+            registry.touch(meta.voice_id, cloud_id)  # refresh LRU
+            return cloud_id
 
-    reference = library.reference_path(meta.voice_id)
-    if not reference.is_file():
-        raise CloudVoiceError(
-            f"voice {meta.voice_id!r}: {reference} missing; cannot create the cloud voice"
-        )
-    registry.remove(meta.voice_id)  # drop any stale handle so it isn't counted/evicted
-    while registry.count() >= max_slots:
-        evicted = registry.evict_lru()
-        if evicted is None:
-            break
-        _safe_delete(client, evicted[1])
-    cloud_id = _ivc_create(client, meta.name, reference)
-    registry.touch(meta.voice_id, cloud_id)
-    return cloud_id
+        reference = library.reference_path(meta.voice_id)
+        if not reference.is_file():
+            raise CloudVoiceError(
+                f"voice {meta.voice_id!r}: {reference} missing; cannot create the cloud voice"
+            )
+        registry.remove(meta.voice_id)  # drop any stale handle so it isn't counted/evicted
+        while registry.count() >= max_slots:
+            evicted = registry.evict_lru()
+            if evicted is None:
+                break
+            _safe_delete(client, evicted[1])
+        cloud_id = _ivc_create(client, meta.name, reference)
+        registry.touch(meta.voice_id, cloud_id)
+        return cloud_id

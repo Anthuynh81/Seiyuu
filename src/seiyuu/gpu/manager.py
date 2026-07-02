@@ -8,8 +8,10 @@ after its work so back-to-back use is cheap, and is freed only when a competitor
 
 The manager imports NO engine/LLM SDK: consumers register themselves by passing `self` to
 `acquire()` (import direction is consumer -> manager). `acquire()` holds a lock for the whole
-`with` body, so two consumers can never use the GPU concurrently. It is NOT reentrant — one
-`acquire()` wraps a whole render/attribution, and the per-segment calls inside do not acquire.
+`with` body, so two consumers can never use the GPU concurrently. It is NOT reentrant —
+acquire() calls must never nest. The render loops acquire per synthesis unit (re-acquiring
+the resident consumer is a cheap no-op) because a multi-voice render switches engines
+segment to segment; renders free_all() at the end only if they actually acquired.
 """
 
 import threading

@@ -25,8 +25,8 @@ from seiyuu.repository import atomic_write_text
 from seiyuu.validate import ValidationResult, Validator
 from seiyuu.voices import (
     VoiceAssignment,
-    VoiceKind,
     VoiceLibrary,
+    VoiceLibraryError,
     ensure_cloud_voice,
     render_voice_args,
     resolve_voice,
@@ -159,6 +159,8 @@ def render_book(
     seed: int | None = None,
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
+    gpu=None,
+    library: VoiceLibrary | None = None,
     validator: Validator | None = None,
     validation_max_retries: int = 2,
     allow_paid: bool = False,
@@ -167,15 +169,30 @@ def render_book(
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
-    ``check_cancel`` (when given) is called between chapters and between blocks and may
-    raise to abort cooperatively; synthesized segments are already cached and no manifest
-    is written, so a re-run resumes from the cache.
+    When ``library`` is given and ``voice_id`` refers to a library voice (a directory with
+    meta.json or reference.wav), consent is verified before any synthesis — a cloned voice
+    must never render ungated just because it came through the single-voice path. Bare
+    engine preset ids (no library directory) have nothing to verify. GPU engines are
+    acquired through the resource manager (one heavy model resident at a time) and freed
+    at the end. ``check_cancel`` (when given) is called between chapters and between
+    blocks and may raise to abort cooperatively; synthesized segments are already cached
+    and no manifest is written, so a re-run resumes from the cache.
     """
     settings = settings or {}
     book_output_dir = Path(book_output_dir)
     cache = SegmentCache(book_output_dir / "cache")
     say = progress or (lambda _msg: None)
     check = check_cancel or (lambda: None)
+    gpu = gpu or get_gpu_manager()
+
+    if library is not None and (
+        library.meta_path(voice_id).is_file() or library.reference_path(voice_id).is_file()
+    ):
+        try:
+            # load() also refuses a reference.wav-only dir (no meta = never attested)
+            library.verify_consent(library.load(voice_id))
+        except VoiceLibraryError as exc:
+            raise RenderError(str(exc)) from exc
 
     wanted = set(chapters)
     unknown = wanted - set(range(1, len(book.chapters) + 1))
@@ -189,76 +206,90 @@ def render_book(
     profile = profile_for(engine.engine_id)
     synthesized = cache_hits = validation_failures = 0
     paid_spent = 0.0
-    for ci, chapter in enumerate(book.chapters, start=1):
-        if wanted and ci not in wanted:
-            continue
-        check()
-        say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
-        segments: list[RenderedSegment] = []
-        for block in chapter.blocks:
-            check()
-            if block.type is BlockType.SCENE_BREAK:
-                segments.append(RenderedSegment(block_id=block.id, type=block.type))
+    try:
+        for ci, chapter in enumerate(book.chapters, start=1):
+            if wanted and ci not in wanted:
                 continue
-            text = normalize_text(block.text, profile=profile)
-            key = SegmentKey.build(
-                engine=engine.engine_id,
-                engine_model_version=engine.model_version,
-                voice_id=voice_id,
-                settings=settings,
-                seed=seed,
-                normalized_text=text,
-            )
-            wav_path = cache.get(key)
-            if wav_path is not None:
-                cache_hits += 1
-                duration = sf.info(str(wav_path)).duration
-                validation = cache.get_validation(key)
-                attempts = 1
-            else:
-                paid_spent = _gate_paid(
-                    engine, text, allow_paid, paid_spent, max_paid_usd,
-                    book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
-                )  # fmt: skip
-                try:
-                    audio, validation, attempts = _synthesize_validated(
-                        engine, text, voice_id, settings, seed,
-                        validator=validator, max_retries=validation_max_retries,
-                        cache_dir=cache.cache_dir,
-                    )  # fmt: skip
-                except RenderError:
-                    raise
-                except Exception as exc:
-                    raise RenderError(
-                        f"synthesis failed: book={book.book_meta.book_id} "
-                        f"chapter={ci} ({chapter.title!r}) block={block.id} "
-                        f"engine={engine.engine_id} voice={voice_id}: {exc}"
-                    ) from exc
-                wav_path = cache.put(key, audio)
-                if validation is not None:
-                    cache.put_validation(key, validation)
-                synthesized += 1
-                duration = audio.duration_seconds
-            if validation is not None and not validation.ok:
-                validation_failures += 1
-                say(
-                    f"  ! validation failed (score {validation.score}) block={block.id} "
-                    f"after {attempts} attempt(s) — flagged for review"
-                )
-            segments.append(
-                RenderedSegment(
-                    block_id=block.id,
-                    type=block.type,
-                    wav=wav_path.relative_to(book_output_dir).as_posix(),
-                    duration_seconds=round(duration, 3),
+            check()
+            say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
+            segments: list[RenderedSegment] = []
+            for block in chapter.blocks:
+                check()
+                if block.type is BlockType.SCENE_BREAK:
+                    segments.append(RenderedSegment(block_id=block.id, type=block.type))
+                    continue
+                text = normalize_text(block.text, profile=profile)
+                key = SegmentKey.build(
+                    engine=engine.engine_id,
+                    engine_model_version=engine.model_version,
                     voice_id=voice_id,
+                    settings=settings,
                     seed=seed,
-                    settings_hash=key.settings_hash,
-                    validation=validation,
-                    synth_attempts=attempts,
+                    normalized_text=text,
                 )
+                wav_path = cache.get(key)
+                if wav_path is not None:
+                    cache_hits += 1
+                    duration = sf.info(str(wav_path)).duration
+                    validation = cache.get_validation(key)
+                    attempts = 1
+                else:
+                    paid_spent = _gate_paid(
+                        engine, text, allow_paid, paid_spent, max_paid_usd,
+                        book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
+                    )  # fmt: skip
+                    try:
+                        ctx = (
+                            gpu.acquire(engine, engine.engine_id)
+                            if engine.uses_gpu
+                            else nullcontext()
+                        )
+                        with ctx:
+                            audio, validation, attempts = _synthesize_validated(
+                                engine, text, voice_id, settings, seed,
+                                validator=validator, max_retries=validation_max_retries,
+                                cache_dir=cache.cache_dir,
+                            )  # fmt: skip
+                    except RenderError:
+                        raise
+                    except Exception as exc:
+                        raise RenderError(
+                            f"synthesis failed: book={book.book_meta.book_id} "
+                            f"chapter={ci} ({chapter.title!r}) block={block.id} "
+                            f"engine={engine.engine_id} voice={voice_id}: {exc}"
+                        ) from exc
+                    wav_path = cache.put(key, audio)
+                    if validation is not None:
+                        cache.put_validation(key, validation)
+                    synthesized += 1
+                    duration = audio.duration_seconds
+                if validation is not None and not validation.ok:
+                    validation_failures += 1
+                    say(
+                        f"  ! validation failed (score {validation.score}) block={block.id} "
+                        f"after {attempts} attempt(s) — flagged for review"
+                    )
+                segments.append(
+                    RenderedSegment(
+                        block_id=block.id,
+                        type=block.type,
+                        wav=wav_path.relative_to(book_output_dir).as_posix(),
+                        duration_seconds=round(duration, 3),
+                        voice_id=voice_id,
+                        seed=seed,
+                        settings_hash=key.settings_hash,
+                        validation=validation,
+                        synth_attempts=attempts,
+                    )
+                )
+            rendered_chapters.append(
+                RenderedChapter(index=ci, title=chapter.title, segments=segments)
             )
-        rendered_chapters.append(RenderedChapter(index=ci, title=chapter.title, segments=segments))
+    finally:
+        if engine.uses_gpu:
+            # free only what this render could have loaded: a cloud-only render must not
+            # evict another consumer's resident model from the shared manager
+            gpu.free_all()
 
     manifest = RenderManifest(
         book_id=book.book_meta.book_id,
@@ -332,12 +363,20 @@ def render_book_multivoice(
 
     def meta_for(voice_id: str) -> VoiceMeta:
         if voice_id not in metas:
-            metas[voice_id] = library.load(voice_id)
+            meta = library.load(voice_id)
+            try:
+                # once per voice per render: cloned voices need consent bound to the
+                # actual reference audio (hash), not just a flippable bool
+                library.verify_consent(meta)
+            except VoiceLibraryError as exc:
+                raise RenderError(str(exc)) from exc
+            metas[voice_id] = meta
         return metas[voice_id]
 
     rendered_chapters: list[RenderedChapter] = []
     synthesized = cache_hits = validation_failures = 0
     paid_spent = 0.0
+    used_gpu = False
     try:
         for ci, chapter in enumerate(book.chapters, start=1):
             if (wanted and ci not in wanted) or ci not in attributed:
@@ -356,12 +395,7 @@ def render_book_multivoice(
                 for seg in by_block.get(block.id, []):
                     check()
                     voice_id = resolve_voice(seg, assignment)
-                    meta = meta_for(voice_id)
-                    if meta.kind is VoiceKind.CLONED and not meta.consent_attested:
-                        raise RenderError(
-                            f"voice {voice_id!r} (cloned) has no consent attestation; "
-                            f"refusing to render"
-                        )
+                    meta = meta_for(voice_id)  # verifies consent on first sight
                     engine = engine_for(meta.engine)
                     text = normalize_text(seg.text, profile=profile_for(meta.engine))
                     engine_voice, settings = render_voice_args(meta)
@@ -390,6 +424,7 @@ def render_book_multivoice(
                                 synth_voice = ensure_cloud_voice(
                                     meta, engine.client, library, max_slots=cloud_max_slots
                                 )
+                            used_gpu = used_gpu or engine.uses_gpu
                             ctx = (
                                 gpu.acquire(engine, engine.engine_id)
                                 if engine.uses_gpu
@@ -444,7 +479,10 @@ def render_book_multivoice(
                 RenderedChapter(index=ci, title=chapter.title, segments=rendered)
             )
     finally:
-        gpu.free_all()  # free the GPU for the next stage/process
+        # free the GPU for the next stage/process — but only if this render acquired it;
+        # a cloud-only render must not evict another consumer's resident model
+        if used_gpu:
+            gpu.free_all()
 
     manifest = RenderManifest(
         book_id=book.book_meta.book_id,

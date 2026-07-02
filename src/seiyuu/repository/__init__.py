@@ -24,6 +24,7 @@ from seiyuu.repository.jobs import (
     JobStore,
     default_jobs_db_path,
 )
+from seiyuu.repository.lock import file_lock
 
 __all__ = [
     "BookStatus",
@@ -37,6 +38,7 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_text",
     "default_jobs_db_path",
+    "file_lock",
     "get_book_status",
     "list_books",
     "resolve_book_id",

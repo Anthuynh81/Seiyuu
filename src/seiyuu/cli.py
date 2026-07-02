@@ -182,12 +182,17 @@ def render(
 
     from seiyuu.engines import get_engine
     from seiyuu.render import RenderError, estimate_render_cost_single, render_book
+    from seiyuu.voices import VoiceLibrary
 
     engine_id = engine_id or cfg.tts_engine
     voice = voice or cfg.kokoro_default_voice
     out_book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     try:
-        engine = get_engine(engine_id)
+        # chatterbox resolves clones from the library dir; the consent gate in render_book
+        # needs the same library, or --voices-dir clones would render ungated
+        extra = {"voices_dir": lib.voices_dir} if engine_id == "chatterbox" else {}
+        engine = get_engine(engine_id, **extra)
         # pre-flight: single-voice paid renders get the same estimate + ceiling + approval
         # gate as multivoice (the M5 gap: --confirm-cost used to authorize blind)
         est = estimate_render_cost_single(
@@ -211,6 +216,7 @@ def render(
             seed=seed,
             chapters=chapter_indices,
             progress=click.echo,
+            library=lib,  # consent gate for cloned voices on the single-voice path
             validator=_build_validator(cfg),
             validation_max_retries=cfg.validation_max_retries,
             allow_paid=approved_usd is not None,
@@ -848,8 +854,10 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
         meta = lib.load(voice_id)
     except VoiceLibraryError as exc:
         raise click.ClickException(str(exc)) from exc
-    if meta.kind is VoiceKind.CLONED and not meta.consent_attested:
-        raise click.ClickException(f"voice {voice_id} (cloned) has no consent attestation")
+    try:
+        lib.verify_consent(meta)  # cloned: attested + reference hash-matches the record
+    except VoiceLibraryError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     extra = {"voices_dir": lib.voices_dir} if meta.engine == "chatterbox" else {}
     engine = get_engine(meta.engine, **extra)
@@ -863,11 +871,14 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
             f"Auditioning {voice_id} is a paid call (~${cost:.4f}). Continue?", abort=True
         )
         if meta.engine == "elevenlabs" and meta.kind is VoiceKind.CLONED:
+            from seiyuu.repository import RepositoryError
+            from seiyuu.voices import CloudVoiceError
+
             try:
                 engine_voice = ensure_cloud_voice(
                     meta, engine.client, lib, max_slots=cfg.elevenlabs_max_voice_slots
                 )
-            except SynthesisError as exc:
+            except (SynthesisError, CloudVoiceError, RepositoryError) as exc:
                 raise click.ClickException(str(exc)) from exc
 
     gpu = get_gpu_manager()
@@ -926,25 +937,57 @@ def voice_add_cloud(
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
 )
+@click.option(
+    "--consent-by",
+    default=None,
+    help="Who is attesting (recorded in the attestation; default: the OS user).",
+)
 @click.option("--seed", default=41172, show_default=True, help="Pinned synthesis seed.")
 @click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
 @_voices_dir_option
 def voice_clone(
-    name: str, reference: Path, engine: str, consent: bool, seed: int, voice_id: str | None,
-    voices_dir: Path | None,
+    name: str, reference: Path, engine: str, consent: bool, consent_by: str | None,
+    seed: int, voice_id: str | None, voices_dir: Path | None,
 ) -> None:  # fmt: skip
     """Create a cloned voice from a reference clip (chatterbox local or elevenlabs IVC)."""
+    import getpass
     import shutil
 
     from seiyuu.settings import get_settings
-    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError, VoiceMeta
+    from seiyuu.voices import (
+        ConsentAttestation,
+        VoiceKind,
+        VoiceLibrary,
+        VoiceLibraryError,
+        VoiceMeta,
+    )
+    from seiyuu.voices.library import sha256_file
 
     if not consent:
         raise click.ClickException(
             "cloning requires --consent; you must have the rights/permission to clone this voice"
         )
+    import os
+
     lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
     vid = voice_id or lib.new_voice_id(name)
+    # Order matters: copy first, hash the COPY, publish it atomically, THEN save the meta.
+    # The attestation provably describes the exact bytes the library will serve — a failed
+    # copy can't leave an attested meta pointing at missing/partial audio, and the source
+    # clip changing mid-command can't be attested for.
+    ref_path = lib.reference_path(vid)
+    ref_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ref_path.with_name("reference.wav.part")
+    shutil.copyfile(reference, tmp)
+    attestation = ConsentAttestation(
+        attested_by=consent_by or getpass.getuser(),
+        reference_sha256=sha256_file(tmp),
+    )
+    os.replace(tmp, ref_path)
+    # a re-clone under an existing voice_id replaces the audio: purge conds derived from
+    # the OLD reference so nothing can speak the previously-attested speaker
+    for stale in ref_path.parent.glob("conds_*.pt"):
+        stale.unlink(missing_ok=True)
     try:
         lib.save(
             VoiceMeta(
@@ -954,14 +997,18 @@ def voice_clone(
                 engine=engine,
                 reference_audio="reference.wav",
                 consent_attested=True,
+                consent=attestation,
                 seed=seed,
                 source="user_upload",
             )  # fmt: skip
         )
     except (VoiceLibraryError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    shutil.copyfile(reference, lib.reference_path(vid))  # reference.wav is the source of truth
     click.echo(f"cloned voice {vid} ({engine}) from {reference.name}")
+    click.echo(
+        f"consent recorded: {attestation.attested_by}, "
+        f"sha256 {attestation.reference_sha256[:12]}…, {attestation.attested_at[:19]}"
+    )
 
 
 @main.command()
@@ -1556,9 +1603,13 @@ def convert(
     else:
         click.echo("== render ==")
         from seiyuu.render import estimate_render_cost_single
+        from seiyuu.voices import VoiceLibrary
 
+        lib = VoiceLibrary(voices_dir or cfg.voices_dir)
         try:
-            engine = get_engine(engine_id or cfg.tts_engine)
+            single_engine_id = engine_id or cfg.tts_engine
+            extra = {"voices_dir": lib.voices_dir} if single_engine_id == "chatterbox" else {}
+            engine = get_engine(single_engine_id, **extra)
             single_voice = voice or cfg.kokoro_default_voice
             est = estimate_render_cost_single(
                 book, engine, single_voice, book_dir,
@@ -1581,6 +1632,7 @@ def convert(
                 seed=seed,
                 chapters=chapter_indices,
                 progress=click.echo,
+                library=lib,  # consent gate for cloned voices on the single-voice path
                 validator=_build_validator(cfg),
                 validation_max_retries=cfg.validation_max_retries,
                 allow_paid=approved_usd is not None,

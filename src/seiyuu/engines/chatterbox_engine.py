@@ -2,13 +2,17 @@
 
 The SDK import is deferred into _get_model() so listing/cost/validation never load weights.
 Cloning works by precomputing "conditionals" from voices/{voice_id}/reference.wav and caching
-them to conds_{model_version}.pt; a voice switch reloads that small object instead of the
-model, which is what makes multi-voice render cheap. Native output is already canonical
+them to conds_{model_version}_{ref_sha}.pt; a voice switch reloads that small object instead
+of the model, which is what makes multi-voice render cheap. The reference hash in the name
+means stale conds (from a re-cloned or swapped reference) can never be spoken — the consent
+attestation binds to reference.wav, and only conds derived from it are usable. Native output
+is already canonical
 24 kHz. Chatterbox's generate() has NO seed parameter and samples (do_sample=True), so we MUST
 seed torch right before every generate() or identical cache keys would map to different audio.
 """
 
 import gc
+import hashlib
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
@@ -40,6 +44,7 @@ class ChatterboxEngine(TTSEngine):
             voices_dir = get_settings().voices_dir
         self._voices_dir = Path(voices_dir)
         self._model = model
+        self._ref_hashes: dict[str, str] = {}  # voice_id -> reference.wav sha256 (per run)
 
     @property
     def model_version(self) -> str:
@@ -64,8 +69,29 @@ class ChatterboxEngine(TTSEngine):
             self._model = ChatterboxTTS.from_pretrained(self._device)
         return self._model
 
+    def _reference_hash(self, voice_id: str) -> str:
+        """sha256 of the voice's reference.wav (cached per run — one hash per voice)."""
+        if voice_id not in self._ref_hashes:
+            reference = self._voices_dir / voice_id / "reference.wav"
+            if not reference.is_file():
+                raise SynthesisError(
+                    f"chatterbox: no reference.wav for voice {voice_id!r} at {reference}"
+                )
+            digest = hashlib.sha256()
+            with open(reference, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+            self._ref_hashes[voice_id] = digest.hexdigest()
+        return self._ref_hashes[voice_id]
+
     def conds_path(self, voice_id: str) -> Path:
-        return self._voices_dir / voice_id / f"conds_{self.model_version}.pt"
+        # Keyed by model version AND the reference audio's hash: conds computed from a
+        # previous clip (re-clone under the same voice_id) or a hand-swapped .pt can never
+        # be spoken — they simply never match, and conds regenerate from the (consent-
+        # verified) reference.wav. Requires reference.wav to exist, which is the source-of-
+        # truth contract anyway: a conds-only voice dir no longer synthesizes.
+        ref = self._reference_hash(voice_id)[:12]
+        return self._voices_dir / voice_id / f"conds_{self.model_version}_{ref}.pt"
 
     def _load_conds(self, path: Path) -> Any:  # seam: patched in tests, real SDK otherwise
         from chatterbox.tts import Conditionals
@@ -73,15 +99,11 @@ class ChatterboxEngine(TTSEngine):
         return Conditionals.load(str(path), map_location=self._device)
 
     def _ensure_conds(self, model: Any, voice_id: str, exaggeration: float) -> None:
-        path = self.conds_path(voice_id)
+        path = self.conds_path(voice_id)  # raises if reference.wav is missing
         if path.is_file():
             model.conds = self._load_conds(path)  # cheap voice switch
             return
         reference = self._voices_dir / voice_id / "reference.wav"
-        if not reference.is_file():
-            raise SynthesisError(
-                f"chatterbox: no reference.wav for voice {voice_id!r} at {reference}"
-            )
         model.prepare_conditionals(str(reference), exaggeration=exaggeration)
         path.parent.mkdir(parents=True, exist_ok=True)
         model.conds.save(str(path))
