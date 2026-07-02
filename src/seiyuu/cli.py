@@ -129,6 +129,12 @@ def _voices_dir_option(fn):
     help="Authorize paid cloud (ElevenLabs) synthesis without the interactive prompt.",
 )
 @click.option(
+    "--cost-token",
+    default=None,
+    help="Signed cost token from `seiyuu estimate-cost --token`; refused if anything "
+    "about the paid work drifted since it was issued.",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -150,6 +156,7 @@ def render(
     seed: int,
     multivoice: bool,
     confirm_cost: bool,
+    cost_token: str | None,
     books_dir: Path | None,
     output_dir: Path | None,
     voices_dir: Path | None,
@@ -168,29 +175,46 @@ def render(
 
     if multivoice:
         _render_multivoice_cli(
-            cfg, book, book_dir, output_dir, voices_dir, chapter_indices, confirm_cost=confirm_cost
-        )
+            cfg, book, book_dir, output_dir, voices_dir, chapter_indices,
+            confirm_cost=confirm_cost, cost_token=cost_token,
+        )  # fmt: skip
         return
 
     from seiyuu.engines import get_engine
-    from seiyuu.render import RenderError, render_book
+    from seiyuu.render import RenderError, estimate_render_cost_single, render_book
 
     engine_id = engine_id or cfg.tts_engine
     voice = voice or cfg.kokoro_default_voice
+    out_book_dir = (output_dir or cfg.output_dir) / book.book_meta.book_id
     try:
         engine = get_engine(engine_id)
+        # pre-flight: single-voice paid renders get the same estimate + ceiling + approval
+        # gate as multivoice (the M5 gap: --confirm-cost used to authorize blind)
+        est = estimate_render_cost_single(
+            book, engine, voice, out_book_dir,
+            settings={"speed": speed}, seed=seed, chapters=chapter_indices,
+        )  # fmt: skip
+        approved_usd = _pass_cost_gate(
+            cfg, est,
+            book_id=book.book_meta.book_id,
+            chapters=chapter_indices,
+            assignment_hash=None,
+            confirm_cost=confirm_cost,
+            cost_token=cost_token,
+        )  # fmt: skip
         result = render_book(
             book,
             engine,
             voice,
-            (output_dir or cfg.output_dir) / book.book_meta.book_id,
+            out_book_dir,
             settings={"speed": speed},
             seed=seed,
             chapters=chapter_indices,
             progress=click.echo,
             validator=_build_validator(cfg),
             validation_max_retries=cfg.validation_max_retries,
-            allow_paid=confirm_cost,  # single-voice cloud needs explicit --confirm-cost
+            allow_paid=approved_usd is not None,
+            max_paid_usd=approved_usd,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -332,12 +356,58 @@ def _auto_assign(report, lib, *, narrator_voice_id, thought_voice_id, accent, de
     )
 
 
+def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cost, cost_token):
+    """The M6a money gate: no paid synthesis without the ceiling AND explicit approval.
+
+    Returns the approved paid budget in USD (threaded into the render loop as its hard
+    spend cap), or None when nothing paid may run — free renders never engage the gate
+    and the per-segment refusal in the pipeline stays as the safety net. A provided
+    ``cost_token`` is verified against the FRESH estimate (single-use; any drift refuses
+    with the reason); otherwise the ceiling is enforced and approval is
+    ``--confirm-cost`` or the interactive prompt.
+    """
+    if est.total_usd <= 0:
+        return None
+    from seiyuu.render import CostGateError, CostQuote, check_ceiling, verify_quote
+
+    click.echo(
+        f"cost estimate: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s) "
+        f"({est.cached_segments} cached)"
+    )
+    try:
+        if cost_token:
+            quote = CostQuote.decode(cost_token)
+            verify_quote(
+                quote,
+                book_id=book_id,
+                chapters=chapters,
+                fingerprint=est.fingerprint,
+                assignment_hash=assignment_hash,
+                recomputed_total_usd=est.total_usd,
+                max_usd=cfg.render_max_usd,
+                data_dir=cfg.data_dir,
+            )
+            return quote.total_usd
+        check_ceiling(est.total_usd, cfg.render_max_usd)
+    except CostGateError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not confirm_cost:
+        click.confirm("This makes paid cloud API calls. Continue?", abort=True)
+    return est.total_usd
+
+
 def _render_multivoice_cli(
-    cfg, book, book_dir, output_dir, voices_dir, chapter_indices, *, confirm_cost=False
-):
+    cfg, book, book_dir, output_dir, voices_dir, chapter_indices, *,
+    confirm_cost=False, cost_token=None,
+):  # fmt: skip
     """Shared multi-voice render: load inputs, cost-gate paid engines, render, echo summary."""
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionReport
-    from seiyuu.render import RenderError, estimate_render_cost, render_book_multivoice
+    from seiyuu.render import (
+        RenderError,
+        estimate_render_cost,
+        hash_assignment,
+        render_book_multivoice,
+    )
     from seiyuu.settings import get_settings
     from seiyuu.voices import ASSIGNMENT_NAME, VoiceAssignment, VoiceLibrary
 
@@ -358,19 +428,18 @@ def _render_multivoice_cli(
     assignment = VoiceAssignment.model_validate_json(assign_path.read_text(encoding="utf-8"))
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
 
-    # cost gate: estimate first; paid segments require explicit confirmation before any API call
+    # cost gate: estimate first; paid segments require the ceiling + explicit approval
     est = estimate_render_cost(
         report, book, lib, assignment, out_book_dir, chapters=chapter_indices
     )
-    allow_paid = False
-    if est.total_usd > 0:
-        click.echo(
-            f"cost estimate: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s) "
-            f"({est.cached_segments} cached)"
-        )
-        if not confirm_cost:
-            click.confirm("This makes paid cloud API calls. Continue?", abort=True)
-        allow_paid = True
+    approved_usd = _pass_cost_gate(
+        cfg, est,
+        book_id=book_id,
+        chapters=chapter_indices,
+        assignment_hash=hash_assignment(assignment),
+        confirm_cost=confirm_cost,
+        cost_token=cost_token,
+    )  # fmt: skip
 
     try:
         result = render_book_multivoice(
@@ -383,7 +452,8 @@ def _render_multivoice_cli(
             progress=click.echo,
             validator=_build_validator(cfg),
             validation_max_retries=cfg.validation_max_retries,
-            allow_paid=allow_paid,
+            allow_paid=approved_usd is not None,
+            max_paid_usd=approved_usd,
             cloud_max_slots=cfg.elevenlabs_max_voice_slots,
         )
     except (RenderError, ValueError) as exc:
@@ -1223,29 +1293,94 @@ def _load_multivoice_inputs(cfg, book_id, books_dir, output_dir, voices_dir, cha
     "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
     help="Render output root (default: settings.output_dir).",
 )  # fmt: skip
+@click.option(
+    "--token", "issue_token", is_flag=True,
+    help="Also print a signed cost token for `render --cost-token` (short-lived, "
+    "single-use; refused on any drift in the paid work).",
+)  # fmt: skip
+@click.option(
+    "--voice", default=None,
+    help="Single-voice mode: estimate `render --voice X` instead of --multivoice "
+    "(pass the same --engine/--speed/--seed you will render with).",
+)  # fmt: skip
+@click.option("--engine", "engine_id", default=None, help="Single-voice TTS engine.")
+@click.option("--speed", default=1.0, show_default=True, help="Single-voice speed multiplier.")
+@click.option("--seed", default=41172, show_default=True, help="Single-voice synthesis seed.")
 @_voices_dir_option
 def estimate_cost(
     book_id: str,
     chapter_indices: tuple[int, ...],
     books_dir: Path | None,
     output_dir: Path | None,
+    issue_token: bool,
+    voice: str | None,
+    engine_id: str | None,
+    speed: float,
+    seed: int,
     voices_dir: Path | None,
 ) -> None:
-    """Estimate the USD cost of a multi-voice render (only uncached, paid segments cost money)."""
-    from seiyuu.render import estimate_render_cost
+    """Estimate the USD cost of a render (only uncached, paid segments cost money).
+
+    Multi-voice by default; pass --voice/--engine for the single-voice render's estimate.
+    The estimate must be built with the same parameters the render will use, or a token
+    issued from it will (correctly) refuse.
+    """
     from seiyuu.settings import get_settings
 
     cfg = get_settings()
-    report, book, lib, assignment, out_book_dir = _load_multivoice_inputs(
-        cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices
-    )
-    est = estimate_render_cost(
-        report, book, lib, assignment, out_book_dir, chapters=chapter_indices
-    )
+    if voice or engine_id:
+        # single-voice mode: mirrors the render command's defaults exactly
+        from seiyuu.engines import get_engine
+        from seiyuu.ingest.models import NormalizedBook
+        from seiyuu.render import estimate_render_cost_single
+
+        book_dir = _resolve_book_dir(
+            books_dir or cfg.books_dir, book_id, "normalized.json", "Run `seiyuu ingest` first."
+        )
+        book = NormalizedBook.model_validate_json(
+            (book_dir / "normalized.json").read_text(encoding="utf-8")
+        )
+        est = estimate_render_cost_single(
+            book,
+            get_engine(engine_id or cfg.tts_engine),
+            voice or cfg.kokoro_default_voice,
+            (output_dir or cfg.output_dir) / book.book_meta.book_id,
+            settings={"speed": speed},
+            seed=seed,
+            chapters=chapter_indices,
+        )
+        assignment_hash = None
+    else:
+        from seiyuu.render import estimate_render_cost, hash_assignment
+
+        report, book, lib, assignment, out_book_dir = _load_multivoice_inputs(
+            cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices
+        )
+        est = estimate_render_cost(
+            report, book, lib, assignment, out_book_dir, chapters=chapter_indices
+        )
+        assignment_hash = hash_assignment(assignment)
     click.echo(
         f"estimated cost: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s); "
         f"{est.cached_segments} cached, {est.free_segments} free (local)"
     )
+    if issue_token:
+        from seiyuu.render import CostGateError, issue_quote
+
+        try:
+            quote = issue_quote(
+                est,
+                book_id=book.book_meta.book_id,
+                chapters=chapter_indices,
+                assignment_hash=assignment_hash,
+                max_usd=cfg.render_max_usd,
+                ttl_seconds=cfg.cost_quote_ttl_seconds,
+                data_dir=cfg.data_dir,
+            )
+        except CostGateError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"cost token (valid {cfg.cost_quote_ttl_seconds // 60} min, single-use):")
+        click.echo(quote.encode())
 
 
 @main.command()
@@ -1420,12 +1555,27 @@ def convert(
         )
     else:
         click.echo("== render ==")
+        from seiyuu.render import estimate_render_cost_single
+
         try:
             engine = get_engine(engine_id or cfg.tts_engine)
+            single_voice = voice or cfg.kokoro_default_voice
+            est = estimate_render_cost_single(
+                book, engine, single_voice, book_dir,
+                settings={"speed": speed}, seed=seed, chapters=chapter_indices,
+            )  # fmt: skip
+            approved_usd = _pass_cost_gate(
+                cfg, est,
+                book_id=book.book_meta.book_id,
+                chapters=chapter_indices,
+                assignment_hash=None,
+                confirm_cost=confirm_cost,
+                cost_token=None,
+            )  # fmt: skip
             render_result = render_book(
                 book,
                 engine,
-                voice or cfg.kokoro_default_voice,
+                single_voice,
                 book_dir,
                 settings={"speed": speed},
                 seed=seed,
@@ -1433,7 +1583,8 @@ def convert(
                 progress=click.echo,
                 validator=_build_validator(cfg),
                 validation_max_retries=cfg.validation_max_retries,
-                allow_paid=confirm_cost,
+                allow_paid=approved_usd is not None,
+                max_paid_usd=approved_usd,
             )
         except (RenderError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc

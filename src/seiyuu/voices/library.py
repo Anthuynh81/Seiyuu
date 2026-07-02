@@ -39,7 +39,15 @@ class VoiceLibrary:
         path = self.meta_path(voice_id)
         if not path.is_file():
             raise VoiceLibraryError(f"voice {voice_id!r} not found at {path}")
-        return VoiceMeta.model_validate_json(path.read_text(encoding="utf-8"))
+        meta = VoiceMeta.model_validate_json(path.read_text(encoding="utf-8"))
+        if meta.voice_id != voice_id:
+            # A hand-renamed/copied voice dir would make the cost estimator and the render
+            # loop disagree on SegmentKeys (the money gate's core parity) — refuse loudly.
+            raise VoiceLibraryError(
+                f"voice directory {voice_id!r} contains meta.json for {meta.voice_id!r} "
+                f"(directory renamed or copied by hand?); fix meta.json or the directory name"
+            )
+        return meta
 
     def save(self, meta: VoiceMeta) -> Path:
         if meta.kind is VoiceKind.CLONED and not meta.consent_attested:

@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # settings.py lives at src/seiyuu/settings.py; the project is always an
@@ -93,8 +94,16 @@ class Settings(BaseSettings):
     # Cloud TTS (M5, ElevenLabs). Paid; renders go through the explicit cost gate. The key's
     # absence must not raise until the provider is actually used.
     elevenlabs_model_id: str = "eleven_multilingual_v2"
-    elevenlabs_price_per_1k_chars: float = 0.30  # conservative USD/1k chars for the cost gate
+    # Conservative USD/1k chars for the cost gate. MUST be > 0: paid-ness everywhere derives
+    # from cost_estimate(text) > 0, so a zero price would silently disable the whole gate.
+    elevenlabs_price_per_1k_chars: float = Field(0.30, gt=0)
     elevenlabs_max_voice_slots: int = 10  # tier-limited; evict LRU seiyuu voices past this
+
+    # Cost gate (M6a). Hard ceiling on ONE render's paid total — no flag or token can
+    # authorize past it; raise it here deliberately for a big cloud render. Quotes
+    # (signed cost tokens) expire after the TTL; expiry just means re-estimating.
+    render_max_usd: float = 25.0
+    cost_quote_ttl_seconds: int = 900
 
 
 @lru_cache

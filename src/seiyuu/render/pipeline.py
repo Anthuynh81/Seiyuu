@@ -5,6 +5,7 @@ breaks pass through to the manifest as pause markers. Every synthesis call
 goes through the segment cache.
 """
 
+import hashlib
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -45,17 +46,49 @@ class CostEstimate:
     paid_segments: int  # uncached segments that will cost money
     cached_segments: int  # already rendered, free to reuse
     free_segments: int  # uncached but local (free)
+    # Identity of the paid work (hash over paid-engine SegmentKey hashes, cached or not).
+    # Cache growth never changes it; any text/voice/settings/seed change does. The cost
+    # gate binds its signed quotes to this.
+    fingerprint: str = ""
 
 
-def _gate_paid(engine: TTSEngine, text: str, allow_paid: bool, *, book_id, block_id, voice) -> None:
-    """Refuse a paid synthesis unless explicitly authorized — no automatic code path may bill."""
+def _paid_fingerprint(paid_key_hashes: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(paid_key_hashes)).encode("utf-8")).hexdigest()
+
+
+def _gate_paid(
+    engine: TTSEngine,
+    text: str,
+    allow_paid: bool,
+    spent_usd: float,
+    max_paid_usd: float | None,
+    *,
+    book_id,
+    block_id,
+    voice,
+) -> float:
+    """Refuse a paid synthesis unless explicitly authorized AND within the approved budget;
+    returns the updated running paid total. No automatic code path may bill, and an approved
+    render may never bill past its approval — if the segment cache changed under us mid-run
+    (eviction, concurrent job), fail loudly instead of overspending."""
     cost = engine.cost_estimate(text)
-    if cost > 0 and not allow_paid:
+    if cost <= 0:
+        return spent_usd
+    if not allow_paid:
         raise RenderError(
             f"refusing paid synthesis (~${cost:.4f}) book={book_id} block={block_id} "
             f"voice={voice} engine={engine.engine_id} without cost confirmation; confirm the "
             f"estimate first (CLI: `seiyuu estimate-cost`, then render with --confirm-cost)"
         )
+    spent_usd += cost
+    # a cent of slack: the estimate's total is rounded, per-segment costs are not
+    if max_paid_usd is not None and spent_usd > max_paid_usd + 0.01:
+        raise RenderError(
+            f"paid synthesis (${spent_usd:.4f} so far) would exceed the approved budget "
+            f"(${max_paid_usd:.4f}) at book={book_id} block={block_id} voice={voice}; the "
+            f"segment cache changed since the estimate — re-run estimate-cost and re-approve"
+        )
+    return spent_usd
 
 
 @dataclass
@@ -129,6 +162,7 @@ def render_book(
     validator: Validator | None = None,
     validation_max_retries: int = 2,
     allow_paid: bool = False,
+    max_paid_usd: float | None = None,
     check_cancel: Callable[[], None] | None = None,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
@@ -154,6 +188,7 @@ def render_book(
     rendered_chapters: list[RenderedChapter] = []
     profile = profile_for(engine.engine_id)
     synthesized = cache_hits = validation_failures = 0
+    paid_spent = 0.0
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
             continue
@@ -181,8 +216,8 @@ def render_book(
                 validation = cache.get_validation(key)
                 attempts = 1
             else:
-                _gate_paid(
-                    engine, text, allow_paid,
+                paid_spent = _gate_paid(
+                    engine, text, allow_paid, paid_spent, max_paid_usd,
                     book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
                 )  # fmt: skip
                 try:
@@ -260,6 +295,7 @@ def render_book_multivoice(
     validator: Validator | None = None,
     validation_max_retries: int = 2,
     allow_paid: bool = False,
+    max_paid_usd: float | None = None,
     cloud_max_slots: int = 10,
     check_cancel: Callable[[], None] | None = None,
 ) -> RenderResult:
@@ -301,6 +337,7 @@ def render_book_multivoice(
 
     rendered_chapters: list[RenderedChapter] = []
     synthesized = cache_hits = validation_failures = 0
+    paid_spent = 0.0
     try:
         for ci, chapter in enumerate(book.chapters, start=1):
             if (wanted and ci not in wanted) or ci not in attributed:
@@ -343,8 +380,8 @@ def render_book_multivoice(
                         validation = cache.get_validation(key)
                         attempts = 1
                     else:
-                        _gate_paid(
-                            engine, text, allow_paid,
+                        paid_spent = _gate_paid(
+                            engine, text, allow_paid, paid_spent, max_paid_usd,
                             book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
                         )  # fmt: skip
                         try:
@@ -463,6 +500,7 @@ def estimate_render_cost(
 
     total = 0.0
     paid = cached = free = 0
+    paid_hashes: list[str] = []
     for ci, chapter in enumerate(book.chapters, start=1):
         if (wanted and ci not in wanted) or ci not in attributed:
             continue
@@ -473,27 +511,91 @@ def estimate_render_cost(
             if block.type is BlockType.SCENE_BREAK:
                 continue
             for seg in by_block.get(block.id, []):
-                meta = meta_for(resolve_voice(seg, assignment))
+                # resolved id, NOT meta.voice_id: must build the EXACT SegmentKey the render
+                # loop will use, or the gate authorizes a different bill than render runs up
+                voice_id = resolve_voice(seg, assignment)
+                meta = meta_for(voice_id)
                 engine = engine_for(meta.engine)
                 text = normalize_text(seg.text, profile=profile_for(meta.engine))
                 _, settings = render_voice_args(meta)
                 key = SegmentKey.build(
                     engine=meta.engine,
                     engine_model_version=engine.model_version,
-                    voice_id=meta.voice_id,
+                    voice_id=voice_id,
                     settings=settings,
                     seed=meta.seed,
                     normalized_text=text,
                 )
+                cost = engine.cost_estimate(text)
+                if cost > 0:
+                    paid_hashes.append(key.key_hash)  # paid identity, cached or not
                 if cache.get(key) is not None:
                     cached += 1
                     continue
-                cost = engine.cost_estimate(text)
                 if cost > 0:
                     total += cost
                     paid += 1
                 else:
                     free += 1
     return CostEstimate(
-        total_usd=round(total, 4), paid_segments=paid, cached_segments=cached, free_segments=free
+        total_usd=round(total, 4),
+        paid_segments=paid,
+        cached_segments=cached,
+        free_segments=free,
+        fingerprint=_paid_fingerprint(paid_hashes),
+    )
+
+
+def estimate_render_cost_single(
+    book: NormalizedBook,
+    engine: TTSEngine,
+    voice_id: str,
+    book_output_dir: Path,
+    *,
+    settings: dict[str, Any] | None = None,
+    seed: int | None = None,
+    chapters: tuple[int, ...] = (),
+) -> CostEstimate:
+    """Pre-flight cost of a SINGLE-VOICE render (M6a) — the counterpart the M5 gate lacked,
+    so a paid engine could be authorized with no estimate at all. Same loop and FROZEN
+    SegmentKey as render_book, so cache hits are counted exactly; free engines total 0."""
+    settings = settings or {}
+    cache = SegmentCache(Path(book_output_dir) / "cache")
+    profile = profile_for(engine.engine_id)
+    wanted = set(chapters)
+    total = 0.0
+    paid = cached = free = 0
+    paid_hashes: list[str] = []
+    for ci, chapter in enumerate(book.chapters, start=1):
+        if wanted and ci not in wanted:
+            continue
+        for block in chapter.blocks:
+            if block.type is BlockType.SCENE_BREAK:
+                continue
+            text = normalize_text(block.text, profile=profile)
+            key = SegmentKey.build(
+                engine=engine.engine_id,
+                engine_model_version=engine.model_version,
+                voice_id=voice_id,
+                settings=settings,
+                seed=seed,
+                normalized_text=text,
+            )
+            cost = engine.cost_estimate(text)
+            if cost > 0:
+                paid_hashes.append(key.key_hash)
+            if cache.get(key) is not None:
+                cached += 1
+                continue
+            if cost > 0:
+                total += cost
+                paid += 1
+            else:
+                free += 1
+    return CostEstimate(
+        total_usd=round(total, 4),
+        paid_segments=paid,
+        cached_segments=cached,
+        free_segments=free,
+        fingerprint=_paid_fingerprint(paid_hashes),
     )
