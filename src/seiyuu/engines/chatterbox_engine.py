@@ -62,6 +62,10 @@ class ChatterboxEngine(TTSEngine):
     def cost_estimate(self, text: str) -> float:
         return 0.0
 
+    def warm(self) -> None:
+        """Load the Chatterbox weights (M6b warmup job); voice conds stay lazy per clone."""
+        self._get_model()
+
     def _get_model(self) -> Any:
         if self._model is None:
             from chatterbox.tts import ChatterboxTTS  # SDK import stays inside the adapter

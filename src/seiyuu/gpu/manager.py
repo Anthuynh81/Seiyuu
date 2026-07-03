@@ -57,6 +57,13 @@ class GpuResourceManager:
     def resident(self) -> str | None:
         return self._resident_name or None
 
+    def holds(self, consumer: GpuConsumer) -> bool:
+        """Is exactly this consumer the resident one? Deliberately lock-free: acquire()
+        holds the lock for its whole with-body (a job's duration), so taking it here
+        would block a display read behind the running job. A GIL-atomic reference
+        compare is racy only in the benign direction (a snapshot for UI/refusal text)."""
+        return self._resident is consumer
+
 
 @lru_cache
 def get_gpu_manager() -> GpuResourceManager:

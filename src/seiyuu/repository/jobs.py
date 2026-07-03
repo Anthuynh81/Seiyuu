@@ -19,6 +19,7 @@ Unlike ``books/{id}/attribution.db`` (a per-book cache) this DB is global server
 which is why it lives under ``data_dir``, not next to book artifacts.
 """
 
+import json
 import secrets
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -44,6 +45,9 @@ class JobKind(StrEnum):
     RENDER = "render"
     ASSEMBLE = "assemble"
     MASTER = "master"
+    # M6b (user-approved): engine weight pre-load. Its subject is an engine, not a book —
+    # the book_id column stores "engine:{engine_id}" (a documented overload).
+    WARMUP = "warmup"
 
 
 class JobState(StrEnum):
@@ -89,6 +93,10 @@ class Job(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # M6b (user-approved additive column): the request payload the handler re-parses with
+    # the same pydantic model the route validated. May contain a cost token in plaintext
+    # (the render handler needs it) — the API layer redacts it before serialization.
+    params: dict | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -106,7 +114,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     started_at       TEXT,
-    finished_at      TEXT
+    finished_at      TEXT,
+    params           TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 CREATE INDEX IF NOT EXISTS jobs_by_book ON jobs (book_id, created_at);
@@ -119,6 +128,7 @@ def _now() -> str:
 
 
 def _row_to_job(row: sqlite3.Row) -> Job:
+    raw_params = row["params"]
     return Job(
         job_id=row["job_id"],
         book_id=row["book_id"],
@@ -130,6 +140,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        params=json.loads(raw_params) if raw_params else None,
     )
 
 
@@ -148,6 +159,11 @@ class JobStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # M6b additive migration (user-approved): idempotent, pre-M6b rows read as
+            # params=None. Checked via PRAGMA because ALTER has no IF NOT EXISTS.
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+            if "params" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN params TEXT")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -163,13 +179,20 @@ class JobStore:
 
     # -- creation / reads ------------------------------------------------------------
 
-    def create(self, book_id: str, kind: JobKind | str) -> Job:
+    def create(self, book_id: str, kind: JobKind | str, *, params: dict | None = None) -> Job:
         job_id = secrets.token_hex(8)
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO jobs (job_id, book_id, kind, state, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (job_id, book_id, JobKind(kind).value, JobState.QUEUED.value, _now()),
+                "INSERT INTO jobs (job_id, book_id, kind, state, created_at, params) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    book_id,
+                    JobKind(kind).value,
+                    JobState.QUEUED.value,
+                    _now(),
+                    json.dumps(params) if params is not None else None,
+                ),
             )
         return self.get(job_id)
 

@@ -3,8 +3,9 @@ verbatim where the doc says so; everything here is a NEW view-model the doc mark
 API keys are never serialized — only ``*_configured`` booleans."""
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from seiyuu.repository import Job
 
@@ -14,9 +15,22 @@ class HealthOut(BaseModel):
     version: str
 
 
+def _redact_params(params: dict | None) -> dict | None:
+    """The stored params may carry a live cost token (the render handler consumes it);
+    over HTTP it is always reduced to presence + a signature suffix for support."""
+    if params is None or "cost_token" not in params:
+        return params
+    token = params["cost_token"]
+    redacted = dict(params)
+    redacted["cost_token"] = (
+        {"present": True, "sig_suffix": str(token)[-8:]} if token else {"present": False}
+    )
+    return redacted
+
+
 class JobOut(BaseModel):
     """``Job`` plus ``is_terminal`` (a property, so pydantic won't serialize it from the
-    model) and the additive ``params`` (M6b-2; ``cost_token`` inside is redacted)."""
+    model) and ``params`` with any cost token redacted."""
 
     job_id: str
     book_id: str
@@ -45,8 +59,59 @@ class JobOut(BaseModel):
             started_at=job.started_at,
             finished_at=job.finished_at,
             is_terminal=job.is_terminal,
-            params=getattr(job, "params", None),
+            params=_redact_params(job.params),
         )
+
+
+class JobsOut(BaseModel):
+    jobs: list[JobOut]
+
+
+# -- job params (scoping doc section 4): the SAME model validates the route request and
+# -- re-parses Job.params inside the handler, so the two can never drift.
+
+
+class WarmupParams(BaseModel):
+    engine_id: str
+
+
+class AttributeParams(BaseModel):
+    chapters: list[int] = Field(default_factory=list)  # [] = whole book; subsets merge
+    provider: Literal["local", "anthropic"] | None = None  # None -> settings default
+    model: str | None = None
+    prompt_version: str | None = None
+    use_hybrid: bool | None = None  # None -> settings.attribution_hybrid
+    confirm_paid: bool = False  # checked at enqueue against the EFFECTIVE paid-ness
+
+
+class PauseWrite(BaseModel):
+    """Explicit-null semantics: None = settings default, 0.0 honored (deliberately
+    fixing the CLI's `override or default` falsy-zero bug)."""
+
+    paragraph: float | None = Field(None, ge=0)
+    after_heading: float | None = Field(None, ge=0)
+    scene_break: float | None = Field(None, ge=0)
+    dialogue: float | None = Field(None, ge=0)
+    chapter_lead_in: float | None = Field(None, ge=0)
+    chapter_lead_out: float | None = Field(None, ge=0)
+
+
+class LoudnessWrite(BaseModel):
+    enabled: bool | None = None  # None -> settings.loudness_enabled
+    target_lufs: float | None = None  # None -> settings.loudness_target_lufs; 0.0 honored
+
+
+class AssembleParams(BaseModel):
+    pauses: PauseWrite | None = None
+    loudness: LoudnessWrite | None = None
+
+
+class MasterParams(BaseModel):
+    pauses: PauseWrite | None = None
+    loudness: LoudnessWrite | None = None
+    bitrate: str = "64k"
+    target_minutes: float | None = Field(None, gt=0)
+    use_cover: bool = True  # use the uploaded cover art if present
 
 
 class OllamaStatus(BaseModel):
@@ -113,7 +178,7 @@ class EngineInfo(BaseModel):
     paid: bool
     supports_cloning: bool
     weights_cached: bool | None  # best-effort HF-cache probe; None for cloud engines
-    resident: bool  # loaded through the EngineRegistry this process (warmup/audition)
+    resident: bool  # identity truth: the registry's instance IS the GPU manager's resident
 
 
 class EnginesOut(BaseModel):

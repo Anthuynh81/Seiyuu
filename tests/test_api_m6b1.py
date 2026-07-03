@@ -223,12 +223,42 @@ def test_registry_builds_chatterbox_with_settings_voices_dir(tmp_path) -> None:
     assert registry.get("chatterbox") is engine  # process-lifetime instance, not a new one
 
 
+def test_registry_residency_is_identity_with_gpu_manager(tmp_path) -> None:
+    from seiyuu.gpu import GpuResourceManager
+
+    gpu = GpuResourceManager()
+    registry = EngineRegistry(make_settings(tmp_path), gpu_manager=gpu)
+    engine = registry.get("chatterbox")
+    assert not registry.is_resident("chatterbox")  # constructed != loaded
+
+    with gpu.acquire(engine, "engine:chatterbox"):
+        pass
+    assert registry.is_resident("chatterbox")  # lazy release keeps it resident
+
+    # Eviction truth (the stale-flag bug): a competitor acquire (an attribution run's
+    # LLM) unloads the engine — residency must flip to cold WITHOUT anyone telling the
+    # registry, or the M6b-6 cold-engine refusal would skip the warmup job.
+    class _Llm:
+        def unload(self) -> None:
+            pass
+
+    with gpu.acquire(_Llm(), "llm:qwen"):
+        pass
+    assert not registry.is_resident("chatterbox")
+
+
 def test_registry_invalidate_drops_instance_and_residency(tmp_path) -> None:
-    registry = EngineRegistry(make_settings(tmp_path))
+    from seiyuu.gpu import GpuResourceManager
+
+    gpu = GpuResourceManager()
+    registry = EngineRegistry(make_settings(tmp_path), gpu_manager=gpu)
     first = registry.get("chatterbox")
-    registry.mark_loaded("chatterbox")
+    with gpu.acquire(first, "engine:chatterbox"):
+        pass
     assert registry.is_resident("chatterbox")
     registry.invalidate("chatterbox")
+    # the OLD instance is still the manager's resident, but it is no longer this
+    # registry's instance — the new one reads cold until warmed
     assert not registry.is_resident("chatterbox")
     assert registry.get("chatterbox") is not first
 

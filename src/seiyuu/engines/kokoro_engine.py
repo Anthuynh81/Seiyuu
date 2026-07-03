@@ -56,6 +56,11 @@ class KokoroEngine(TTSEngine):
     def cost_estimate(self, text: str) -> float:
         return 0.0
 
+    def warm(self) -> None:
+        """Load the default (American English) pipeline — the weights are shared, so any
+        lang_code pulls the full model; blends/voicepacks stay lazy per voice."""
+        self._pipeline("a")
+
     def unload(self) -> None:
         """Drop loaded KPipelines and free VRAM (GPU resource manager handoff)."""
         import gc

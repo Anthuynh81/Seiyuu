@@ -9,6 +9,12 @@ instead of a multi-GB reload. The chatterbox engine is constructed with
 consent gate. ``invalidate`` only drops the cached instance (clone endpoint: stale
 per-run ``_ref_hashes`` must not survive a re-clone) — it never calls ``unload()``;
 VRAM lifecycle belongs to the GPU manager alone (lazy release on competitor acquire).
+
+Residency is never a flag: ``is_resident`` identity-compares the registry's instance
+against the GPU manager's resident consumer, so an attribution run (or any competitor
+acquire) that evicts a warmed engine flips it back to cold automatically. A stale
+"resident" answer would make the M6b-6 cold-engine refusal skip the warmup job and pin
+a request thread on a multi-GB load — the exact failure the refusal exists to prevent.
 """
 
 import os
@@ -16,6 +22,7 @@ import threading
 from pathlib import Path
 
 from seiyuu.engines import TTSEngine, get_engine, list_engine_ids
+from seiyuu.gpu import GpuResourceManager, get_gpu_manager
 from seiyuu.settings import Settings
 
 # Static catalog facts with no home on the adapter classes; uses_gpu/requires_validation
@@ -31,11 +38,11 @@ _HF_NEEDLES = {"kokoro": "kokoro-82m", "chatterbox": "chatterbox"}
 
 
 class EngineRegistry:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, gpu_manager: GpuResourceManager | None = None) -> None:
         self._settings = settings
+        self._gpu = gpu_manager or get_gpu_manager()  # injectable for tests; global otherwise
         self._lock = threading.Lock()
         self._engines: dict[str, TTSEngine] = {}
-        self._loaded: set[str] = set()
 
     def get(self, engine_id: str) -> TTSEngine:
         """The shared instance, constructed on first use. Raises ValueError on an
@@ -64,19 +71,18 @@ class EngineRegistry:
         return {}
 
     def invalidate(self, engine_id: str) -> None:
-        """Drop the cached instance and its resident mark. No unload() here — the GPU
-        manager still tracks the old instance and frees it on the next acquire."""
+        """Drop the cached instance. No unload() here — the GPU manager still tracks
+        the old instance and frees it on the next competitor acquire; residency for the
+        NEW instance reads False by identity until it is warmed."""
         with self._lock:
             self._engines.pop(engine_id, None)
-            self._loaded.discard(engine_id)
-
-    def mark_loaded(self, engine_id: str) -> None:
-        """Record a completed weights load (warmup job / first audition)."""
-        with self._lock:
-            self._loaded.add(engine_id)
 
     def is_resident(self, engine_id: str) -> bool:
-        return engine_id in self._loaded
+        """True iff THIS registry's instance is the GPU manager's resident consumer —
+        truth by identity, never a flag that could go stale on eviction."""
+        with self._lock:
+            engine = self._engines.get(engine_id)
+        return engine is not None and self._gpu.holds(engine)
 
 
 def weights_cached(engine_id: str) -> bool | None:

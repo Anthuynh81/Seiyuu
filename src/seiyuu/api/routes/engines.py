@@ -8,13 +8,22 @@ POST /engines/{id}/warmup is M6b-2 — it needs the ``warmup`` job kind.
 
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, Response
 
-from seiyuu.api.deps import RegistryDep, SettingsDep
+from seiyuu.api.deps import RegistryDep, RunnerDep, SettingsDep, StoreDep
+from seiyuu.api.enqueue import enqueue_job
 from seiyuu.api.errors import ApiError
 from seiyuu.api.registry import ENGINE_FACTS, catalog_ids, weights_cached
-from seiyuu.api.schemas import EngineInfo, EnginesOut, EngineVoiceOut, EngineVoicesOut
+from seiyuu.api.schemas import (
+    EngineInfo,
+    EnginesOut,
+    EngineVoiceOut,
+    EngineVoicesOut,
+    JobOut,
+    WarmupParams,
+)
 from seiyuu.engines import get_engine_class
+from seiyuu.repository import JobKind
 
 router = APIRouter(tags=["engines"])
 
@@ -48,6 +57,34 @@ def list_engines(registry: RegistryDep) -> EnginesOut:
             )
         )
     return EnginesOut(engines=infos)
+
+
+@router.post("/engines/{engine_id}/warmup", response_model=JobOut, status_code=202)
+def warmup_engine(
+    engine_id: str,
+    request: Request,
+    response: Response,
+    store: StoreDep,
+    runner: RunnerDep,
+) -> JobOut:
+    """Pre-load a GPU engine's weights as a job (the sanctioned path for first-ever
+    engine use — sync auditions refuse cold engines instead of pinning a request thread
+    for a multi-GB download with no cancel story). The model stays lazily resident."""
+    _require_known(engine_id)
+    if not get_engine_class(engine_id).uses_gpu:
+        raise ApiError(
+            409, "nothing_to_warm", f"{engine_id} is a cloud engine; it holds no local weights"
+        )
+    job = enqueue_job(
+        store=store,
+        runner=runner,
+        mutex=request.app.state.enqueue_mutex,
+        book_id=f"engine:{engine_id}",  # documented subject-id overload of the book column
+        kind=JobKind.WARMUP,
+        params=WarmupParams(engine_id=engine_id).model_dump(),
+    )
+    response.headers["Location"] = f"/api/jobs/{job.job_id}"
+    return JobOut.from_job(job)
 
 
 @router.get("/engines/{engine_id}/voices", response_model=EngineVoicesOut)

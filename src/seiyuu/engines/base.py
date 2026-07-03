@@ -62,6 +62,10 @@ class TTSEngine(ABC):
     def unload(self) -> None:  # noqa: B027 — intentional no-op default; cloud engines override nothing
         """Free GPU memory (GpuConsumer protocol). No-op default; cloud engines need nothing."""
 
+    def warm(self) -> None:  # noqa: B027 — intentional no-op default; cloud engines have no weights
+        """Pre-load model weights so the first synthesis is fast (M6b warmup job).
+        No-op default; local engines override to trigger their lazy load."""
+
     def synthesize(
         self, text: str, voice: str, settings: dict[str, Any] | None = None
     ) -> AudioFile:

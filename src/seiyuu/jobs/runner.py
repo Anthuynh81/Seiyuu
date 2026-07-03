@@ -89,11 +89,11 @@ class JobRunner:
         self._thread.start()
         return reconciled
 
-    def enqueue(self, book_id: str, kind: JobKind | str) -> Job:
+    def enqueue(self, book_id: str, kind: JobKind | str, *, params: dict | None = None) -> Job:
         """Create a queued job row and hand it to the worker."""
         if self._thread is None or self._stop.is_set():
             raise RuntimeError("job runner is not running; start() it before enqueueing")
-        job = self._store.create(book_id, kind)
+        job = self._store.create(book_id, kind, params=params)
         self._queue.put(job.job_id)
         return job
 
