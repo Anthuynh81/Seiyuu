@@ -43,6 +43,11 @@ _LEDGER_NAME = "quotes.db"
 _TOKEN_PREFIX = "cq1."  # cost quote, format v1
 _USD_EPSILON = 1e-6
 
+# A full-book render is a long GPU job; above this many speakable segments both the CLI
+# (interactive confirm) and the API (409 full_render_confirmation_required) require an
+# explicit go-ahead. Free renders aren't money-gated, so this is the only whole-book stop.
+FULL_RENDER_CONFIRM_BLOCKS = 300
+
 
 class CostGateError(Exception):
     """Loud gate refusal: the message states exactly why and what to do about it."""

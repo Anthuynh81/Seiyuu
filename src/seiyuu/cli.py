@@ -1495,10 +1495,6 @@ def validate(book_id: str, show_all: bool, output_dir: Path | None) -> None:
             click.echo(f"      heard:    {textwrap.shorten(v.transcript, 70)}")
 
 
-# A full-book render is a long GPU job; above this many segments, confirm.
-FULL_RENDER_CONFIRM_BLOCKS = 300
-
-
 @main.command()
 @click.argument("epub_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--engine", "engine_id", default=None, help="TTS engine (default from settings).")
@@ -1575,6 +1571,7 @@ def convert(
     from seiyuu.engines import get_engine
     from seiyuu.ingest import IngestError, parse_epub, write_normalized
     from seiyuu.render import RenderError, render_book
+    from seiyuu.render.gate import FULL_RENDER_CONFIRM_BLOCKS
     from seiyuu.settings import get_settings
 
     cfg = get_settings()

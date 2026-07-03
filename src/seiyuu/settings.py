@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     render_max_usd: float = 25.0
     cost_quote_ttl_seconds: int = 900
 
+    # HTTP API (M6b). Upload cap for EPUBs / reference audio / cover art; exposed to the
+    # UI via /api/system limits so the client can refuse early instead of eating a 413.
+    max_upload_bytes: int = Field(100 * 1024 * 1024, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:
