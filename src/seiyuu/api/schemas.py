@@ -3,12 +3,13 @@ verbatim where the doc says so; everything here is a NEW view-model the doc mark
 API keys are never serialized — only ``*_configured`` booleans."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from seiyuu.attribute.models import AttributionReport
 from seiyuu.repository import BookStatus, Job
+from seiyuu.voices import VoiceAssignment
 
 
 class HealthOut(BaseModel):
@@ -221,6 +222,71 @@ class SegmentBrowserOut(BaseModel):
     title: str
     segments: list[SegmentRow]
     edit_warnings: list[str]
+
+
+# -- edits (scoping doc section 4: Edits) -------------------------------------------------
+# Request DTOs STRUCTURALLY forbid the anchor fields (expected_name, expected_loser_name,
+# expected_winner_name, text_anchor): anchoring is server-authoritative — record_edit
+# fills anchors from what is live NOW, so a client can never smuggle a stale or forged
+# anchor. extra="forbid" turns any attempt into a 422.
+
+
+class RenameRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    op: Literal["rename"]
+    character_id: str
+    new_name: str = Field(min_length=1)
+
+
+class MergeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    op: Literal["merge"]
+    loser_id: str
+    winner_id: str
+
+    @model_validator(mode="after")
+    def _distinct(self) -> "MergeRequest":
+        if self.loser_id == self.winner_id:
+            raise ValueError("merge needs two different characters")
+        return self
+
+
+class ReassignRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    op: Literal["reassign"]
+    block_id: str
+    segment_index: int = Field(ge=0)
+    speaker: str | None  # required-nullable: null means narration, omitting it is a 422
+
+
+EditRequest = Annotated[RenameRequest | MergeRequest | ReassignRequest, Field(discriminator="op")]
+
+
+# -- assignment (scoping doc section 4: Assignment) ---------------------------------------
+
+
+class AssignmentDraftRequest(BaseModel):
+    narrator_voice_id: str | None = None  # None -> auto preset narrator
+    thought_voice_id: str | None = None  # None -> thoughts use the speaker's own voice
+    accent: Literal["a", "b"] = "a"
+    stage: Literal["draft", "final"] = "draft"
+    overrides: dict[str, str] = Field(default_factory=dict)  # character_id -> voice_id
+
+
+class AssignmentDraftResponse(BaseModel):
+    assignment: VoiceAssignment
+    created_voice_ids: list[str]
+    edit_warnings: list[str]
+
+
+class AssignmentWrite(BaseModel):
+    """Full-replace write: the COMPLETE casting map, so a PUT never silently resets
+    unlisted characters. schema_version/book_id/created_at are server-filled."""
+
+    stage: Literal["draft", "final"]
+    narrator_voice_id: str
+    assignments: dict[str, str]
+    thought_voice_id: str | None = None
 
 
 class OllamaStatus(BaseModel):

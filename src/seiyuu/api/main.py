@@ -23,6 +23,7 @@ from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.routes import books as books_routes
 from seiyuu.api.routes import engines as engines_routes
 from seiyuu.api.routes import jobs as jobs_routes
+from seiyuu.api.routes import review as review_routes
 from seiyuu.api.routes import system as system_routes
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.jobs import JobRunner
@@ -58,6 +59,9 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         # Shared by every job-creating route (and the M6b-6 audition busy-check) so the
         # dedupe check-then-act cannot race a concurrent enqueue.
         app.state.enqueue_mutex = threading.Lock()
+        # Serializes assignment writes against voice deletion (M6b-6): a voice must not
+        # vanish between an assignment's validation and its durable write.
+        app.state.voices_mutex = threading.Lock()
         try:
             yield
         finally:
@@ -80,6 +84,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(engines_routes.router, prefix="/api")
     app.include_router(jobs_routes.router, prefix="/api")
     app.include_router(books_routes.router, prefix="/api")
+    app.include_router(review_routes.router, prefix="/api")
     return app
 
 

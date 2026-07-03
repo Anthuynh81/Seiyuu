@@ -20,6 +20,11 @@ from pydantic import ValidationError
 from seiyuu.api.deps import RunnerDep, SettingsDep, StoreDep
 from seiyuu.api.enqueue import enqueue_job
 from seiyuu.api.errors import ApiError
+from seiyuu.api.routes.common import (
+    effective_report,
+    load_book,
+    status_or_404,
+)
 from seiyuu.api.schemas import (
     ActiveJobSummary,
     AttributeParams,
@@ -40,63 +45,15 @@ from seiyuu.api.schemas import (
 )
 from seiyuu.duration import estimate_runtime_seconds, format_hms
 from seiyuu.ingest import IngestError, parse_epub, write_normalized
-from seiyuu.ingest.models import NormalizedBook
-from seiyuu.repository import BookStatus, Job, JobKind, JobState, get_book_status, list_books
+from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_books
 from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME
-from seiyuu.services import ServiceError, characters_overview, load_report
+from seiyuu.services import ServiceError, characters_overview
 from seiyuu.services.characters import CharactersOverview
-from seiyuu.settings import Settings
 
 router = APIRouter(tags=["books"])
 
-_BOOK_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COVER_TYPES = {"cover.jpg": "image/jpeg", "cover.png": "image/png"}
 _UPLOAD_CHUNK = 1024 * 1024
-
-
-def _check_book_id(book_id: str) -> None:
-    """Path containment: ids are single directory names under the pinned roots."""
-    if not _BOOK_ID_OK.match(book_id) or ".." in book_id:
-        raise ApiError(422, "invalid", f"invalid book id {book_id!r}")
-
-
-def _status_or_404(cfg: Settings, book_id: str) -> BookStatus:
-    _check_book_id(book_id)
-    status = get_book_status(book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
-    if not any(
-        [
-            status.ingested,
-            status.attributed,
-            status.assigned,
-            status.rendered,
-            status.assembled,
-            status.mastered,
-        ]
-    ):
-        raise ApiError(404, "not_found", f"book {book_id!r} not found")
-    return status
-
-
-def _load_book(cfg: Settings, book_id: str) -> NormalizedBook:
-    path = cfg.books_dir / book_id / NORMALIZED_NAME
-    try:
-        return NormalizedBook.model_validate_json(path.read_text(encoding="utf-8"))
-    except (ValidationError, OSError, ValueError) as exc:
-        raise ApiError(
-            500, "corrupt_artifact", f"corrupt normalized book {path}: {exc}; re-run ingest"
-        ) from exc
-
-
-def _effective_report(cfg: Settings, book_id: str, status: BookStatus):
-    """(report, edit_warnings) with the doc's error split: missing -> 404, corrupt -> 500."""
-    if not status.attributed:
-        raise ApiError(
-            404, "not_found", f"book {book_id!r} has no attribution; run attribute first"
-        )
-    try:
-        return load_report(cfg.books_dir / book_id)
-    except ServiceError as exc:
-        raise ApiError(500, "corrupt_artifact", str(exc)) from exc
 
 
 def _active_summary(jobs: list[Job]) -> ActiveJobSummary | None:
@@ -193,11 +150,11 @@ def ingest_book(
 
 @router.get("/books/{book_id}", response_model=BookDetail)
 def book_detail(book_id: str, cfg: SettingsDep, store: StoreDep) -> BookDetail:
-    status = _status_or_404(cfg, book_id)
+    status = status_or_404(cfg, book_id)
     chapters = None
     runtime = None
     if status.ingested:
-        book = _load_book(cfg, book_id)
+        book = load_book(cfg, book_id)
         chapters = [
             ChapterSummary(
                 index=i,
@@ -255,10 +212,10 @@ def runtime_estimate(
     chapters: Annotated[list[int], Query()] = [],  # noqa: B006
     wpm: Annotated[float | None, Query(gt=0)] = None,
 ) -> RuntimeEstimateOut:
-    status = _status_or_404(cfg, book_id)
+    status = status_or_404(cfg, book_id)
     if not status.ingested:
         raise ApiError(404, "not_found", f"book {book_id!r} is not ingested; run ingest first")
-    book = _load_book(cfg, book_id)
+    book = load_book(cfg, book_id)
     wanted = sorted(set(chapters))
     for index in wanted:
         if index < 1 or index > len(book.chapters):
@@ -285,12 +242,12 @@ def attribute_book_job(
     store: StoreDep,
     runner: RunnerDep,
 ) -> JobOut:
-    status = _status_or_404(cfg, book_id)
+    status = status_or_404(cfg, book_id)
     if not status.ingested:
         raise ApiError(
             409, "stage_prerequisite", f"book {book_id!r} is not ingested; run ingest first"
         )
-    book = _load_book(cfg, book_id)
+    book = load_book(cfg, book_id)
     for index in params.chapters:
         if index < 1 or index > len(book.chapters):
             raise ApiError(
@@ -333,8 +290,8 @@ def attribution_report(
     cfg: SettingsDep,
     chapters: Annotated[list[int], Query()] = [],  # noqa: B006
 ) -> AttributionOut:
-    status = _status_or_404(cfg, book_id)
-    report, warnings = _effective_report(cfg, book_id, status)
+    status = status_or_404(cfg, book_id)
+    report, warnings = effective_report(cfg, book_id, status)
     if chapters:
         wanted = set(chapters)
         report = report.model_copy(
@@ -352,8 +309,8 @@ def segment_browser(
     type: Annotated[str | None, Query(alias="type")] = None,
     low_confidence: bool = False,
 ) -> SegmentBrowserOut:
-    status = _status_or_404(cfg, book_id)
-    report, warnings = _effective_report(cfg, book_id, status)
+    status = status_or_404(cfg, book_id)
+    report, warnings = effective_report(cfg, book_id, status)
     chapter = next((c for c in report.chapters if c.index == index), None)
     if chapter is None:
         raise ApiError(404, "not_found", f"chapter {index} has no attribution")
@@ -414,7 +371,7 @@ def characters(
     cfg: SettingsDep,
     sample_lines: Annotated[int, Query(ge=0, le=10)] = 2,
 ) -> CharactersOverview:
-    status = _status_or_404(cfg, book_id)
+    status = status_or_404(cfg, book_id)
     if not status.attributed:
         raise ApiError(
             404, "not_found", f"book {book_id!r} has no attribution; run attribute first"
@@ -434,7 +391,7 @@ def characters(
 
 @router.get("/books/{book_id}/files/m4b")
 def download_m4b(book_id: str, cfg: SettingsDep) -> FileResponse:
-    _status_or_404(cfg, book_id)
+    status_or_404(cfg, book_id)
     path = cfg.output_dir / book_id / f"{book_id}.m4b"
     if not path.is_file():
         raise ApiError(404, "not_found", f"book {book_id!r} has no mastered m4b; run master first")
@@ -443,7 +400,7 @@ def download_m4b(book_id: str, cfg: SettingsDep) -> FileResponse:
 
 @router.get("/books/{book_id}/files/chapters/{index}")
 def download_chapter_mp3(book_id: str, index: int, cfg: SettingsDep) -> FileResponse:
-    _status_or_404(cfg, book_id)
+    status_or_404(cfg, book_id)
     path = cfg.output_dir / book_id / CHAPTERS_DIR / f"ch{index:03d}.mp3"
     if not path.is_file():
         raise ApiError(404, "not_found", f"no assembled chapter {index}; run assemble first")
