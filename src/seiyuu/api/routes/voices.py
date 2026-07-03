@@ -1,0 +1,475 @@
+"""Voice Studio: library CRUD, cloning (purge-on-reclone per sign-off Q1), the
+synchronous audition with its refusal predicate, and the read-only cloud-slot view.
+
+Auditions are the one synchronous GPU path: they claim the heavy-work gate
+NON-blockingly (busy -> instant 409, never a stalled request thread) with the busy
+check and the gate claim made atomic against job creation by sharing the enqueue
+mutex. Cold GPU engines are refused toward the warmup job instead of pinning a request
+thread on a multi-GB download. The model stays lazily resident afterwards — that is
+what makes the next audition (or a single-voice render) an identity no-op re-acquire.
+"""
+
+import json
+import os
+import re
+import secrets
+import shutil
+from contextlib import ExitStack, nullcontext
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import ValidationError
+
+from seiyuu.api.deps import GateDep, RegistryDep, SettingsDep, StoreDep
+from seiyuu.api.errors import ApiError
+from seiyuu.api.registry import weights_cached
+from seiyuu.api.schemas import (
+    AuditionOut,
+    AuditionRequest,
+    BlendVoiceCreate,
+    CloudSlotOut,
+    CloudSlotsOut,
+    JobOut,
+    PresetVoiceCreate,
+    UnreadableVoice,
+    VoiceCreate,
+    VoiceDeletedOut,
+    VoiceDetailOut,
+    VoiceListOut,
+    VoiceOut,
+    VoiceReferencesOut,
+)
+from seiyuu.engines import SynthesisError, get_engine_class
+from seiyuu.gpu import get_gpu_manager
+from seiyuu.normalize import normalize_text, profile_for
+from seiyuu.repository import Job, JobKind, JobState
+from seiyuu.services import ServiceError, delete_voice, voice_references
+from seiyuu.voices import (
+    BlendComponent,
+    CloudVoiceError,
+    ConsentAttestation,
+    VoiceKind,
+    VoiceLibrary,
+    VoiceLibraryError,
+    VoiceMeta,
+    auto_blend_recipe,
+    canonical_recipe,
+    ensure_cloud_voice,
+    render_voice_args,
+    sha256_file,
+)
+from seiyuu.voices.cloud import REGISTRY_NAME
+
+router = APIRouter(tags=["voices"])
+
+_VOICE_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_UPLOAD_CHUNK = 1024 * 1024
+
+# The audition refusal predicate is metadata-driven, not a kind-name list (scoping doc):
+# which job kinds hold the GPU, and which touch ElevenLabs voice slots.
+GPU_JOB_KINDS = frozenset({JobKind.ATTRIBUTE, JobKind.RENDER, JobKind.WARMUP})
+CLOUD_SLOT_JOB_KINDS = frozenset({JobKind.RENDER})
+
+
+def _check_voice_id(voice_id: str) -> None:
+    if not _VOICE_ID_OK.match(voice_id) or ".." in voice_id:
+        raise ApiError(422, "invalid", f"invalid voice id {voice_id!r}")
+
+
+def _load_or_404(library: VoiceLibrary, voice_id: str) -> VoiceMeta:
+    try:
+        return library.load(voice_id)
+    except VoiceLibraryError as exc:  # missing, or dir/meta id mismatch
+        raise ApiError(404, "not_found", str(exc)) from exc
+
+
+def _audition_path(library: VoiceLibrary, voice_id: str) -> Path:
+    return library.dir_for(voice_id) / "audition.wav"
+
+
+def _voice_out(library: VoiceLibrary, meta: VoiceMeta) -> VoiceOut:
+    return VoiceOut(
+        **meta.model_dump(), has_audition=_audition_path(library, meta.voice_id).is_file()
+    )
+
+
+# -- library CRUD -------------------------------------------------------------------------
+
+
+@router.get("/voices", response_model=VoiceListOut)
+def list_voices(cfg: SettingsDep) -> VoiceListOut:
+    library = VoiceLibrary(cfg.voices_dir)
+    voices: list[VoiceOut] = []
+    unreadable: list[UnreadableVoice] = []
+    if cfg.voices_dir.is_dir():
+        for entry in sorted(cfg.voices_dir.iterdir()):
+            if not (entry / "meta.json").is_file():
+                continue
+            try:
+                voices.append(_voice_out(library, library.load(entry.name)))
+            except (VoiceLibraryError, ValidationError, OSError, ValueError) as exc:
+                unreadable.append(UnreadableVoice(voice_id=entry.name, error=str(exc)))
+    return VoiceListOut(voices=voices, unreadable=unreadable)
+
+
+@router.post("/voices", response_model=VoiceOut, status_code=201)
+def create_voice(body: VoiceCreate, request: Request, cfg: SettingsDep) -> VoiceOut:
+    library = VoiceLibrary(cfg.voices_dir)
+    voice_id = body.voice_id or library.new_voice_id(body.name)
+    _check_voice_id(voice_id)
+    with request.app.state.voices_mutex:
+        if library.meta_path(voice_id).is_file():
+            raise ApiError(409, "voice_exists", f"voice {voice_id!r} already exists")
+        if isinstance(body, PresetVoiceCreate):
+            meta = VoiceMeta(
+                voice_id=voice_id,
+                name=body.name,
+                kind=VoiceKind.PRESET,
+                engine=body.engine,
+                preset_id=body.preset_id,
+                seed=body.seed,
+                source="preset",
+            )
+        else:
+            assert isinstance(body, BlendVoiceCreate)
+            if body.components is not None:
+                recipe = canonical_recipe([(c.preset_id, c.weight) for c in body.components])
+                source = "manual_blend"
+            else:
+                recipe = auto_blend_recipe(body.name, body.gender, accent=body.accent)
+                source = "auto_blend"
+            meta = VoiceMeta(
+                voice_id=voice_id,
+                name=body.name,
+                kind=VoiceKind.BLEND,
+                engine="kokoro",
+                blend=[BlendComponent(preset_id=p, weight=w) for p, w in recipe],
+                seed=body.seed,
+                source=source,
+            )
+        try:
+            library.save(meta)
+        except (VoiceLibraryError, ValueError) as exc:
+            raise ApiError(422, "invalid", str(exc)) from exc
+    request.app.state  # noqa: B018 — keep Request typed-used under TYPE_CHECKING variance
+    return _voice_out(library, meta)
+
+
+def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
+    """Sign-off Q1 (purge-on-reclone): delete every cached segment for this voice across
+    all books, via the cache's SegmentKey sidecars. Stale audio from the OLD reference
+    can then never replay; previously-paid segments re-bill on the next render (acked)."""
+    removed = 0
+    if not output_dir.is_dir():
+        return removed
+    for book_dir in output_dir.iterdir():
+        cache_dir = book_dir / "cache"
+        if not cache_dir.is_dir():
+            continue
+        for sidecar in cache_dir.glob("*.json"):
+            if sidecar.name.endswith(".validation.json"):
+                continue
+            try:
+                key = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # torn sidecar: its wav is unmatchable, leave for manual cleanup
+            if key.get("voice_id") != voice_id:
+                continue
+            stem = sidecar.stem
+            (cache_dir / f"{stem}.wav").unlink(missing_ok=True)
+            (cache_dir / f"{stem}.validation.json").unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+@router.post("/voices/clone", response_model=VoiceOut, status_code=201)
+def clone_voice(
+    request: Request,
+    cfg: SettingsDep,
+    registry: RegistryDep,
+    file: Annotated[UploadFile, File()],
+    name: Annotated[str, Form(min_length=1)],
+    engine: Annotated[str, Form(pattern="^(chatterbox|elevenlabs)$")] = "chatterbox",
+    consent: Annotated[bool, Form()] = False,
+    attested_by: Annotated[str, Form()] = "",
+    seed: Annotated[int, Form()] = 41172,
+    voice_id: Annotated[str | None, Form()] = None,
+    replace: Annotated[bool, Form()] = False,
+) -> VoiceOut:
+    """Clone from an uploaded reference clip. The load-bearing ordering from the CLI is
+    preserved exactly: copy -> hash the COPY -> publish atomically -> purge stale conds
+    -> save meta, so the attestation provably describes the bytes the library serves and
+    a failed copy can never leave an attested meta over missing audio."""
+    if not consent:
+        raise ApiError(
+            422,
+            "invalid",
+            "cloning requires consent=true: you must hold the rights/permission "
+            "to clone this voice",
+        )
+    if not attested_by.strip():
+        raise ApiError(
+            422, "invalid", "attested_by is required: who is making the consent attestation"
+        )
+    library = VoiceLibrary(cfg.voices_dir)
+    vid = voice_id or library.new_voice_id(name)
+    _check_voice_id(vid)
+
+    upload_dir = cfg.data_dir / "uploads" / secrets.token_hex(8)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    staged = upload_dir / "reference-upload"
+    try:
+        size = 0
+        with staged.open("wb") as out:
+            while chunk := file.file.read(_UPLOAD_CHUNK):
+                size += len(chunk)
+                if size > cfg.max_upload_bytes:
+                    raise ApiError(
+                        413,
+                        "payload_too_large",
+                        f"upload exceeds the {cfg.max_upload_bytes}-byte limit",
+                    )
+                out.write(chunk)
+        if size == 0:
+            raise ApiError(422, "invalid", "empty reference upload")
+
+        with request.app.state.voices_mutex:
+            exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
+            if exists and not replace:
+                raise ApiError(
+                    409,
+                    "reclone_blocked",
+                    f"voice {vid!r} already exists; re-clone replaces its consent-attested "
+                    "reference audio — re-send with replace=true to confirm (cached "
+                    "segments for this voice are purged and paid ones re-bill)",
+                )
+            if exists:
+                # Q1 DECIDED (purge-on-reclone): stale audio out BEFORE the new
+                # reference is published, so no window serves old-voice segments.
+                _purge_cached_segments(cfg.output_dir, vid)
+                _audition_path(library, vid).unlink(missing_ok=True)
+            ref_path = library.reference_path(vid)
+            ref_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = ref_path.with_name("reference.wav.part")
+            shutil.copyfile(staged, tmp)
+            attestation = ConsentAttestation(
+                attested_by=attested_by.strip(),
+                reference_sha256=sha256_file(tmp),  # hash the COPY: consent binds to it
+            )
+            os.replace(tmp, ref_path)
+            # conds derived from the OLD reference must never speak again (their filename
+            # embeds the ref hash, so they are unreachable anyway — removing them is hygiene)
+            for stale in ref_path.parent.glob("conds_*.pt"):
+                stale.unlink(missing_ok=True)
+            library.save(
+                VoiceMeta(
+                    voice_id=vid,
+                    name=name,
+                    kind=VoiceKind.CLONED,
+                    engine=engine,
+                    reference_audio="reference.wav",
+                    consent_attested=True,
+                    consent=attestation,
+                    seed=seed,
+                    source="user_upload",
+                )
+            )
+            # the shared chatterbox instance caches per-run reference hashes; a re-clone
+            # must not let a warm engine keep speaking the old speaker
+            registry.invalidate("chatterbox")
+        return _voice_out(library, library.load(vid))
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+
+@router.get("/voices/{voice_id}", response_model=VoiceDetailOut)
+def voice_detail(voice_id: str, cfg: SettingsDep) -> VoiceDetailOut:
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    meta = _load_or_404(library, voice_id)
+    has_audition = _audition_path(library, voice_id).is_file()
+    return VoiceDetailOut(
+        **meta.model_dump(),
+        has_audition=has_audition,
+        audition_url=f"/api/voices/{voice_id}/audition.wav" if has_audition else None,
+    )
+
+
+@router.get("/voices/{voice_id}/references", response_model=VoiceReferencesOut)
+def references(voice_id: str, cfg: SettingsDep) -> VoiceReferencesOut:
+    """The delete-confirmation scan: every assignment role still using this voice."""
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    _load_or_404(library, voice_id)
+    try:
+        refs = voice_references(voice_id, cfg.output_dir)
+    except ServiceError as exc:  # fail-closed: an unreadable assignments.json
+        raise ApiError(500, "corrupt_artifact", str(exc)) from exc
+    return VoiceReferencesOut(voice_id=voice_id, references=refs)
+
+
+@router.delete("/voices/{voice_id}", response_model=VoiceDeletedOut)
+def remove_voice(voice_id: str, request: Request, cfg: SettingsDep) -> VoiceDeletedOut:
+    """Irreversible rmtree including the consent-attested reference.wav — DELETE is the
+    explicit confirmation; the UI shows /references first. Serialized against assignment
+    writes by the voices mutex so a voice can't vanish under a PUT's validation."""
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    with request.app.state.voices_mutex:
+        _load_or_404(library, voice_id)
+        try:
+            gone = delete_voice(voice_id, library=library, output_dir=cfg.output_dir)
+        except ServiceError as exc:
+            message = str(exc)
+            if "cannot verify voice references" in message:
+                raise ApiError(500, "corrupt_artifact", message) from exc
+            if "still assigned" in message:
+                raise ApiError(409, "voice_referenced", message) from exc
+            raise ApiError(422, "invalid", message) from exc
+    return VoiceDeletedOut(deleted=gone.name)
+
+
+# -- audition -----------------------------------------------------------------------------
+
+
+def _refuse_conflicts(meta: VoiceMeta, live: list[Job], registry, gate_holder: str) -> None:
+    """The scoping-doc refusal predicate, evaluated under the enqueue mutex so the
+    check-and-refuse is atomic against job creation."""
+    engine_cls = get_engine_class(meta.engine)
+    if engine_cls.uses_gpu:
+        gpu_job = next((j for j in live if j.kind in GPU_JOB_KINDS), None)
+        if gpu_job is not None:
+            raise ApiError(
+                409,
+                "gpu_busy",
+                f"a {gpu_job.kind.value} job is {gpu_job.state.value}; the single GPU "
+                "cannot also host an audition — wait or cancel it",
+                detail=JobOut.from_job(gpu_job).model_dump(mode="json"),
+            )
+    if meta.engine == "elevenlabs":
+        slot_job = next((j for j in live if j.kind in CLOUD_SLOT_JOB_KINDS), None)
+        if slot_job is not None:
+            # closes the widened eviction race: an audition's ensure_cloud_voice can
+            # never race an in-flight render's slot use (sign-off Q6 narrowing)
+            raise ApiError(
+                409,
+                "cloud_busy",
+                f"a {slot_job.kind.value} job is {slot_job.state.value}; ElevenLabs "
+                "voice slots are in use — wait or cancel it",
+                detail=JobOut.from_job(slot_job).model_dump(mode="json"),
+            )
+    if (
+        engine_cls.uses_gpu
+        and not registry.is_resident(meta.engine)
+        and weights_cached(meta.engine) is False
+    ):
+        raise ApiError(
+            409,
+            "engine_cold",
+            f"{meta.engine} has never loaded and its weights are not downloaded; a "
+            "synchronous audition would pin this request on a multi-GB download — "
+            "run the warmup job first",
+            detail={"warmup": f"/api/engines/{meta.engine}/warmup"},
+        )
+
+
+@router.post("/voices/{voice_id}/audition", response_model=AuditionOut)
+def audition(
+    voice_id: str,
+    body: AuditionRequest,
+    request: Request,
+    cfg: SettingsDep,
+    registry: RegistryDep,
+    store: StoreDep,
+    gate: GateDep,
+) -> AuditionOut:
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    meta = _load_or_404(library, voice_id)
+    try:
+        library.verify_consent(meta)  # hash-bound for clones; cheap for the rest
+    except VoiceLibraryError as exc:
+        raise ApiError(409, "consent_invalid", str(exc)) from exc
+
+    with ExitStack() as stack:
+        with request.app.state.enqueue_mutex:
+            live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
+            _refuse_conflicts(meta, live, registry, gate.holder)
+            acquired = stack.enter_context(gate.try_hold("audition"))
+            if not acquired:
+                raise ApiError(
+                    409, "audition_in_flight", "another audition is already synthesizing"
+                )
+        # mutex released; the heavy-work gate stays held for the synthesis. A job
+        # enqueued from here on waits at most one warm-engine synthesis (accepted).
+        engine = registry.get(meta.engine)
+        engine_voice, settings = render_voice_args(meta)
+        normalized = normalize_text(body.text, profile=profile_for(meta.engine))
+        cost = engine.cost_estimate(normalized)
+        if cost > 0 and not body.confirm_paid:
+            raise ApiError(
+                402,
+                "payment_confirmation_required",
+                f"auditioning {voice_id!r} is a paid call (~${cost:.4f}); re-send with "
+                "confirm_paid=true",
+                detail={"estimated_usd": cost},
+            )
+        try:
+            if cost > 0 and meta.engine == "elevenlabs" and meta.kind is VoiceKind.CLONED:
+                engine_voice = ensure_cloud_voice(
+                    meta, engine.client, library, max_slots=cfg.elevenlabs_max_voice_slots
+                )
+            gpu = get_gpu_manager()
+            ctx = gpu.acquire(engine, f"engine:{meta.engine}") if engine.uses_gpu else nullcontext()
+            with ctx:
+                audio = engine.synthesize(normalized, engine_voice, {**settings, "seed": meta.seed})
+            # NO free_all(): the model stays lazily resident by design — the next
+            # audition (or single-voice render) re-acquires as an identity no-op.
+        except (SynthesisError, CloudVoiceError) as exc:
+            raise ApiError(502, "upstream", str(exc)) from exc
+        out_path = _audition_path(library, voice_id)
+        # .part.wav, not .wav.part: libsndfile picks the container from the LAST suffix
+        tmp = out_path.with_name("audition.part.wav")
+        audio.save(tmp)
+        os.replace(tmp, out_path)
+        return AuditionOut(
+            voice_id=voice_id,
+            duration_seconds=round(audio.duration_seconds, 3),
+            cost_usd=cost,
+            audition_url=f"/api/voices/{voice_id}/audition.wav",
+        )
+
+
+@router.get("/voices/{voice_id}/audition.wav")
+def audition_wav(voice_id: str, cfg: SettingsDep) -> FileResponse:
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    path = _audition_path(library, voice_id)
+    if not path.is_file():
+        raise ApiError(404, "not_found", f"voice {voice_id!r} has never been auditioned")
+    return FileResponse(path, media_type="audio/wav", filename=f"{voice_id}_audition.wav")
+
+
+# -- cloud slots (read-only by policy while the eviction race stands, sign-off Q6) ---------
+
+
+@router.get("/cloud-slots", response_model=CloudSlotsOut)
+def cloud_slots(cfg: SettingsDep) -> CloudSlotsOut:
+    path = cfg.voices_dir / REGISTRY_NAME
+    slots: list[CloudSlotOut] = []
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            slots = [
+                CloudSlotOut(voice_id=vid, cloud_id=entry["cloud_id"], seq=entry["seq"])
+                for vid, entry in data.get("voices", {}).items()
+            ]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ApiError(
+                500, "corrupt_artifact", f"corrupt cloud voice registry {path}: {exc}"
+            ) from exc
+    slots.sort(key=lambda s: s.seq, reverse=True)  # MRU-first
+    return CloudSlotsOut(max_slots=cfg.elevenlabs_max_voice_slots, count=len(slots), slots=slots)

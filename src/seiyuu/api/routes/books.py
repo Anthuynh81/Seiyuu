@@ -7,6 +7,7 @@ attribution read goes through ``load_report`` (edits overlay applied) and carrie
 omit job progress (polling discipline — poll ``/api/jobs/{id}``).
 """
 
+import os
 import re
 import secrets
 import shutil
@@ -384,6 +385,54 @@ def characters(
         )
     except ServiceError as exc:
         raise ApiError(500, "corrupt_artifact", str(exc)) from exc
+
+
+# -- cover art ----------------------------------------------------------------------------
+
+_COVER_MAGIC = {
+    "image/jpeg": (b"\xff\xd8\xff", "cover.jpg"),
+    "image/png": (b"\x89PNG", "cover.png"),
+}
+
+
+@router.put("/books/{book_id}/cover", response_model=CoverOut)
+def upload_cover(book_id: str, cfg: SettingsDep, file: Annotated[UploadFile, File()]) -> CoverOut:
+    """Cover art for mastering (replaces the CLI's `master --cover`). Content type AND
+    magic bytes are checked; the write is atomic and evicts the other extension so a
+    book never carries two covers."""
+    status_or_404(cfg, book_id)
+    content_type = (file.content_type or "").lower()
+    if content_type not in _COVER_MAGIC:
+        raise ApiError(
+            415,
+            "unsupported_media_type",
+            f"cover must be image/jpeg or image/png, got {content_type or 'unknown'}",
+        )
+    magic, target_name = _COVER_MAGIC[content_type]
+    data = file.file.read(cfg.max_upload_bytes + 1)
+    if len(data) > cfg.max_upload_bytes:
+        raise ApiError(413, "payload_too_large", "cover exceeds the upload limit")
+    if not data.startswith(magic):
+        raise ApiError(415, "unsupported_media_type", "file content does not match its image type")
+    odir = cfg.output_dir / book_id
+    odir.mkdir(parents=True, exist_ok=True)
+    for other in _COVER_TYPES:
+        if other != target_name:
+            (odir / other).unlink(missing_ok=True)
+    target = odir / target_name
+    tmp = target.with_suffix(target.suffix + ".part")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+    return CoverOut(content_type=content_type, bytes=len(data))
+
+
+@router.delete("/books/{book_id}/cover", status_code=204)
+def delete_cover(book_id: str, cfg: SettingsDep) -> None:
+    """Idempotent: removing an absent cover is a success, not an error."""
+    status_or_404(cfg, book_id)
+    odir = cfg.output_dir / book_id
+    for name in _COVER_TYPES:
+        (odir / name).unlink(missing_ok=True)
 
 
 # -- downloads ----------------------------------------------------------------------------

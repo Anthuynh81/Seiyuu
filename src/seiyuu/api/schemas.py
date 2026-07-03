@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from seiyuu.attribute.models import AttributionReport
 from seiyuu.repository import BookStatus, Job
-from seiyuu.voices import VoiceAssignment
+from seiyuu.services.voices import VoiceReference
+from seiyuu.voices import VoiceAssignment, VoiceMeta
 
 
 class HealthOut(BaseModel):
@@ -406,6 +407,106 @@ class ValidationReportOut(BaseModel):
     validated_segments: int
     validation_failures: int
     results: list[ValidationRow]  # failures only unless ?all=true
+
+
+# -- voices (scoping doc section 4: Voices) ------------------------------------------------
+
+
+class VoiceOut(VoiceMeta):
+    """``VoiceMeta`` verbatim plus audition presence. Keys are never in VoiceMeta, so
+    nothing needs redaction here."""
+
+    has_audition: bool = False
+
+
+class UnreadableVoice(BaseModel):
+    voice_id: str
+    error: str
+
+
+class VoiceListOut(BaseModel):
+    """Tolerant scan: one corrupt meta.json degrades into ``unreadable`` instead of
+    bricking the whole Voice Studio screen."""
+
+    voices: list[VoiceOut]
+    unreadable: list[UnreadableVoice] = Field(default_factory=list)
+
+
+class VoiceDetailOut(VoiceOut):
+    audition_url: str | None = None
+
+
+class PresetVoiceCreate(BaseModel):
+    """Covers CLI `voice add-preset` AND `voice add-cloud` (a cloud stock voice is a
+    preset with engine='elevenlabs' and the remote id as preset_id — no network, no slot)."""
+
+    model_config = {"extra": "forbid"}
+    kind: Literal["preset"]
+    name: str = Field(min_length=1)
+    engine: str = "kokoro"
+    preset_id: str = Field(min_length=1)
+    seed: int = 41172
+    voice_id: str | None = None  # None -> slug + random suffix
+
+
+class BlendComponentIn(BaseModel):
+    preset_id: str
+    weight: float = Field(gt=0)
+
+
+class BlendVoiceCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+    kind: Literal["blend"]
+    name: str = Field(min_length=1)
+    components: list[BlendComponentIn] | None = Field(None, min_length=2)  # None -> auto recipe
+    gender: str | None = None  # auto-recipe hint
+    accent: Literal["a", "b"] = "a"
+    seed: int = 41172
+    voice_id: str | None = None
+
+
+VoiceCreate = Annotated[PresetVoiceCreate | BlendVoiceCreate, Field(discriminator="kind")]
+
+
+class VoiceReferencesOut(BaseModel):
+    voice_id: str
+    references: list[VoiceReference]  # empty = deletable
+
+
+class VoiceDeletedOut(BaseModel):
+    deleted: str
+
+
+AUDITION_DEFAULT_TEXT = (
+    'The quick brown fox jumps over the lazy dog. "Well," she said, "how about that?"'
+)
+
+
+class AuditionRequest(BaseModel):
+    text: str = Field(AUDITION_DEFAULT_TEXT, min_length=1, max_length=500)
+    confirm_paid: bool = False  # paid engines (cost_estimate > 0) require literal true
+
+
+class AuditionOut(BaseModel):
+    voice_id: str
+    duration_seconds: float
+    cost_usd: float  # 0.0 for local engines
+    audition_url: str
+
+
+class CloudSlotOut(BaseModel):
+    voice_id: str
+    cloud_id: str
+    seq: int
+
+
+class CloudSlotsOut(BaseModel):
+    """Display-only, read without the slot lock (eventually consistent). This surface
+    never grows mutation verbs while the eviction race stands (sign-off Q6)."""
+
+    max_slots: int
+    count: int
+    slots: list[CloudSlotOut]  # MRU-first
 
 
 class OllamaStatus(BaseModel):
