@@ -20,6 +20,7 @@ from seiyuu.api.concurrency import HeavyWorkGate
 from seiyuu.api.errors import register_error_handlers
 from seiyuu.api.handlers import build_handlers
 from seiyuu.api.registry import EngineRegistry
+from seiyuu.api.routes import books as books_routes
 from seiyuu.api.routes import engines as engines_routes
 from seiyuu.api.routes import jobs as jobs_routes
 from seiyuu.api.routes import system as system_routes
@@ -78,6 +79,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(system_routes.router, prefix="/api")
     app.include_router(engines_routes.router, prefix="/api")
     app.include_router(jobs_routes.router, prefix="/api")
+    app.include_router(books_routes.router, prefix="/api")
     return app
 
 

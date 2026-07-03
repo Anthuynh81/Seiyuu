@@ -7,7 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from seiyuu.repository import Job
+from seiyuu.attribute.models import AttributionReport
+from seiyuu.repository import BookStatus, Job
 
 
 class HealthOut(BaseModel):
@@ -112,6 +113,114 @@ class MasterParams(BaseModel):
     bitrate: str = "64k"
     target_minutes: float | None = Field(None, gt=0)
     use_cover: bool = True  # use the uploaded cover art if present
+
+
+# -- books (scoping doc section 4: Books and ingest / Attribution and review) ------------
+
+
+class ActiveJobSummary(BaseModel):
+    """Deliberately NO progress_text: book payloads must be useless as progress polls —
+    GET /api/jobs/{job_id} is the one poll target (scoping doc polling discipline)."""
+
+    job_id: str
+    kind: str
+    state: str  # queued | running
+
+
+class BookCard(BaseModel):
+    """`BookStatus` verbatim + the live-job summary, one card per library row."""
+
+    book_id: str
+    title: str | None
+    authors: list[str]
+    ingested: bool
+    attributed: bool
+    assigned: bool
+    rendered: bool
+    assembled: bool
+    mastered: bool
+    active_job: ActiveJobSummary | None = None
+
+
+class BooksOut(BaseModel):
+    books: list[BookCard]
+
+
+class IngestResponse(BaseModel):
+    book: BookStatus
+    chapters: int
+    blocks: int
+    skipped_items: list[str]
+    dropped_sections: list[str]
+
+
+class ChapterSummary(BaseModel):
+    index: int  # 1-based
+    title: str
+    blocks: int
+    speakable_blocks: int
+
+
+class FileDownload(BaseModel):
+    url: str
+    bytes: int
+
+
+class ChapterDownload(FileDownload):
+    index: int
+
+
+class DownloadsOut(BaseModel):
+    m4b: FileDownload | None = None
+    chapter_mp3s: list[ChapterDownload] = Field(default_factory=list)
+
+
+class CoverOut(BaseModel):
+    content_type: str
+    bytes: int
+
+
+class BookDetail(BaseModel):
+    status: BookStatus
+    chapters: list[ChapterSummary] | None  # None until ingested
+    runtime_estimate_seconds: float | None
+    active_job: ActiveJobSummary | None
+    recent_jobs: list[JobOut]  # newest-first, <= 10
+    downloads: DownloadsOut
+    cover: CoverOut | None
+
+
+class RuntimeEstimateOut(BaseModel):
+    seconds: float
+    formatted: str
+    wpm_used: float
+    chapters: list[int]
+
+
+class AttributionOut(BaseModel):
+    """The EFFECTIVE report (manual-edits overlay applied) — raw attribution.json is
+    never served. edit_warnings surface overlay ops that no longer applied."""
+
+    report: AttributionReport
+    edit_warnings: list[str]
+
+
+class SegmentRow(BaseModel):
+    block_id: str
+    segment_index: int  # 0-based within the block — exactly what ReassignSegment expects
+    type: str
+    speaker: str | None  # character id; None = narration
+    speaker_name: str | None
+    text: str
+    confidence: float
+    has_audio: bool  # any rendered wav for this block in the manifest
+
+
+class SegmentBrowserOut(BaseModel):
+    chapter_index: int
+    title: str
+    segments: list[SegmentRow]
+    edit_warnings: list[str]
 
 
 class OllamaStatus(BaseModel):
