@@ -289,6 +289,125 @@ class AssignmentWrite(BaseModel):
     thought_voice_id: str | None = None
 
 
+# -- money + render (scoping doc sections 4-5) --------------------------------------------
+
+
+class SingleSpec(BaseModel):
+    engine: str | None = None  # None -> settings.tts_engine
+    voice: str | None = None  # None -> settings.kokoro_default_voice
+    speed: float = Field(1.0, gt=0)
+    seed: int = 41172
+
+
+def _require_single_iff(mode: str, single: SingleSpec | None) -> None:
+    if mode == "single" and single is None:
+        raise ValueError("mode=single requires the `single` spec")
+    if mode == "multivoice" and single is not None:
+        raise ValueError("the `single` spec only applies to mode=single")
+
+
+class QuoteRequest(BaseModel):
+    mode: Literal["multivoice", "single"] = "multivoice"
+    chapters: list[int] = Field(default_factory=list)
+    single: SingleSpec | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "QuoteRequest":
+        _require_single_iff(self.mode, self.single)
+        return self
+
+
+class QuoteResponse(BaseModel):
+    token: str  # the opaque cq1. transport — the only form the quote crosses HTTP in
+    book_id: str
+    chapters: list[int]
+    total_usd: float
+    paid_segments: int
+    fingerprint: str
+    assignment_hash: str | None
+    issued_at: float
+    expires_at: float
+    ttl_seconds: int
+    max_usd_ceiling: float
+
+
+class CostEstimateOut(BaseModel):
+    total_usd: float
+    paid_segments: int
+    cached_segments: int
+    free_segments: int
+    fingerprint: str
+    assignment_hash: str | None  # multivoice only
+    mode: Literal["multivoice", "single"]
+    chapters: list[int]
+    edit_warnings: list[str]  # shown BEFORE any money approval — load-bearing
+
+
+class RenderParams(BaseModel):
+    """Route body AND handler params (re-parsed from Job.params — one model, no drift).
+    ``cost_token`` is stored plaintext in the job row (user-acked at sign-off) and
+    always redacted over HTTP by JobOut."""
+
+    mode: Literal["multivoice", "single"] = "multivoice"
+    chapters: list[int] = Field(default_factory=list)
+    cost_token: str | None = None
+    confirm_full: bool = False
+    single: SingleSpec | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "RenderParams":
+        _require_single_iff(self.mode, self.single)
+        return self
+
+
+class RenderChapterOut(BaseModel):
+    index: int
+    title: str
+    segments: int
+    duration_seconds: float
+
+
+class VoiceUseOut(BaseModel):
+    engine: str
+    engine_model_version: str
+    kind: str
+
+
+class RenderSummaryOut(BaseModel):
+    book_id: str
+    mode: Literal["multivoice", "single"]  # derived: single manifests carry an engine
+    engine: str | None
+    engine_model_version: str | None
+    voice_id: str | None
+    seed: int | None
+    chapters: list[RenderChapterOut]
+    total_seconds: float
+    voices_used: dict[str, VoiceUseOut]
+    validation_failures: int
+    assignment_present: bool
+
+
+class ValidationRow(BaseModel):
+    chapter_index: int
+    block_id: str
+    # index among the block's rendered segments (multivoice blocks carry several) —
+    # feeds the audio route's ?segment= so the UI can play THIS failure, not just the
+    # block's first wav
+    segment_index: int
+    voice_id: str | None
+    ok: bool
+    score: float
+    expected: str
+    transcript: str
+    synth_attempts: int
+
+
+class ValidationReportOut(BaseModel):
+    validated_segments: int
+    validation_failures: int
+    results: list[ValidationRow]  # failures only unless ?all=true
+
+
 class OllamaStatus(BaseModel):
     base_url: str
     reachable: bool | None  # None = not probed (the default poll stays network-free)

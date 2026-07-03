@@ -23,6 +23,7 @@ from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.routes import books as books_routes
 from seiyuu.api.routes import engines as engines_routes
 from seiyuu.api.routes import jobs as jobs_routes
+from seiyuu.api.routes import render as render_routes
 from seiyuu.api.routes import review as review_routes
 from seiyuu.api.routes import system as system_routes
 from seiyuu.gpu import get_gpu_manager
@@ -85,6 +86,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(jobs_routes.router, prefix="/api")
     app.include_router(books_routes.router, prefix="/api")
     app.include_router(review_routes.router, prefix="/api")
+    app.include_router(render_routes.router, prefix="/api")
     return app
 
 

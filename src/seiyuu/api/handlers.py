@@ -5,8 +5,8 @@ Each handler re-parses ``Job.params`` with the SAME pydantic model the route val
 GPU-heavy activity per process — auditions refuse instead of colliding), and threads
 ``ctx.progress`` / ``ctx.check_cancel`` into the stage loops. Resource lifecycles live
 in the services (``run_attribution`` owns the GPU hold + Ollama unload-in-finally);
-handlers add only what is server-specific. The RENDER handler arrives with the money
-gate in M6b-5 — until then nothing can enqueue a render job.
+handlers add only what is server-specific — for RENDER, that is the money gate's
+consume-at-job-start verify (sign-off Q5).
 """
 
 from collections.abc import Mapping
@@ -20,6 +20,7 @@ from seiyuu.api.schemas import (
     LoudnessWrite,
     MasterParams,
     PauseWrite,
+    RenderParams,
     WarmupParams,
 )
 from seiyuu.gpu import get_gpu_manager
@@ -126,6 +127,100 @@ def build_handlers(
                 check_cancel=ctx.check_cancel,
             )
 
+    def render(ctx: JobContext) -> None:
+        """Verify-then-render. The FRESH estimate + verify_quote(consume=True) run
+        immediately before synthesis — consumption is the LAST step of verification, so
+        a refusal (drift, expiry-while-queued, reuse) fails the job with the verbatim
+        gate reason in Job.error and never burns the token; a crash AFTER consumption
+        requires a re-estimate, and the refusal message says so."""
+        from seiyuu.api.money import compute_estimate, resolve_single
+        from seiyuu.render.gate import CostQuote, verify_quote
+        from seiyuu.render.pipeline import render_book, render_book_multivoice
+        from seiyuu.services import load_assignment, load_report
+        from seiyuu.validate import Validator
+        from seiyuu.voices import VoiceLibrary
+
+        params = RenderParams.model_validate(ctx.job.params or {})
+        book_id = ctx.job.book_id
+        book = _load_normalized(cfg, book_id)
+        book_output_dir = cfg.output_dir / book_id
+        library = VoiceLibrary(cfg.voices_dir)
+        chapters = tuple(sorted(set(params.chapters)))
+        single = resolve_single(cfg, params.single) if params.mode == "single" else None
+        with gate.hold("job"):
+            ctx.check_cancel()
+            ctx.progress("verifying cost approval…")
+            est_ctx = compute_estimate(
+                cfg, registry, book, book_id, mode=params.mode, chapters=chapters, single=single
+            )
+            # The estimate walks every block (seconds on a big book): a cancel filed in
+            # that window must land BEFORE consumption, or a job that synthesizes
+            # nothing burns the user's single-use approval.
+            ctx.check_cancel()
+            approved_usd: float | None = None
+            if est_ctx.est.total_usd > 0:
+                if not params.cost_token:
+                    # Unreachable via the API (the enqueue dry-run requires a token);
+                    # cache eviction between enqueue and start can still land here.
+                    raise ServiceError(
+                        f"render now bills ${est_ctx.est.total_usd:.2f} but the job "
+                        "carries no cost token; re-run estimate-cost and quote"
+                    )
+                quote = CostQuote.decode(params.cost_token)
+                verify_quote(
+                    quote,
+                    book_id=book_id,
+                    chapters=chapters,
+                    fingerprint=est_ctx.est.fingerprint,
+                    assignment_hash=est_ctx.assignment_hash,
+                    recomputed_total_usd=est_ctx.est.total_usd,
+                    max_usd=cfg.render_max_usd,
+                    data_dir=cfg.data_dir,
+                    consume=True,  # burned only by a job that actually starts rendering
+                )
+                approved_usd = quote.total_usd  # the hard cumulative spend cap
+            validator = Validator(
+                model_size=cfg.validation_model_size,
+                device=cfg.whisper_device,
+                compute_type=cfg.validation_compute_type,
+                min_ratio=cfg.validation_min_ratio,
+            )
+            if params.mode == "multivoice":
+                report, _warnings = load_report(cfg.books_dir / book_id)
+                assignment = load_assignment(cfg.output_dir, book_id)
+                render_book_multivoice(
+                    report,
+                    book,
+                    library,
+                    assignment,
+                    book_output_dir,
+                    chapters=chapters,
+                    progress=ctx.progress,
+                    validator=validator,
+                    validation_max_retries=cfg.validation_max_retries,
+                    allow_paid=approved_usd is not None,
+                    max_paid_usd=approved_usd,
+                    cloud_max_slots=cfg.elevenlabs_max_voice_slots,
+                    check_cancel=ctx.check_cancel,
+                )
+            else:
+                render_book(
+                    book,
+                    registry.get(single.engine_id),  # shared instance: warm re-acquire
+                    single.voice_id,
+                    book_output_dir,
+                    settings=single.settings,
+                    seed=single.seed,
+                    chapters=chapters,
+                    progress=ctx.progress,
+                    library=library,  # the clone consent gate is never skipped
+                    validator=validator,
+                    validation_max_retries=cfg.validation_max_retries,
+                    allow_paid=approved_usd is not None,
+                    max_paid_usd=approved_usd,
+                    check_cancel=ctx.check_cancel,
+                )
+
     def assemble(ctx: JobContext) -> None:
         from seiyuu.assemble import assemble_book
 
@@ -162,6 +257,7 @@ def build_handlers(
     return {
         JobKind.WARMUP: warmup,
         JobKind.ATTRIBUTE: attribute,
+        JobKind.RENDER: render,
         JobKind.ASSEMBLE: assemble,
         JobKind.MASTER: master,
     }

@@ -363,7 +363,7 @@ def test_handler_rejects_garbage_params(client) -> None:
     assert "ValidationError" in done.error
 
 
-def test_build_handlers_covers_all_but_render_and_ingest(tmp_path) -> None:
+def test_build_handlers_covers_all_but_ingest(tmp_path) -> None:
     from seiyuu.api.concurrency import HeavyWorkGate
     from seiyuu.api.registry import EngineRegistry
 
@@ -372,6 +372,7 @@ def test_build_handlers_covers_all_but_render_and_ingest(tmp_path) -> None:
     assert set(handlers) == {
         JobKind.WARMUP,
         JobKind.ATTRIBUTE,
+        JobKind.RENDER,
         JobKind.ASSEMBLE,
         JobKind.MASTER,
-    }  # RENDER lands with the money gate (M6b-5); INGEST stays synchronous by design
+    }  # INGEST stays synchronous by design (seconds, CPU-only, id unknown pre-parse)

@@ -199,6 +199,30 @@ def verify_quote(
         _consume_quote(data_dir, quote.sig, quote.expires_at, now)
 
 
+def quote_consumed(data_dir: Path, sig: str) -> bool:
+    """Read-only ledger probe for enqueue-time dry-runs (M6b). ``verify_quote(consume=
+    False)`` deliberately never touches the ledger, so a dry-run alone would PASS a
+    spent token and defer the refusal to job start — this lets the API surface the
+    immediate 402 instead. Best-effort by design: the atomic INSERT in
+    ``_consume_quote`` remains the single-use enforcement; a token spent between this
+    probe and job start still refuses there."""
+    path = Path(data_dir) / _LEDGER_NAME
+    if not path.is_file():
+        return False
+    conn = sqlite3.connect(path, timeout=5.0)
+    try:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='consumed_quotes'"
+        ).fetchone()
+        if table is None:
+            return False
+        return (
+            conn.execute("SELECT 1 FROM consumed_quotes WHERE sig=?", (sig,)).fetchone() is not None
+        )
+    finally:
+        conn.close()
+
+
 def _consume_quote(data_dir: Path, sig: str, expires_at: float, now: float) -> None:
     """Single-use enforcement: atomically record the sig; a second verify refuses.
 
