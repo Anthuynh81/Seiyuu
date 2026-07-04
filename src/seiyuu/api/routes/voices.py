@@ -18,7 +18,7 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
@@ -41,7 +41,7 @@ from seiyuu.api.schemas import (
     VoiceOut,
     VoiceReferencesOut,
 )
-from seiyuu.engines import SynthesisError, get_engine_class
+from seiyuu.engines import SynthesisError, get_engine_class, list_engine_ids
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.repository import Job, JobKind, JobState
@@ -49,6 +49,7 @@ from seiyuu.services import ServiceError, delete_voice, voice_references
 from seiyuu.voices import (
     BlendComponent,
     CloudVoiceError,
+    CloudVoiceRegistry,
     ConsentAttestation,
     VoiceKind,
     VoiceLibrary,
@@ -95,6 +96,35 @@ def _voice_out(library: VoiceLibrary, meta: VoiceMeta) -> VoiceOut:
     )
 
 
+def _guard_live_render(store, action: str) -> None:
+    """Replace-clone and voice deletion mutate state a RUNNING render depends on
+    (cached segments the manifest will reference; the consent-attested reference.wav a
+    single-voice job reads mid-run — which never appears in assignments.json, so the
+    referential guard cannot see it). Refuse globally while any render job is live,
+    mirroring the render_active guard on edits/assignment writes."""
+    live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
+    render = next((j for j in live if j.kind is JobKind.RENDER), None)
+    if render is not None:
+        raise ApiError(
+            409,
+            "render_active",
+            f"a render job is {render.state.value}; {action} would corrupt its cached "
+            "segments or pull its voice out from under it — wait or cancel it first",
+            detail=JobOut.from_job(render).model_dump(mode="json"),
+        )
+
+
+def _drop_cloud_handle(cfg, voice_id: str) -> None:
+    """Remove the voice's IVC handle from the slot registry (re-clone/delete): the
+    cached cloud voice was trained on the OLD reference audio, and ensure_cloud_voice
+    would keep returning it — paid synthesis in the previously-attested speaker's
+    voice. The remote voice itself is left for slot-pressure eviction to reap."""
+    if not (cfg.voices_dir / REGISTRY_NAME).is_file():
+        return
+    with CloudVoiceRegistry(cfg.voices_dir).locked(timeout=30.0) as registry:
+        registry.remove(voice_id)
+
+
 # -- library CRUD -------------------------------------------------------------------------
 
 
@@ -115,7 +145,14 @@ def list_voices(cfg: SettingsDep) -> VoiceListOut:
 
 
 @router.post("/voices", response_model=VoiceOut, status_code=201)
-def create_voice(body: VoiceCreate, request: Request, cfg: SettingsDep) -> VoiceOut:
+def create_voice(
+    body: VoiceCreate, request: Request, response: Response, cfg: SettingsDep
+) -> VoiceOut:
+    if isinstance(body, PresetVoiceCreate) and body.engine not in list_engine_ids():
+        # an arbitrary engine string would 201 here and then 500 on every later use
+        raise ApiError(
+            422, "invalid", f"unknown engine {body.engine!r}; available: {list_engine_ids()}"
+        )
     library = VoiceLibrary(cfg.voices_dir)
     voice_id = body.voice_id or library.new_voice_id(body.name)
     _check_voice_id(voice_id)
@@ -153,7 +190,7 @@ def create_voice(body: VoiceCreate, request: Request, cfg: SettingsDep) -> Voice
             library.save(meta)
         except (VoiceLibraryError, ValueError) as exc:
             raise ApiError(422, "invalid", str(exc)) from exc
-    request.app.state  # noqa: B018 — keep Request typed-used under TYPE_CHECKING variance
+    response.headers["Location"] = f"/api/voices/{voice_id}"
     return _voice_out(library, meta)
 
 
@@ -188,8 +225,10 @@ def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
 @router.post("/voices/clone", response_model=VoiceOut, status_code=201)
 def clone_voice(
     request: Request,
+    response: Response,
     cfg: SettingsDep,
     registry: RegistryDep,
+    store: StoreDep,
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1)],
     engine: Annotated[str, Form(pattern="^(chatterbox|elevenlabs)$")] = "chatterbox",
@@ -247,10 +286,16 @@ def clone_voice(
                     "segments for this voice are purged and paid ones re-bill)",
                 )
             if exists:
+                # a running render may be reading/writing exactly the cache files the
+                # purge deletes (its manifest would reference missing wavs)
+                _guard_live_render(store, "re-cloning this voice")
                 # Q1 DECIDED (purge-on-reclone): stale audio out BEFORE the new
                 # reference is published, so no window serves old-voice segments.
                 _purge_cached_segments(cfg.output_dir, vid)
                 _audition_path(library, vid).unlink(missing_ok=True)
+                # the IVC handle was trained on the OLD reference; keeping it would let
+                # paid synthesis keep speaking the previously-attested speaker
+                _drop_cloud_handle(cfg, vid)
             ref_path = library.reference_path(vid)
             ref_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = ref_path.with_name("reference.wav.part")
@@ -280,6 +325,7 @@ def clone_voice(
             # the shared chatterbox instance caches per-run reference hashes; a re-clone
             # must not let a warm engine keep speaking the old speaker
             registry.invalidate("chatterbox")
+        response.headers["Location"] = f"/api/voices/{vid}"
         return _voice_out(library, library.load(vid))
     finally:
         shutil.rmtree(upload_dir, ignore_errors=True)
@@ -312,14 +358,19 @@ def references(voice_id: str, cfg: SettingsDep) -> VoiceReferencesOut:
 
 
 @router.delete("/voices/{voice_id}", response_model=VoiceDeletedOut)
-def remove_voice(voice_id: str, request: Request, cfg: SettingsDep) -> VoiceDeletedOut:
+def remove_voice(
+    voice_id: str, request: Request, cfg: SettingsDep, store: StoreDep
+) -> VoiceDeletedOut:
     """Irreversible rmtree including the consent-attested reference.wav — DELETE is the
     explicit confirmation; the UI shows /references first. Serialized against assignment
-    writes by the voices mutex so a voice can't vanish under a PUT's validation."""
+    writes by the voices mutex so a voice can't vanish under a PUT's validation, and
+    refused while a render job is live: a single-voice render's voice never appears in
+    assignments.json, so the referential guard alone cannot protect it."""
     _check_voice_id(voice_id)
     library = VoiceLibrary(cfg.voices_dir)
     with request.app.state.voices_mutex:
         _load_or_404(library, voice_id)
+        _guard_live_render(store, "deleting this voice")
         try:
             gone = delete_voice(voice_id, library=library, output_dir=cfg.output_dir)
         except ServiceError as exc:
@@ -329,16 +380,16 @@ def remove_voice(voice_id: str, request: Request, cfg: SettingsDep) -> VoiceDele
             if "still assigned" in message:
                 raise ApiError(409, "voice_referenced", message) from exc
             raise ApiError(422, "invalid", message) from exc
+        _drop_cloud_handle(cfg, voice_id)  # free the tier-limited slot registry entry
     return VoiceDeletedOut(deleted=gone.name)
 
 
 # -- audition -----------------------------------------------------------------------------
 
 
-def _refuse_conflicts(meta: VoiceMeta, live: list[Job], registry, gate_holder: str) -> None:
+def _refuse_conflicts(meta: VoiceMeta, engine_cls, live: list[Job], registry) -> None:
     """The scoping-doc refusal predicate, evaluated under the enqueue mutex so the
     check-and-refuse is atomic against job creation."""
-    engine_cls = get_engine_class(meta.engine)
     if engine_cls.uses_gpu:
         gpu_job = next((j for j in live if j.kind in GPU_JOB_KINDS), None)
         if gpu_job is not None:
@@ -394,21 +445,41 @@ def audition(
     except VoiceLibraryError as exc:
         raise ApiError(409, "consent_invalid", str(exc)) from exc
 
+    try:
+        engine_cls = get_engine_class(meta.engine)
+    except ValueError as exc:  # a legacy/hand-written meta with an unknown engine id
+        raise ApiError(422, "invalid", str(exc)) from exc
+
     with ExitStack() as stack:
         with request.app.state.enqueue_mutex:
             live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
-            _refuse_conflicts(meta, live, registry, gate.holder)
-            acquired = stack.enter_context(gate.try_hold("audition"))
-            if not acquired:
+            _refuse_conflicts(meta, engine_cls, live, registry)
+            if not stack.enter_context(request.app.state.audition_slot.try_hold()):
                 raise ApiError(
                     409, "audition_in_flight", "another audition is already synthesizing"
                 )
-        # mutex released; the heavy-work gate stays held for the synthesis. A job
-        # enqueued from here on waits at most one warm-engine synthesis (accepted).
+            # only GPU engines claim the heavy-work gate: a cloud audition must not be
+            # refused (least of all as a phantom audition) because an attribute or
+            # ffmpeg-stage handler is running
+            if engine_cls.uses_gpu and not stack.enter_context(gate.try_hold("audition")):
+                running = next((j for j in live if j.state is JobState.RUNNING), None)
+                raise ApiError(
+                    409,
+                    "gpu_busy",
+                    "a job currently holds the GPU; wait for it or cancel it",
+                    detail=(JobOut.from_job(running).model_dump(mode="json") if running else None),
+                )
+        # mutex released; slot (+gate for GPU engines) stays held for the synthesis. A
+        # job enqueued from here on waits at most one warm-engine synthesis (accepted).
         engine = registry.get(meta.engine)
         engine_voice, settings = render_voice_args(meta)
         normalized = normalize_text(body.text, profile=profile_for(meta.engine))
         cost = engine.cost_estimate(normalized)
+        if cost > 0 and meta.engine == "elevenlabs" and not cfg.elevenlabs_api_key:
+            # config fault, not an upstream failure — the 503 every other route gives
+            raise ApiError(
+                503, "not_ready", "ELEVENLABS_API_KEY not set; required for paid auditions"
+            )
         if cost > 0 and not body.confirm_paid:
             raise ApiError(
                 402,

@@ -29,6 +29,17 @@ def client(tmp_path):
         yield c
 
 
+@pytest.fixture
+def keyed_client(tmp_path):
+    """Paid-audition tests: the keyless-503 preflight correctly fires before the
+    confirm_paid 402, so exercising the money prompts needs a configured key."""
+    settings = make_settings(tmp_path, elevenlabs_api_key="k-test-not-real")
+    app = create_app(settings=settings)
+    with TestClient(app) as c:
+        c.app = app
+        yield c
+
+
 def _error(resp) -> dict:
     return resp.json()["error"]
 
@@ -41,9 +52,11 @@ def _patch_audition(monkeypatch, engine=None, cls_by_id=None) -> None:
         "seiyuu.api.routes.voices.get_engine_class",
         lambda eid: classes.get(eid, FakeEngine),
     )
+    # pin the cold-engine probe: tests must not depend on this machine's HF cache
+    monkeypatch.setattr("seiyuu.api.routes.voices.weights_cached", lambda eid: True)
 
 
-def _make_preset(client, voice_id="v1", engine="fake", preset_id="test_voice") -> dict:
+def _make_preset(client, voice_id="v1", engine="kokoro", preset_id="test_voice") -> dict:
     resp = client.post(
         "/api/voices",
         json={
@@ -265,9 +278,7 @@ def test_audition_happy_path_free(client, monkeypatch) -> None:
     from seiyuu.gpu import get_gpu_manager
 
     assert get_gpu_manager().holds(engine)  # stays lazily resident — no free_all
-    engines = {e["engine_id"]: e for e in client.get("/api/engines").json()["engines"]}
-    assert "fake" not in engines  # sanity: catalog stays real; residency read next
-    assert client.app.state.registry.is_resident("fake") is True
+    assert client.app.state.registry.is_resident("kokoro") is True
 
 
 def test_audition_wav_404_before_first_audition(client) -> None:
@@ -296,29 +307,29 @@ def test_audition_refused_while_gpu_job_live(client, monkeypatch) -> None:
     store.request_cancel(other.job_id)
 
 
-def test_cloud_audition_refused_while_render_live(client, monkeypatch) -> None:
+def test_cloud_audition_refused_while_render_live(keyed_client, monkeypatch) -> None:
     _patch_audition(monkeypatch, PaidCloudFake(), cls_by_id={"elevenlabs": PaidCloudFake})
-    _make_preset(client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
-    store: JobStore = client.app.state.store
+    _make_preset(keyed_client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
+    store: JobStore = keyed_client.app.state.store
     render = store.create("bk", "render")
 
-    resp = client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
+    resp = keyed_client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
     assert resp.status_code == 409
     assert _error(resp)["code"] == "cloud_busy"  # eviction-race closure (Q6)
 
     store.request_cancel(render.job_id)
     # an attribute job does NOT block a cloud audition (no GPU, no slots)
     attr = store.create("bk", "attribute")
-    ok = client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
+    ok = keyed_client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
     assert ok.status_code == 200, ok.text
     assert ok.json()["cost_usd"] > 0
     store.request_cancel(attr.job_id)
 
 
-def test_paid_audition_requires_confirmation(client, monkeypatch) -> None:
+def test_paid_audition_requires_confirmation(keyed_client, monkeypatch) -> None:
     _patch_audition(monkeypatch, PaidCloudFake(), cls_by_id={"elevenlabs": PaidCloudFake})
-    _make_preset(client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
-    resp = client.post("/api/voices/cloudv/audition", json={})
+    _make_preset(keyed_client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
+    resp = keyed_client.post("/api/voices/cloudv/audition", json={})
     assert resp.status_code == 402
     err = _error(resp)
     assert err["code"] == "payment_confirmation_required"
@@ -328,7 +339,8 @@ def test_paid_audition_requires_confirmation(client, monkeypatch) -> None:
 def test_audition_in_flight_refusal(client, monkeypatch) -> None:
     _patch_audition(monkeypatch)
     _make_preset(client)
-    with client.app.state.gate.hold("audition"):
+    with client.app.state.audition_slot.try_hold() as held:
+        assert held
         resp = client.post("/api/voices/v1/audition", json={})
     assert resp.status_code == 409
     assert _error(resp)["code"] == "audition_in_flight"
@@ -342,7 +354,7 @@ def test_cold_engine_refused_toward_warmup(client, monkeypatch) -> None:
     assert resp.status_code == 409
     err = _error(resp)
     assert err["code"] == "engine_cold"
-    assert err["detail"]["warmup"] == "/api/engines/fake/warmup"
+    assert err["detail"]["warmup"] == "/api/engines/kokoro/warmup"
 
 
 def test_audition_consent_invalid(client, monkeypatch) -> None:
@@ -446,3 +458,202 @@ def test_cover_upload_replace_delete(client) -> None:
         ).status_code
         == 404
     )
+
+
+# -- cumulative-review regression fixes ------------------------------------------------------
+
+
+def test_route_surface_is_complete() -> None:
+    # Finding (x5): assemble/master routes were missing — the API dead-ended at
+    # rendered=true. Pin the full documented surface.
+    from fastapi.routing import APIRoute
+
+    from seiyuu.api.main import create_app as make
+
+    app = make()
+    paths = {
+        (r.path, m) for r in app.routes if isinstance(r, APIRoute) for m in r.methods if m != "HEAD"
+    }
+    assert ("/api/books/{book_id}/assemble", "POST") in paths
+    assert ("/api/books/{book_id}/master", "POST") in paths
+    assert len(paths) == 44  # the scoping doc's full route table
+
+
+def test_assemble_and_master_routes(client, monkeypatch) -> None:
+    import time as time_mod
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        "seiyuu.assemble.assemble_book", lambda d, **kw: seen.setdefault("assemble", kw)
+    )
+    monkeypatch.setattr(
+        "seiyuu.assemble.master_book", lambda d, **kw: seen.setdefault("master", kw)
+    )
+    _write_attribution(client.app.state.settings, "bk")
+
+    premature = client.post("/api/books/bk/assemble", json={})
+    assert premature.status_code == 409
+    assert _error(premature)["code"] == "stage_prerequisite"
+
+    odir = client.app.state.settings.output_dir / "bk"
+    odir.mkdir(parents=True, exist_ok=True)
+    (odir / "manifest.json").write_text("{}", encoding="utf-8")  # rendered marker
+
+    resp = client.post("/api/books/bk/assemble", json={"pauses": {"paragraph": 0.0}})
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+    assert resp.headers["location"] == f"/api/jobs/{job_id}"
+
+    master = client.post("/api/books/bk/master", json={"bitrate": "96k"})
+    assert master.status_code == 202, master.text
+
+    store: JobStore = client.app.state.store
+    deadline = time_mod.monotonic() + 5.0
+    while time_mod.monotonic() < deadline:
+        if store.get(job_id).is_terminal and store.get(master.json()["job_id"]).is_terminal:
+            break
+        time_mod.sleep(0.02)
+    assert store.get(job_id).state.value == "succeeded", store.get(job_id).error
+    assert seen["assemble"]["pauses"].paragraph == 0.0  # explicit zero honored end-to-end
+    assert seen["master"]["bitrate"] == "96k"
+
+
+def test_replace_clone_and_delete_refused_while_render_live(client) -> None:
+    # Finding (x4): the purge deletes cache files a RUNNING render references; a
+    # single-voice render's voice never appears in assignments.json.
+    assert _clone(client).status_code == 201
+    store: JobStore = client.app.state.store
+    render = store.create("some-book", "render")
+
+    blocked = _clone(client, data=b"RIFF-new", replace="true")
+    assert blocked.status_code == 409
+    assert _error(blocked)["code"] == "render_active"
+    assert _error(blocked)["detail"]["job_id"] == render.job_id
+
+    deleted = client.delete("/api/voices/clone1")
+    assert deleted.status_code == 409
+    assert _error(deleted)["code"] == "render_active"
+
+    store.request_cancel(render.job_id)
+    assert _clone(client, data=b"RIFF-new", replace="true").status_code == 201
+    assert client.delete("/api/voices/clone1").status_code == 200
+
+
+def test_reclone_and_delete_drop_cloud_handle(client) -> None:
+    # Finding (x3, worst Q1 violation): the IVC handle trained on the OLD reference
+    # stayed in cloud_voices.json — paid synthesis kept the previously-attested speaker.
+    assert _clone(client).status_code == 201
+    cfg = client.app.state.settings
+    (cfg.voices_dir / "cloud_voices.json").write_text(
+        json.dumps(
+            {
+                "next_seq": 2,
+                "voices": {
+                    "clone1": {"cloud_id": "old-ivc", "seq": 0},
+                    "other": {"cloud_id": "keep", "seq": 1},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _clone(client, data=b"RIFF-new-speaker", replace="true").status_code == 201
+    slots = {s["voice_id"] for s in client.get("/api/cloud-slots").json()["slots"]}
+    assert slots == {"other"}  # the stale handle is gone, the unrelated one remains
+
+    (cfg.voices_dir / "cloud_voices.json").write_text(
+        json.dumps({"next_seq": 3, "voices": {"clone1": {"cloud_id": "new-ivc", "seq": 2}}}),
+        encoding="utf-8",
+    )
+    assert client.delete("/api/voices/clone1").status_code == 200
+    assert client.get("/api/cloud-slots").json()["count"] == 0  # slot entry freed
+
+
+def test_cloud_audition_allowed_while_gate_held_by_job(keyed_client, monkeypatch) -> None:
+    # Finding (x5, one repro'd): any gate-holding job produced a phantom 409
+    # audition_in_flight. Cloud auditions (no GPU) must not touch the gate at all...
+    _patch_audition(monkeypatch, PaidCloudFake(), cls_by_id={"elevenlabs": PaidCloudFake})
+    _make_preset(keyed_client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
+    with keyed_client.app.state.gate.hold("job"):  # e.g. a running attribute handler
+        resp = keyed_client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
+    assert resp.status_code == 200, resp.text
+
+
+def test_gpu_audition_gets_gpu_busy_not_phantom_audition(client, monkeypatch) -> None:
+    # ...and a GPU audition losing the gate reports the TRUE holder (a job), never
+    # "another audition is already synthesizing".
+    _patch_audition(monkeypatch)
+    _make_preset(client)
+    with client.app.state.gate.hold("job"):  # e.g. a running assemble/master handler
+        resp = client.post("/api/voices/v1/audition", json={})
+    assert resp.status_code == 409
+    assert _error(resp)["code"] == "gpu_busy"
+    assert client.get("/api/system").json()["audition_in_flight"] is False  # consistent
+
+
+def test_create_voice_unknown_engine_422_and_location(client) -> None:
+    bad = client.post(
+        "/api/voices",
+        json={"kind": "preset", "name": "X", "engine": "Kokoro", "preset_id": "af_heart"},
+    )
+    assert bad.status_code == 422  # was a 201 that 500'd on every later use
+    assert "unknown engine" in _error(bad)["message"]
+
+    ok = client.post(
+        "/api/voices",
+        json={"kind": "preset", "name": "X", "preset_id": "af_heart", "voice_id": "vx"},
+    )
+    assert ok.headers["location"] == "/api/voices/vx"
+    clone = _clone(client, voice_id="cl2")
+    assert clone.headers["location"] == "/api/voices/cl2"
+
+
+def test_keyless_paid_audition_is_503_not_502(client, monkeypatch) -> None:
+    _patch_audition(monkeypatch, PaidCloudFake(), cls_by_id={"elevenlabs": PaidCloudFake})
+    _make_preset(client, voice_id="cloudv", engine="elevenlabs", preset_id="stock1")
+    resp = client.post("/api/voices/cloudv/audition", json={"confirm_paid": True})
+    assert resp.status_code == 503  # config fault, not an upstream failure
+    assert _error(resp)["code"] == "not_ready"
+    assert "ELEVENLABS_API_KEY" in _error(resp)["message"]
+
+
+def test_edit_conflict_with_corrupt_looking_id_stays_409(client) -> None:
+    # Finding: the bare "corrupt" sniff — a character id like "corrupt-one" in an
+    # anchor-conflict message crossed into 500 corrupt_artifact.
+    _write_attribution(client.app.state.settings, "bk")
+    resp = client.post(
+        "/api/books/bk/edits",
+        json={
+            "op": "reassign",
+            "block_id": "ch001_b0001",
+            "segment_index": 0,
+            "speaker": "corrupt-one",
+        },
+    )
+    assert resp.status_code == 409
+    assert _error(resp)["code"] == "edit_conflict"
+
+
+def test_ingest_refused_while_book_job_live(client, tmp_path) -> None:
+    from conftest import build_synthetic_epub
+
+    data = build_synthetic_epub(tmp_path / "s.epub").read_bytes()
+    first = client.post("/api/books", files={"file": ("s.epub", data, "application/epub+zip")})
+    assert first.status_code == 201
+    book_id = first.json()["book"]["book_id"]
+
+    job = client.app.state.store.create(book_id, "attribute")
+    again = client.post("/api/books", files={"file": ("s.epub", data, "application/epub+zip")})
+    assert again.status_code == 409
+    assert _error(again)["code"] == "conflicting_job"
+    client.app.state.store.request_cancel(job.job_id)
+
+
+def test_cover_writes_refused_while_master_live(client) -> None:
+    _write_attribution(client.app.state.settings, "bk")
+    job = client.app.state.store.create("bk", "master")
+    put = client.put("/api/books/bk/cover", files={"file": ("c.png", b"\x89PNG\r\n", "image/png")})
+    assert put.status_code == 409
+    assert _error(put)["code"] == "conflicting_job"
+    assert client.delete("/api/books/bk/cover").status_code == 409
+    client.app.state.store.request_cancel(job.job_id)
+    assert client.delete("/api/books/bk/cover").status_code == 204

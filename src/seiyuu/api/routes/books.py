@@ -97,6 +97,7 @@ def _safe_upload_name(filename: str | None) -> str:
 def ingest_book(
     response: Response,
     cfg: SettingsDep,
+    store: StoreDep,
     file: Annotated[UploadFile, File()],
     include_item: Annotated[list[str], Form()] = [],  # noqa: B006 — FastAPI default factory
     exclude_item: Annotated[list[str], Form()] = [],  # noqa: B006
@@ -131,6 +132,17 @@ def ingest_book(
             raise ApiError(422, "invalid", str(exc)) from exc
         book = result.book
         book_id = book.book_meta.book_id
+        live = store.list_jobs(book_id=book_id, states=[JobState.QUEUED, JobState.RUNNING])
+        if live:
+            # overwriting normalized.json re-chapters the book a running job already
+            # loaded — the failure would surface as that job's confusing late error
+            raise ApiError(
+                409,
+                "conflicting_job",
+                f"a {live[0].kind.value} job for {book_id!r} is {live[0].state.value}; "
+                "re-ingesting would rewrite the book underneath it",
+                detail=JobOut.from_job(live[0]).model_dump(mode="json"),
+            )
         existed = (cfg.books_dir / book_id / NORMALIZED_NAME).is_file()
         write_normalized(book, cfg.books_dir)
         response.status_code = 200 if existed else 201
@@ -395,12 +407,30 @@ _COVER_MAGIC = {
 }
 
 
+def _guard_master_active(store, book_id: str) -> None:
+    """A master job reads the cover mid-run (and on Windows, unlinking a file ffmpeg
+    holds open raises a sharing violation) — refuse cover writes while one is live."""
+    live = store.list_jobs(book_id=book_id, states=[JobState.QUEUED, JobState.RUNNING])
+    master = next((j for j in live if j.kind is JobKind.MASTER), None)
+    if master is not None:
+        raise ApiError(
+            409,
+            "conflicting_job",
+            f"a master job for {book_id!r} is {master.state.value}; it reads the cover "
+            "mid-run — wait or cancel it before changing cover art",
+            detail=JobOut.from_job(master).model_dump(mode="json"),
+        )
+
+
 @router.put("/books/{book_id}/cover", response_model=CoverOut)
-def upload_cover(book_id: str, cfg: SettingsDep, file: Annotated[UploadFile, File()]) -> CoverOut:
+def upload_cover(
+    book_id: str, cfg: SettingsDep, store: StoreDep, file: Annotated[UploadFile, File()]
+) -> CoverOut:
     """Cover art for mastering (replaces the CLI's `master --cover`). Content type AND
     magic bytes are checked; the write is atomic and evicts the other extension so a
     book never carries two covers."""
     status_or_404(cfg, book_id)
+    _guard_master_active(store, book_id)
     content_type = (file.content_type or "").lower()
     if content_type not in _COVER_MAGIC:
         raise ApiError(
@@ -427,9 +457,10 @@ def upload_cover(book_id: str, cfg: SettingsDep, file: Annotated[UploadFile, Fil
 
 
 @router.delete("/books/{book_id}/cover", status_code=204)
-def delete_cover(book_id: str, cfg: SettingsDep) -> None:
+def delete_cover(book_id: str, cfg: SettingsDep, store: StoreDep) -> None:
     """Idempotent: removing an absent cover is a success, not an error."""
     status_or_404(cfg, book_id)
+    _guard_master_active(store, book_id)
     odir = cfg.output_dir / book_id
     for name in _COVER_TYPES:
         (odir / name).unlink(missing_ok=True)

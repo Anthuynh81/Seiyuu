@@ -221,38 +221,39 @@ def build_handlers(
                     check_cancel=ctx.check_cancel,
                 )
 
+    # assemble/master deliberately do NOT hold the heavy-work gate: they are pure
+    # ffmpeg/CPU stages, and holding it would make a running assemble refuse auditions
+    # with a phantom "audition in flight" (the refusal predicate rightly allows them).
     def assemble(ctx: JobContext) -> None:
         from seiyuu.assemble import assemble_book
 
         params = AssembleParams.model_validate(ctx.job.params or {})
-        with gate.hold("job"):
-            assemble_book(
-                cfg.output_dir / ctx.job.book_id,
-                pauses=_pause_profile(params.pauses),
-                loudness=_loudness_target(cfg, params.loudness),
-                progress=ctx.progress,
-                check_cancel=ctx.check_cancel,
-            )
+        assemble_book(
+            cfg.output_dir / ctx.job.book_id,
+            pauses=_pause_profile(params.pauses),
+            loudness=_loudness_target(cfg, params.loudness),
+            progress=ctx.progress,
+            check_cancel=ctx.check_cancel,
+        )
 
     def master(ctx: JobContext) -> None:
         from seiyuu.assemble import master_book
 
         params = MasterParams.model_validate(ctx.job.params or {})
         book_output_dir = cfg.output_dir / ctx.job.book_id
-        with gate.hold("job"):
-            master_book(
-                book_output_dir,
-                pauses=_pause_profile(params.pauses),
-                loudness=_loudness_target(cfg, params.loudness),
-                cover=_find_cover(book_output_dir) if params.use_cover else None,
-                bitrate=params.bitrate,
-                target_seconds=(
-                    params.target_minutes * 60.0 if params.target_minutes is not None else None
-                ),
-                tempo_bounds=(cfg.tempo_min, cfg.tempo_max),
-                progress=ctx.progress,
-                check_cancel=ctx.check_cancel,
-            )
+        master_book(
+            book_output_dir,
+            pauses=_pause_profile(params.pauses),
+            loudness=_loudness_target(cfg, params.loudness),
+            cover=_find_cover(book_output_dir) if params.use_cover else None,
+            bitrate=params.bitrate,
+            target_seconds=(
+                params.target_minutes * 60.0 if params.target_minutes is not None else None
+            ),
+            tempo_bounds=(cfg.tempo_min, cfg.tempo_max),
+            progress=ctx.progress,
+            check_cancel=ctx.check_cancel,
+        )
 
     return {
         JobKind.WARMUP: warmup,

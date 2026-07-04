@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from seiyuu import __version__
-from seiyuu.api.concurrency import HeavyWorkGate
+from seiyuu.api.concurrency import AuditionSlot, HeavyWorkGate
 from seiyuu.api.errors import register_error_handlers
 from seiyuu.api.handlers import build_handlers
 from seiyuu.api.registry import EngineRegistry
@@ -64,21 +64,27 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         # Serializes assignment writes against voice deletion (M6b-6): a voice must not
         # vanish between an assignment's validation and its durable write.
         app.state.voices_mutex = threading.Lock()
+        app.state.audition_slot = AuditionSlot()
         try:
             yield
         finally:
-            if not runner.stop(cancel_pending=True, timeout=_SHUTDOWN_TIMEOUT_SECONDS):
+            stopped = runner.stop(cancel_pending=True, timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            if stopped:
+                try:
+                    get_gpu_manager().free_all()
+                except Exception:
+                    logger.exception("freeing the GPU at shutdown failed")
+            else:
                 # Logged, not raised (scoping doc): the daemon thread dies with the
-                # process and the next startup's reconcile settles its row.
+                # process and the next startup's reconcile settles its row. free_all()
+                # is SKIPPED — the stuck handler may hold the manager lock (acquire
+                # holds it for its whole body), and blocking here would hang shutdown
+                # far past the timeout; the process exit frees VRAM anyway.
                 logger.warning(
-                    "job runner worker did not exit within %.0fs; its row settles at "
-                    "the next startup reconcile",
+                    "job runner worker did not exit within %.0fs; skipping GPU free "
+                    "(its row settles at the next startup reconcile)",
                     _SHUTDOWN_TIMEOUT_SECONDS,
                 )
-            try:
-                get_gpu_manager().free_all()
-            except Exception:
-                logger.exception("freeing the GPU at shutdown failed")
 
     app = FastAPI(title="Seiyuu API", version=__version__, lifespan=lifespan)
     register_error_handlers(app)

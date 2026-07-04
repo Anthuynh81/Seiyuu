@@ -11,7 +11,7 @@ deletion through the process-wide voices mutex (shared with M6b-6's DELETE /voic
 import threading
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, Response
 from pydantic import ValidationError
 
 from seiyuu.api.deps import SettingsDep, StoreDep
@@ -69,9 +69,11 @@ def edit_log(book_id: str, cfg: SettingsDep) -> EditLog:
 def record_edit_op(
     book_id: str,
     edit: Annotated[EditRequest, Body()],
+    response: Response,
     cfg: SettingsDep,
     store: StoreDep,
 ):
+    response.headers["Location"] = f"/api/books/{book_id}/edits"
     status = status_or_404(cfg, book_id)
     effective_report(cfg, book_id, status)  # clean 404 (no attribution) / 500 (corrupt)
     guard_render_active(store, book_id)
@@ -89,10 +91,13 @@ def record_edit_op(
     except ServiceError as exc:
         # record_edit re-reads under its lock, so a corrupt artifact can still surface
         # here (rare TOCTOU vs the pre-check above); everything else is an anchor
-        # conflict — the op doesn't apply to the CURRENT effective report.
-        if "corrupt" in str(exc):
-            raise ApiError(500, "corrupt_artifact", str(exc)) from exc
-        raise ApiError(409, "edit_conflict", str(exc)) from exc
+        # conflict. FULL phrases, not a bare "corrupt": conflict messages interpolate
+        # character/block ids (LLM-derived slugs like "corrupt-one") — the same
+        # shadowing gate_code was hardened against.
+        message = str(exc)
+        if "corrupt attribution" in message or "corrupt edits" in message:
+            raise ApiError(500, "corrupt_artifact", message) from exc
+        raise ApiError(409, "edit_conflict", message) from exc
     return anchored
 
 
@@ -139,9 +144,11 @@ def draft(
     book_id: str,
     body: AssignmentDraftRequest,
     request: Request,
+    response: Response,
     cfg: SettingsDep,
     store: StoreDep,
 ) -> AssignmentDraftResponse:
+    response.headers["Location"] = f"/api/books/{book_id}/assignment"
     """Generate-and-save the deterministic draft. Not a pure read: missing auto voices
     get meta.json files (deterministic, so re-POSTing is idempotent — same voice ids,
     same SegmentKeys)."""

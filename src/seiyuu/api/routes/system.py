@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from seiyuu import __version__
 from seiyuu.api.deps import GateDep, ReconciledDep, RegistryDep, SettingsDep, StoreDep
@@ -47,6 +47,7 @@ def health() -> HealthOut:
 
 @router.get("/system", response_model=SystemStatus)
 def system_status(
+    request: Request,
     cfg: SettingsDep,
     store: StoreDep,
     registry: RegistryDep,
@@ -59,7 +60,7 @@ def system_status(
         gpu_resident=get_gpu_manager().resident,
         active_job=JobOut.from_job(running[0]) if running else None,
         queued_jobs=len(store.list_jobs(states=[JobState.QUEUED])),
-        audition_in_flight=gate.audition_in_flight,
+        audition_in_flight=request.app.state.audition_slot.in_flight,
         reconciled_at_startup=reconciled,
         ffmpeg_available=shutil.which("ffmpeg") is not None,
         ollama=OllamaStatus(

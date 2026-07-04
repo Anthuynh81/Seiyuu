@@ -19,8 +19,10 @@ from seiyuu.api.errors import ApiError
 from seiyuu.api.money import compute_estimate, gate_code, resolve_single
 from seiyuu.api.routes.common import load_book, status_or_404
 from seiyuu.api.schemas import (
+    AssembleParams,
     CostEstimateOut,
     JobOut,
+    MasterParams,
     QuoteRequest,
     QuoteResponse,
     RenderChapterOut,
@@ -84,6 +86,10 @@ def _estimate_or_http(cfg, registry, book, book_id, *, mode, chapters, single):
         return compute_estimate(
             cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single
         )
+    except ValidationError as exc:
+        # BEFORE ValueError (its superclass): a corrupt assignments.json is a server
+        # data fault, not a malformed request — same 500 GET /assignment gives it.
+        raise ApiError(500, "corrupt_artifact", f"corrupt artifact: {exc}") from exc
     except (VoiceLibraryError, ValueError) as exc:
         raise ApiError(422, "invalid", str(exc)) from exc
     except ServiceError as exc:
@@ -122,7 +128,18 @@ def _preflight_renderability(cfg: Settings, mode: str, single, est_ctx, book_id:
     if mode == "single":
         paid_engine = single.engine_id == "elevenlabs"
         if library.meta_path(single.voice_id).is_file():
-            check_consent(single.voice_id)
+            engine_of_meta = check_consent(single.voice_id)
+            if engine_of_meta == "elevenlabs":
+                # render_book passes the voice id VERBATIM to the engine — it never
+                # resolves a library meta to its cloud handle (unlike multivoice and
+                # audition). Refusing here beats burning the token on a doomed job.
+                raise ApiError(
+                    422,
+                    "invalid",
+                    f"voice {single.voice_id!r} is an ElevenLabs library voice; the "
+                    "single-voice path takes a raw cloud voice id — use multivoice "
+                    "for library-managed ElevenLabs voices",
+                )
     else:
         assignment = load_assignment(cfg.output_dir, book_id)
         voice_ids = {assignment.narrator_voice_id, *assignment.assignments.values()}
@@ -336,6 +353,88 @@ def render_job(
     )
     response.headers["Location"] = f"/api/jobs/{job.job_id}"
     return JobOut.from_job(job)
+
+
+# -- assemble + master jobs (doc routes 27-28) ----------------------------------------------
+
+
+def _stage_job(
+    request: Request,
+    response: Response,
+    cfg: Settings,
+    store,
+    runner,
+    *,
+    book_id: str,
+    kind: JobKind,
+    params: dict,
+) -> JobOut:
+    """Shared ladder for the post-render stage jobs: both stream from the render
+    manifest, so `rendered` is the only stage precondition."""
+    status = status_or_404(cfg, book_id)
+    if not status.rendered:
+        raise ApiError(
+            409, "stage_prerequisite", f"book {book_id!r} has no render; run render first"
+        )
+    job = enqueue_job(
+        store=store,
+        runner=runner,
+        mutex=request.app.state.enqueue_mutex,
+        book_id=book_id,
+        kind=kind,
+        params=params,
+    )
+    response.headers["Location"] = f"/api/jobs/{job.job_id}"
+    return JobOut.from_job(job)
+
+
+@router.post("/books/{book_id}/assemble", response_model=JobOut, status_code=202)
+def assemble_job(
+    book_id: str,
+    params: AssembleParams,
+    request: Request,
+    response: Response,
+    cfg: SettingsDep,
+    store: StoreDep,
+    runner: RunnerDep,
+) -> JobOut:
+    """Chapter MP3s from the render manifest (explicit-null pause/loudness semantics —
+    0.0 is honored). ffmpeg failures land in Job.error, never HTTP."""
+    return _stage_job(
+        request,
+        response,
+        cfg,
+        store,
+        runner,
+        book_id=book_id,
+        kind=JobKind.ASSEMBLE,
+        params=params.model_dump(),
+    )
+
+
+@router.post("/books/{book_id}/master", response_model=JobOut, status_code=202)
+def master_job(
+    book_id: str,
+    params: MasterParams,
+    request: Request,
+    response: Response,
+    cfg: SettingsDep,
+    store: StoreDep,
+    runner: RunnerDep,
+) -> JobOut:
+    """The chaptered .m4b (uses the uploaded cover when use_cover, the default). The
+    final ffmpeg measure/encode passes are uninterruptible — cancel settles at the next
+    checkpoint (documented)."""
+    return _stage_job(
+        request,
+        response,
+        cfg,
+        store,
+        runner,
+        book_id=book_id,
+        kind=JobKind.MASTER,
+        params=params.model_dump(),
+    )
 
 
 # -- render reads -------------------------------------------------------------------------
