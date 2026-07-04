@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError, postForm, postJson } from "./client";
 import type {
+  AssignmentDraftResponse,
+  AssignmentWrite,
   AuditionOut,
   BookDetail,
   BooksOut,
@@ -20,6 +22,7 @@ import type {
   RenderSummaryOut,
   SegmentBrowserOut,
   ValidationReportOut,
+  VoiceAssignment,
   VoiceCreate,
   VoiceListOut,
   VoiceOut,
@@ -181,6 +184,52 @@ export function useStartJob(bookId: string, path: "render" | "assemble" | "maste
     mutationFn: (body: RenderRequest | Record<string, never>) =>
       postJson<JobOut>(`/api/books/${bookId}/${path}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+// -- casting (voice assignment) --------------------------------------------------------------
+
+export function useAssignment(bookId: string | null, attributed: boolean) {
+  return useQuery({
+    queryKey: ["assignment", bookId],
+    queryFn: async () => {
+      try {
+        return await api<VoiceAssignment>(`/api/books/${bookId}/assignment`);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null; // not cast yet
+        throw e;
+      }
+    },
+    enabled: bookId !== null && attributed,
+  });
+}
+
+function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string) {
+  qc.invalidateQueries({ queryKey: ["assignment", bookId] });
+  qc.invalidateQueries({ queryKey: ["voices"] }); // draft creates auto-blend voices
+  qc.invalidateQueries({ queryKey: ["books"] }); // the assigned stage flag flips
+  qc.invalidateQueries({ queryKey: ["book", bookId] });
+  qc.invalidateQueries({ queryKey: ["estimate", bookId] }); // assignment hash drifts quotes
+}
+
+export function useDraftAssignment(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => postJson<AssignmentDraftResponse>(`/api/books/${bookId}/assignment/draft`, {}),
+    onSuccess: () => invalidateCasting(qc, bookId),
+  });
+}
+
+export function useSaveAssignment(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AssignmentWrite) =>
+      api<VoiceAssignment>(`/api/books/${bookId}/assignment`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => invalidateCasting(qc, bookId),
   });
 }
 

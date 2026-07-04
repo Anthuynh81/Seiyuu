@@ -3,15 +3,19 @@ import { useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
+  useAssignment,
   useBook,
   useBooks,
   useCharacters,
+  useDraftAssignment,
   useEditLog,
   useRecordEdit,
+  useSaveAssignment,
   useSegments,
   useUndoEdit,
+  useVoices,
 } from "../api/hooks";
-import type { CharacterSummary, SegmentRow } from "../api/types";
+import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 
 /* -------------------------------------------------- frontier (localStorage, per book) */
@@ -37,6 +41,7 @@ function RosterRow({
   onEdit,
   selected,
   onSelect,
+  voiceCell,
 }: {
   char: CharacterSummary;
   masked: boolean;
@@ -44,6 +49,7 @@ function RosterRow({
   onEdit: () => void;
   selected: boolean;
   onSelect: () => void;
+  voiceCell: React.ReactNode;
 }) {
   const debutChapter = chapterOfBlock(char.first_appearance);
   if (masked) {
@@ -67,6 +73,11 @@ function RosterRow({
           </span>
         </td>
         <td>{char.line_count.toLocaleString()}</td>
+        <td className="vcell">
+          {/* auto voices are named after their characters — a visible picker would leak
+              the very name the mask hides */}
+          <span className="mono" style={{ color: "var(--ink-3)" }}>▮▮</span>
+        </td>
       </tr>
     );
   }
@@ -87,7 +98,37 @@ function RosterRow({
         {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
       </td>
       <td>{char.line_count.toLocaleString()}</td>
+      <td className="vcell" onClick={(e) => e.stopPropagation()}>{voiceCell}</td>
     </tr>
+  );
+}
+
+/* -------------------------------------------------- casting */
+
+function VoicePicker({
+  value,
+  onChange,
+  voices,
+  allowOwn,
+}: {
+  value: string | null;
+  onChange: (v: string | null) => void;
+  voices: VoiceOut[];
+  allowOwn?: boolean; // the thought-voice "speaker's own" option
+}) {
+  return (
+    <select
+      className="vpick"
+      value={value ?? ""}
+      onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+    >
+      {allowOwn ? <option value="">speaker's own</option> : value === null && <option value="">— uncast —</option>}
+      {voices.map((v) => (
+        <option key={v.voice_id} value={v.voice_id}>
+          {v.name} · {v.engine}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -225,6 +266,36 @@ export function Review() {
   const editLog = useEditLog(attributed ? bookId : null);
   const undo = useUndoEdit(bookId ?? "");
 
+  // casting: server truth + a local editable copy
+  const assignment = useAssignment(bookId, attributed);
+  const voicesQ = useVoices();
+  const draftCast = useDraftAssignment(bookId ?? "");
+  const saveCast = useSaveAssignment(bookId ?? "");
+  const [casting, setCasting] = useState<{
+    narrator: string;
+    thought: string | null;
+    stage: "draft" | "final";
+    map: Record<string, string>;
+  } | null>(null);
+  useEffect(() => {
+    const a = assignment.data;
+    setCasting(
+      a
+        ? { narrator: a.narrator_voice_id, thought: a.thought_voice_id, stage: a.stage, map: { ...a.assignments } }
+        : null,
+    );
+  }, [assignment.data]);
+  const castingDirty = useMemo(() => {
+    const a = assignment.data;
+    if (!a || !casting) return false;
+    return (
+      casting.narrator !== a.narrator_voice_id ||
+      casting.thought !== a.thought_voice_id ||
+      casting.stage !== a.stage ||
+      JSON.stringify(casting.map) !== JSON.stringify(a.assignments)
+    );
+  }, [assignment.data, casting]);
+
   const [frontier, setFrontier] = useFrontier(bookId);
   const [spoilerSafe, setSpoilerSafe] = useState(true);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -350,17 +421,112 @@ export function Review() {
                 />{" "}
                 — later characters stay hidden
               </div>
+              <div className="caststrip">
+                {!casting ? (
+                  <>
+                    <span style={{ color: "var(--ink-2)", fontSize: 12 }}>
+                      no casting yet — auto-cast gives every character a distinct voice blend
+                    </span>
+                    <button
+                      className="key"
+                      style={{ marginLeft: "auto" }}
+                      disabled={draftCast.isPending}
+                      onClick={() => draftCast.mutate()}
+                    >
+                      {draftCast.isPending ? "casting…" : "auto-cast"}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {(["draft", "final"] as const).map((s) => (
+                      <button
+                        key={s}
+                        className={`chap ${casting.stage === s ? "on" : ""}`}
+                        style={{ padding: "2px 9px" }}
+                        onClick={() => setCasting({ ...casting, stage: s })}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                    <button
+                      className="key quiet"
+                      style={{ marginLeft: "auto", padding: "3px 9px" }}
+                      title="re-run the deterministic draft — fills newly-discovered characters, keeps existing voices"
+                      disabled={draftCast.isPending}
+                      onClick={() => draftCast.mutate()}
+                    >
+                      re-draft
+                    </button>
+                    <button
+                      className="key"
+                      style={{ padding: "3px 12px" }}
+                      disabled={!castingDirty || saveCast.isPending}
+                      onClick={() =>
+                        saveCast.mutate({
+                          stage: casting.stage,
+                          narrator_voice_id: casting.narrator,
+                          assignments: casting.map,
+                          thought_voice_id: casting.thought,
+                        })
+                      }
+                    >
+                      {saveCast.isPending ? "saving…" : castingDirty ? "save casting" : "saved ✓"}
+                    </button>
+                  </>
+                )}
+              </div>
+              {draftCast.data && draftCast.data.created_voice_ids.length > 0 && (
+                <div className="caststrip" style={{ color: "var(--ok)", fontFamily: "var(--mono)", fontSize: 11 }}>
+                  created {draftCast.data.created_voice_ids.length} voice(s) — tune them in Voice Studio
+                </div>
+              )}
+              {(draftCast.error || saveCast.error) && (
+                <div className="refusal" style={{ margin: "8px 12px" }}>
+                  <span className="tag">
+                    {(draftCast.error ?? saveCast.error) instanceof ApiError
+                      ? ((draftCast.error ?? saveCast.error) as ApiError).code
+                      : "error"}
+                  </span>
+                  <p>{(draftCast.error ?? saveCast.error)?.message}</p>
+                </div>
+              )}
               {overview.isPending && <div className="loadline" style={{ padding: 14 }}>reading the registry…</div>}
               <table>
                 <tbody>
                   <tr>
                     <th>character</th>
                     <th>lines</th>
+                    <th>voice</th>
                   </tr>
                   <tr>
                     <td>Narration<span className="sample">the book's own voice</span></td>
                     <td>{overview.data?.narration_segments.toLocaleString()}</td>
+                    <td className="vcell">
+                      {casting && (
+                        <VoicePicker
+                          value={casting.narrator}
+                          onChange={(v) => v && setCasting({ ...casting, narrator: v })}
+                          voices={voicesQ.data?.voices ?? []}
+                        />
+                      )}
+                    </td>
                   </tr>
+                  {casting && (
+                    <tr>
+                      <td style={{ color: "var(--ink-2)" }}>
+                        Thoughts<span className="sample">inner voice for thought segments</span>
+                      </td>
+                      <td>—</td>
+                      <td className="vcell">
+                        <VoicePicker
+                          value={casting.thought}
+                          onChange={(v) => setCasting({ ...casting, thought: v })}
+                          voices={voicesQ.data?.voices ?? []}
+                          allowOwn
+                        />
+                      </td>
+                    </tr>
+                  )}
                   {cast.map((c) => (
                     <RosterRow
                       key={c.id}
@@ -370,6 +536,17 @@ export function Review() {
                       onEdit={() => setEditingChar(c)}
                       selected={selectedChar === c.id}
                       onSelect={() => setSelectedChar(selectedChar === c.id ? null : c.id)}
+                      voiceCell={
+                        casting ? (
+                          <VoicePicker
+                            value={casting.map[c.id] ?? null}
+                            onChange={(v) => v && setCasting({ ...casting, map: { ...casting.map, [c.id]: v } })}
+                            voices={voicesQ.data?.voices ?? []}
+                          />
+                        ) : (
+                          <span className="mono" style={{ color: "var(--ink-3)" }}>—</span>
+                        )
+                      }
                     />
                   ))}
                 </tbody>

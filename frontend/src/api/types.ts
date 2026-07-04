@@ -209,6 +209,31 @@ export interface EditLog {
   ops: Record<string, unknown>[];
 }
 
+// -- casting (voice assignment) --------------------------------------------------------------
+
+export interface VoiceAssignment {
+  schema_version: number;
+  book_id: string;
+  stage: "draft" | "final";
+  narrator_voice_id: string;
+  assignments: Record<string, string>; // character_id -> voice_id
+  thought_voice_id: string | null; // null = thoughts use the speaker's own voice
+  created_at: string;
+}
+
+export interface AssignmentDraftResponse {
+  assignment: VoiceAssignment;
+  created_voice_ids: string[];
+  edit_warnings: string[];
+}
+
+export interface AssignmentWrite {
+  stage: "draft" | "final";
+  narrator_voice_id: string;
+  assignments: Record<string, string>;
+  thought_voice_id: string | null;
+}
+
 // -- voice studio --------------------------------------------------------------------------
 
 export interface VoiceOut {

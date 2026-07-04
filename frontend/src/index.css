@@ -191,7 +191,7 @@ details.fine summary:hover { color: var(--tungsten); }
 .dl td:last-child { text-align: right; }
 
 /* character review */
-.review { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.review { display: grid; grid-template-columns: 440px 1fr; gap: 16px; align-items: start; }
 .roster table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .roster th { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--hairline); font-weight: 600; }
 .roster th:first-child { text-align: left; }
@@ -203,6 +203,10 @@ details.fine summary:hover { color: var(--tungsten); }
 .roster tr.masked td { color: var(--ink-3); }
 .roster .mask { letter-spacing: 1px; color: var(--ink-3); }
 .roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
+.caststrip { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); }
+.vcell { min-width: 130px; }
+.vpick { width: 100%; max-width: 150px; background: var(--booth); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--mono); font-size: 10.5px; padding: 3px 4px; }
+.vpick:hover { border-color: var(--tungsten-dim); }
 .rowedit { margin-left: 8px; color: var(--ink-3); font-size: 12px; visibility: hidden; }
 .roster tr:hover .rowedit { visibility: visible; }
 .rowedit:hover { color: var(--tungsten); }
