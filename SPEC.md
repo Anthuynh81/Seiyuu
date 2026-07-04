@@ -292,7 +292,41 @@ regenerable from reference.wav.
      creation/resolution happens only on an authorized cache miss, so estimation and cached
      reuse never hit the API or need a key. The default suite mocks the SDK end to end; a real
      `ELEVENLABS_API_KEY` is needed only to run an actual cloud render.
-6. **M6 — Frontend:** FastAPI API + React UI.
+6. **M6 — Frontend:** ✅ **done.** Built in three phases behind the user-approved API scoping
+   doc. **M6a — server foundation:** repository seam (atomic writes, book registry), durable
+   job store (`data/jobs.db`, WAL, guarded transitions, startup reconcile), single-flight
+   `JobRunner` with cooperative cancel checkpoints threaded through every stage, money-gate
+   hardening (signed single-use HMAC cost quotes bound to book/chapters/paid-fingerprint/
+   assignment-hash, TTL + consumed-sig ledger, `render_max_usd` ceiling on every path),
+   hash-bound clone consent, cloud-slot file lock, service extraction (`services/`) and the
+   manual-edits overlay (`edits.json` op log with content anchors, replayed over every
+   attribution run). **M6b — FastAPI** (`src/seiyuu/api/`, 45 routes): uniform error envelope
+   with stable machine codes, stage jobs through the enqueue ladder (dedupe, stage
+   prerequisites, conflict guards), estimate → mint-quote → token-gated render with granular
+   402s (dry-run verify at enqueue, consume at job start), Character Review reads/edits/
+   assignment with `render_active` write guards, Voice Studio CRUD + synchronous audition
+   behind a metadata-driven refusal predicate (gpu_busy/cloud_busy/engine_cold→warmup/
+   audition_in_flight), purge-on-reclone incl. the cloud IVC handle, read-only cloud slots.
+   **M6c — React** (`frontend/`, Vite + React 19 + TS + TanStack Query, no UI framework):
+   the judge-panel-selected "Talkback" design (dark console + script-paper material split);
+   five screens — Library, Listen (real-audio read-along: word-karaoke highlight from
+   manifest segment durations with punctuation-weighted interpolation, click-word/bar seek,
+   reading themes incl. dark, cover shelf, TOC, chapter auto-advance + spoiler frontier),
+   Character Review (script page + margin chips, live reassign/rename/merge/undo, spoiler-
+   safe cast via `first_appearance`), Voice Studio (one-click consent cloning, audition
+   refusal grammar), Render & Jobs (guided 3-step money flow, paper quote ticket with TTL
+   fuse, chapter-range renders with "continue from ch N", jobs, outputs, validation diffs).
+   Deployment: exactly one uvicorn worker + `npm run dev` (Vite proxies `/api`).
+   - **Design notes:** the API is the only writer — the UI holds no truth (polling
+     discipline: `GET /api/jobs/{id}` is the single live poll; book payloads carry no
+     progress). Every non-2xx is `{"error":{code,message,detail}}` and the UI branches on
+     `code` (e.g. `quote_expired` re-mints silently; drift/mismatch re-shows the price).
+     Adversarial review workflows ran pre-commit on the risky sections and pre-merge
+     cumulatively; the confirmed finds (stale GPU-residency flag, envelope gaps, missing
+     assemble/master routes, IVC handle surviving re-clone, single-voice clip merging in
+     Listen) are all fixed and regression-tested. Known gaps, deliberate: frontend has
+     build+lint gates but no test suite yet; casting (assignment) has API endpoints but no
+     UI panel — multivoice renders need `seiyuu assign` or /docs until M6c-6.
 7. **M7 — IndexTTS-2:** second local cloning engine; emotion refs.
 8. **M8 — PDF ingestion.**
 
