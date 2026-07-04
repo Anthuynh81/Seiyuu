@@ -1,0 +1,758 @@
+<title>Seiyuu M6c — UI Design (Talkback)</title>
+<style>
+:root{
+  --booth:#1B1B19;         /* ground */
+  --console:#252522;       /* panels */
+  --console-hi:#2C2C28;    /* hover/raised */
+  --hairline:#3F3E37;
+  --ink:#D9D6CC;           /* silkscreen primary */
+  --ink-2:#A6A398;         /* secondary, explicit (no opacity tricks) */
+  --ink-3:#7C7A70;         /* tertiary labels */
+  --paper:#EDE7D9;         /* script paper — ONLY where the human reads/signs */
+  --paper-ink:#2B2820;
+  --paper-ink-2:#6B6353;
+  --paper-edge:#141310;
+  --tungsten:#D98E2B;      /* the single interactive accent */
+  --tungsten-dim:#8A5F26;
+  --rolling:#5C9FD6;       /* running */
+  --ok:#5FB37A;
+  --clip:#E0574C;
+  --caution:#F0D264;
+  --mono:"Cascadia Code",Consolas,monospace;
+  --sans:"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+  --serif:Cambria,Georgia,serif;
+}
+*{box-sizing:border-box}
+html{background:var(--booth)}
+body{margin:0;font-family:var(--sans);font-size:13px;line-height:1.45;color:var(--ink);background:var(--booth)}
+button{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--tungsten);outline-offset:2px}
+
+/* ---------- shell ---------- */
+.shell{display:grid;grid-template-columns:220px 1fr;grid-template-rows:1fr 48px;height:100vh}
+.nav{grid-row:1/3;background:var(--console);border-right:1px solid var(--hairline);display:flex;flex-direction:column;padding:16px 0}
+.brand{padding:4px 20px 18px;border-bottom:1px solid var(--hairline)}
+.brand b{font-size:16px;font-weight:650;letter-spacing:.02em}
+.brand span{display:block;font-family:var(--mono);font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.12em;margin-top:2px}
+.nav a{display:flex;align-items:center;gap:10px;padding:10px 20px;color:var(--ink-2);text-decoration:none;font-weight:500;border-left:2px solid transparent}
+.nav a:hover{color:var(--ink);background:var(--console-hi)}
+.nav a.on{color:var(--ink);border-left-color:var(--tungsten);background:var(--console-hi)}
+.nav .lamp{width:6px;height:6px;margin-left:auto;background:var(--rolling);animation:pulse 1.4s ease-in-out infinite}
+.nav .foot{margin-top:auto;padding:14px 20px;border-top:1px solid var(--hairline);font-family:var(--mono);font-size:10px;color:var(--ink-3);line-height:1.7}
+.main{overflow-y:auto;padding:24px 28px 40px}
+.screen{display:none;max-width:1200px}
+.screen.on{display:block}
+
+/* ---------- transport bar ---------- */
+.transport{grid-column:2;background:var(--console);border-top:1px solid var(--hairline);display:flex;align-items:center;gap:14px;padding:0 20px;font-family:var(--mono);font-size:12px}
+.transport .meter{flex:1;max-width:420px;height:10px;border:1px solid var(--hairline);position:relative;background:
+  repeating-linear-gradient(90deg,transparent 0 6px,var(--booth) 6px 8px),
+  linear-gradient(90deg,var(--rolling) 0 42%,transparent 42%)}
+.transport .peak{position:absolute;left:47%;top:-1px;bottom:-1px;width:2px;background:var(--ink)}
+.transport .cancel{font-family:var(--mono);font-size:11px;color:var(--ink-2);border:1px solid var(--hairline);padding:3px 10px}
+.transport .cancel:hover{color:var(--clip);border-color:var(--clip)}
+
+/* ---------- silkscreen primitives ---------- */
+h1{font-size:20px;font-weight:600;margin:0 0 4px}
+.sub{color:var(--ink-2);margin:0 0 20px;max-width:70ch}
+.panel{background:var(--console);border:1px solid var(--hairline);margin-bottom:16px}
+.panel-h{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--hairline)}
+.panel-h b{font-size:15px;font-weight:600}
+.mono{font-family:var(--mono)}
+.tag{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+.key{font-family:var(--mono);font-size:12px;font-weight:600;border:1px solid var(--tungsten-dim);color:var(--tungsten);padding:6px 14px;letter-spacing:.04em}
+.key:hover{background:var(--tungsten);color:#1B1B19;border-color:var(--tungsten)}
+.key[disabled]{border-color:var(--hairline);color:var(--ink-3);cursor:not-allowed}
+.key.quiet{border-color:var(--hairline);color:var(--ink-2)}
+.key.quiet:hover{background:var(--console-hi);color:var(--ink)}
+a.link{color:var(--tungsten);text-decoration:none}
+a.link:hover{text-decoration:underline}
+
+/* LED grammar: shape+label always; hollow=queued, solid=terminal, pulse=active */
+.led{display:inline-block;width:7px;height:7px;vertical-align:1px}
+.led.q{border:1.5px solid var(--rolling);background:none}
+.led.run{background:var(--rolling);animation:pulse 1.4s ease-in-out infinite}
+.led.cxl{background:var(--rolling);animation:blink .7s steps(2) infinite}
+.led.ok{background:var(--ok)}
+.led.err{background:var(--clip)}
+.led.warn{background:var(--caution)}
+.led.off{border:1.5px solid var(--ink-3);background:none}
+.state{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+@keyframes pulse{50%{opacity:.35}}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+
+/* refusal grammar: mono tag, then human recourse */
+.refusal{border:1px solid var(--hairline);padding:8px 10px;background:var(--booth)}
+.refusal .tag{color:var(--caution)}
+.refusal p{margin:4px 0 0;color:var(--ink-2);font-size:12px}
+
+/* ---------- paper material ---------- */
+.paper{background:var(--paper);color:var(--paper-ink);border:1px solid var(--paper-edge);box-shadow:inset 0 0 0 1px rgba(43,40,32,.25);padding:0}
+.paper .serif{font-family:var(--serif)}
+
+/* ---------- library ---------- */
+.grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:16px}
+.drop{border:1.5px dashed var(--hairline);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--ink-2);min-height:170px;text-align:center;padding:20px}
+.drop:hover{border-color:var(--tungsten-dim);color:var(--ink)}
+.bookcard{background:var(--console);border:1px solid var(--hairline);padding:16px}
+.bookcard h3{margin:0;font-size:17px;font-weight:600}
+.bookcard .by{color:var(--ink-2);margin:1px 0 12px}
+.sigpath{display:flex;gap:2px;margin:0 0 12px}
+.stop{flex:1}
+.stop .bar{height:4px;background:var(--hairline)}
+.stop.done .bar{background:var(--ok)}
+.stop.now .bar{background:linear-gradient(90deg,var(--rolling) 0 62%,var(--hairline) 62%)}
+.stop.now .lbl{color:var(--rolling)}
+.stop .lbl{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-top:4px}
+.stop.done .lbl{color:var(--ink-2)}
+.jobline{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);display:flex;align-items:center;gap:8px;border-top:1px solid var(--hairline);padding-top:10px}
+.bookcard .acts{display:flex;gap:8px;margin-top:12px}
+
+/* ---------- character review ---------- */
+.review{display:grid;grid-template-columns:300px 1fr;gap:16px;align-items:start}
+.roster table{width:100%;border-collapse:collapse;font-size:12.5px}
+.roster th{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);text-align:right;padding:8px 10px;border-bottom:1px solid var(--hairline);font-weight:600}
+.roster th:first-child{text-align:left}
+.roster td{padding:7px 10px;border-bottom:1px solid var(--hairline);text-align:right;font-variant-numeric:tabular-nums}
+.roster td:first-child{text-align:left;font-weight:500}
+.roster tr:hover td{background:var(--console-hi)}
+.roster tr.sel td{background:var(--console-hi);box-shadow:inset 2px 0 0 var(--tungsten)}
+.roster .lowc{color:var(--caution)}
+.roster .flags{color:var(--clip)}
+.roster .sample{font-family:var(--serif);font-style:italic;color:var(--ink-2);font-weight:400;font-size:12px;display:block;margin-top:1px}
+.drainstrip{display:flex;align-items:center;gap:12px;background:var(--console);border:1px solid var(--hairline);padding:8px 14px;margin-bottom:10px}
+.drainstrip .bar{flex:1;height:6px;border:1px solid var(--hairline);background:linear-gradient(90deg,var(--caution) 0 34%,transparent 34%)}
+.page-wrap{background:var(--console);border:1px solid var(--hairline);padding:22px 26px}
+.page{display:grid;grid-template-columns:minmax(auto,66ch) 190px;gap:0 18px;padding:30px 34px;max-width:960px}
+.seg{grid-column:1;font-family:var(--serif);font-size:17px;line-height:1.65;margin:0 0 14px;position:relative}
+.seg.dlg{padding-left:2ch;text-indent:-0.62ch}
+.seg .hl{background:rgba(217,142,43,.22);box-shadow:0 0 0 1px rgba(217,142,43,.45)}
+.margin{grid-column:2;font-family:var(--mono);font-size:10.5px;line-height:1.5;color:var(--paper-ink-2);margin:0 0 14px;align-self:start}
+.chip{display:inline-block;border:1px solid var(--paper-ink-2);padding:1px 7px;font-weight:600;letter-spacing:.05em;cursor:pointer}
+.chip:hover{border-color:var(--paper-ink);color:var(--paper-ink)}
+.chip.narr{border-style:dotted}
+.conf{display:block;margin-top:2px}
+.conf.low{color:#9C6A00;font-weight:600}
+.mwarn{grid-column:2;background:rgba(240,210,100,.28);border:1px solid #B99B33;color:#5C4A00;font-family:var(--mono);font-size:10.5px;padding:6px 8px;margin:0 0 14px}
+.popover{position:absolute;left:0;top:100%;z-index:5;background:var(--console);border:1px solid var(--hairline);color:var(--ink);font-family:var(--sans);font-size:12.5px;text-indent:0;width:300px;padding:12px 14px}
+.popover .tag{display:block;margin-bottom:8px}
+.popover .row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.popover input,.popover select{background:var(--booth);border:1px solid var(--hairline);color:var(--ink);font:inherit;padding:5px 8px;flex:1}
+.popover .acts{display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--hairline);padding-top:10px;margin-top:2px}
+
+/* ---------- voice studio ---------- */
+.slotbank{display:flex;align-items:center;gap:4px;margin-left:auto}
+.slotbank i{width:8px;height:14px;border:1px solid var(--hairline)}
+.slotbank i.lit{background:var(--tungsten);border-color:var(--tungsten)}
+.voices{display:grid;grid-template-columns:repeat(auto-fill,minmax(235px,1fr));gap:14px}
+.vcard{background:var(--console);border:1px solid var(--hairline);padding:14px;display:flex;flex-direction:column;gap:9px;min-height:215px}
+.vcard .eng{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.vcard h3{margin:0;font-size:15px;font-weight:600}
+.vcard .kind{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.vcard .consent{font-family:var(--mono);font-size:10.5px;display:flex;gap:6px;align-items:center;color:var(--ink-2)}
+.vcard .foot{margin-top:auto}
+.audit{display:flex;align-items:center;gap:10px;border:1px solid var(--hairline);padding:7px 10px}
+.audit .play{width:0;height:0;border-left:11px solid var(--tungsten);border-top:7px solid transparent;border-bottom:7px solid transparent}
+.audit .stop{width:11px;height:11px;background:var(--clip)}
+.audit .lbl{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.audit .live{flex:1;height:8px;background:repeating-linear-gradient(90deg,var(--ok) 0 3px,transparent 3px 5px);animation:pulse 0.9s ease-in-out infinite}
+
+/* ---------- render & jobs ---------- */
+.rjgrid{display:grid;grid-template-columns:minmax(380px,460px) 1fr;gap:16px;align-items:start}
+.estrow{display:flex;justify-content:space-between;padding:6px 14px;font-family:var(--mono);font-size:12px}
+.estbar{display:flex;height:10px;margin:8px 14px;border:1px solid var(--hairline)}
+.estbar i.paid{background:var(--tungsten)}
+.estbar i.cached{background:var(--ink-3)}
+.estbar i.free{background:var(--hairline)}
+.estwarn{margin:10px 14px;background:rgba(240,210,100,.12);border:1px solid rgba(240,210,100,.4);padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--caution)}
+.estwarn div{margin:2px 0}
+.est .acts{display:flex;gap:10px;padding:12px 14px;border-top:1px solid var(--hairline)}
+
+/* the printed quote */
+.quote{margin-top:16px;position:relative}
+.fuse{height:3px;background:linear-gradient(90deg,var(--ink-3) 0 72%,transparent 72%)}
+.quote.hot .fuse{background:linear-gradient(90deg,var(--caution) 0 8%,transparent 8%)}
+.quote-inner{padding:16px 20px 18px}
+.quote .head{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--paper-ink-2);margin-bottom:12px}
+.quote .line{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;padding:3px 0;border-bottom:1px dotted rgba(43,40,32,.25)}
+.quote .warnline{color:#8A6D00}
+.quote .total{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px}
+.quote .total b{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.quote .sig{font-family:var(--mono);font-size:10px;color:var(--paper-ink-2);margin-top:14px;border-top:1px solid rgba(43,40,32,.3);padding-top:8px;display:flex;justify-content:space-between}
+.quote .confirm{display:block;width:100%;margin-top:14px;background:var(--console);color:var(--tungsten);border:1px solid var(--console);padding:10px;font-family:var(--mono);font-size:13px;font-weight:600;letter-spacing:.05em}
+.quote .confirm:hover{color:#F5B95C}
+.quote.dead{filter:grayscale(.9);opacity:.75}
+.quote .stamp{position:absolute;top:42px;right:26px;transform:rotate(-11deg);font-family:var(--mono);font-weight:700;font-size:20px;letter-spacing:.2em;color:var(--clip);border:3px solid var(--clip);padding:2px 12px}
+.quote.dead .confirm{color:var(--ink-3);cursor:not-allowed}
+.joblist .job{border-bottom:1px solid var(--hairline);padding:10px 14px}
+.joblist .job:last-child{border-bottom:none}
+.jobtop{display:flex;align-items:center;gap:12px}
+.jobtop .what{font-weight:500}
+.jobtop .id{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.jobtop .when{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.errblock{margin-top:8px;background:var(--booth);border:1px solid var(--hairline);font-family:var(--mono);font-size:11.5px;color:var(--clip);padding:8px 10px;white-space:pre-wrap}
+.valrow{margin-top:8px;border:1px solid var(--hairline);padding:10px}
+.valrow .vhead{display:flex;gap:10px;align-items:center;font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-bottom:8px}
+.vdiff{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.vdiff .exp{padding:8px 10px;font-family:var(--serif);font-size:13.5px}
+.vdiff .got{background:var(--booth);border:1px solid var(--hairline);padding:8px 10px;font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
+.vdiff .cap{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+.dl table{width:100%;border-collapse:collapse;font-size:12.5px}
+.dl td{padding:7px 14px;border-bottom:1px solid var(--hairline);font-variant-numeric:tabular-nums}
+.dl td:last-child{text-align:right}
+
+/* ---------- listen (read-along) ---------- */
+.chapters{display:flex;gap:6px;margin-bottom:14px}
+.chap{font-family:var(--mono);font-size:11.5px;font-weight:600;border:1px solid var(--hairline);color:var(--ink-2);padding:4px 12px}
+.chap:hover{color:var(--ink);background:var(--console-hi)}
+.chap.on{border-color:var(--tungsten);color:var(--tungsten)}
+.chap.off{color:var(--ink-3);cursor:not-allowed;border-style:dashed}
+#lpage .w{cursor:pointer}
+#lpage .w:hover{box-shadow:0 1px 0 var(--tungsten)}
+#lpage .w.now{background:rgba(217,142,43,.34);box-shadow:0 1px 0 var(--tungsten)}
+#lpage .seg.now-seg{box-shadow:inset 3px 0 0 rgba(217,142,43,.5);padding-left:10px;margin-left:-13px}
+#lpage .seg.dlg.now-seg{margin-left:-13px}
+.tmode{display:flex;align-items:center;gap:14px;width:100%}
+.playkey{font-size:15px;color:var(--tungsten);border:1px solid var(--tungsten-dim);width:34px;height:28px;line-height:1}
+.playkey:hover{background:var(--tungsten);color:#1B1B19}
+.pmeter{flex:1;max-width:420px;height:10px;border:1px solid var(--hairline);background:var(--booth);cursor:pointer}
+.pmeter:hover{border-color:var(--tungsten-dim)}
+.pmeter i{display:block;height:100%;width:0%;background:var(--tungsten);pointer-events:none}
+.vol{display:flex;align-items:center;gap:8px}
+.vol input{width:90px;accent-color:var(--tungsten);height:4px}
+
+/* guided steps + calmer panels (render & jobs) */
+.steps{display:flex;gap:0;margin-bottom:16px;border:1px solid var(--hairline)}
+.step{flex:1;padding:10px 14px;border-right:1px solid var(--hairline)}
+.step:last-child{border-right:none}
+.step .n{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--tungsten);letter-spacing:.08em}
+.step b{display:block;font-size:13px;margin:2px 0 1px}
+.step span{color:var(--ink-2);font-size:12px}
+.panel-sub{padding:8px 14px;border-bottom:1px solid var(--hairline);color:var(--ink-2);font-size:12px}
+.humanline{padding:10px 14px 2px;font-size:13px;color:var(--ink)}
+.job{cursor:pointer}
+.job .jdetail{display:none}
+.job.open .jdetail{display:block}
+.job .more{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-left:8px}
+.job:hover .more{color:var(--tungsten)}
+details.fine{margin-top:10px;font-size:12px;color:var(--ink-2)}
+details.fine summary{cursor:pointer;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+details.fine summary:hover{color:var(--tungsten)}
+details.fine .paper.quote{margin-top:10px}
+
+/* spoiler-safe cast */
+.frontier{padding:7px 14px;border-bottom:1px solid var(--hairline);font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.roster tr.masked td{color:var(--ink-3)}
+.roster .mask{letter-spacing:1px;color:var(--ink-3)}
+.roster tr.masked .sample{font-family:var(--mono);font-style:normal;font-size:10.5px}
+
+/* compact consent + engine select */
+.eng-select{width:100%;background:var(--booth);border:1px solid var(--hairline);color:var(--ink);font:inherit;padding:7px 10px}
+.release.slim{padding:10px 14px}
+.release.slim .att{gap:10px}
+.attlbl{font-family:var(--serif);font-size:13.5px}
+
+/* ---------- dialogs ---------- */
+.overlay{position:fixed;inset:0;background:rgba(15,15,13,.72);display:none;align-items:center;justify-content:center;z-index:50}
+.overlay.on{display:flex}
+.dialog{background:var(--console);border:1px solid var(--hairline);width:520px;max-width:92vw}
+.dialog .dh{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--hairline)}
+.dialog .dh b{font-size:15px}
+.dialog .db{padding:16px}
+.dialog label{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:12px 0 4px}
+.dialog input[type=text]{width:100%;background:var(--booth);border:1px solid var(--hairline);color:var(--ink);font:inherit;padding:7px 10px}
+.release{margin-top:14px;padding:16px 18px}
+.release h4{margin:0 0 8px;font-family:var(--serif);font-size:15px;font-weight:600}
+.release p{margin:0 0 10px;font-family:var(--serif);font-size:13.5px;line-height:1.55}
+.release .att{display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:11.5px}
+.release input[type=checkbox]{accent-color:#2B2820}
+.release input[type=text]{background:transparent;border:none;border-bottom:1px solid var(--paper-ink-2);color:var(--paper-ink);font-family:var(--mono);padding:2px 4px;width:150px}
+.dialog .df{display:flex;justify-content:flex-end;gap:10px;padding:12px 16px;border-top:1px solid var(--hairline)}
+</style>
+
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><b>Seiyuu</b><span>audiobook console</span></div>
+    <a href="#" data-go="library" class="on">Library</a>
+    <a href="#" data-go="listen">Listen</a>
+    <a href="#" data-go="review">Character Review</a>
+    <a href="#" data-go="voices">Voice Studio</a>
+    <a href="#" data-go="render">Render &amp; Jobs <i class="lamp" title="a job is running"></i></a>
+    <div class="foot">api 127.0.0.1:8000<br>gpu&nbsp;&nbsp;kokoro resident<br>ollama reachable</div>
+  </nav>
+
+  <main class="main">
+
+  <!-- ================= LIBRARY ================= -->
+  <section class="screen on" id="library">
+    <h1>Library</h1>
+    <p class="sub">Every book under <span class="mono">books/</span> and <span class="mono">output/</span>, with its position on the signal path. Progress lives in the transport bar — cards only say what stage owns the book.</p>
+    <div class="grid2">
+      <button class="drop"><span class="tag">drop epub / click to browse</span><span>Ingest runs synchronously — the book appears here in seconds.</span><span class="mono" style="font-size:10.5px;color:var(--ink-3)">limit 100 MB</span></button>
+
+      <div class="bookcard">
+        <h3>Pride and Prejudice</h3>
+        <div class="by">Jane Austen</div>
+        <div class="sigpath">
+          <div class="stop done"><div class="bar"></div><span class="lbl">ingested</span></div>
+          <div class="stop done"><div class="bar"></div><span class="lbl">attributed</span></div>
+          <div class="stop done"><div class="bar"></div><span class="lbl">assigned</span></div>
+          <div class="stop now"><div class="bar"></div><span class="lbl">rendered</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">assembled</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">mastered</span></div>
+        </div>
+        <div class="jobline"><i class="led run"></i> render 9f3ac2d1e07b44aa — running · ch 26/61</div>
+        <div class="acts"><button class="key" data-go="listen">▶ listen ch 1</button><button class="key quiet" data-go="review">review characters</button><button class="key quiet" data-go="render">render &amp; jobs</button></div>
+      </div>
+
+      <div class="bookcard">
+        <h3>The Time Machine</h3>
+        <div class="by">H. G. Wells</div>
+        <div class="sigpath">
+          <div class="stop done"><div class="bar"></div><span class="lbl">ingested</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">attributed</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">assigned</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">rendered</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">assembled</span></div>
+          <div class="stop"><div class="bar"></div><span class="lbl">mastered</span></div>
+        </div>
+        <div class="jobline"><i class="led q"></i> attribute c41b09aa27e0d3f5 — queued behind the running render</div>
+        <div class="acts"><button class="key">attribute</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= LISTEN (read-along) ================= -->
+  <section class="screen" id="listen">
+    <h1>Listen — Pride and Prejudice</h1>
+    <p class="sub">Read along while it plays: the current word lights as the rendered audio runs, and clicking any word seeks the playback there. The transport bar below becomes the audio transport on this screen. <span class="mono" style="font-size:11px;color:var(--ink-3)">(live demo — press play, click words)</span></p>
+    <div class="chapters">
+      <button class="chap on">ch 1</button><button class="chap">ch 2</button><button class="chap">ch 3</button><button class="chap">ch 4</button><button class="chap off" disabled title="not rendered yet">ch 5</button><span class="tag" style="align-self:center;margin-left:8px">rendered 1–4 · seek is word-synced (segment-timed)</span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center"><span class="tag">voices</span><span class="state" style="color:var(--ink-2)">multivoice</span></span>
+    </div>
+    <div class="page-wrap">
+      <div class="tag" style="margin-bottom:14px">chapter 1 · 4:12 · 9 segments</div>
+      <div class="paper page" style="grid-template-columns:minmax(auto,66ch) 150px" id="lpage">
+        <p class="seg serif" data-d="7.9">It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife.</p>
+        <div class="margin"><span class="chip narr">narration</span></div>
+        <p class="seg serif" data-d="12.4">However little known the feelings or views of such a man may be on his first entering a neighbourhood, this truth is so well fixed in the minds of the surrounding families, that he is considered as the rightful property of some one or other of their daughters.</p>
+        <div class="margin"><span class="chip narr">narration</span></div>
+        <p class="seg serif dlg" data-d="6.8">“My dear Mr.&nbsp;Bennet,” said his lady to him one day, “have you heard that Netherfield Park is let at last?”</p>
+        <div class="margin"><span class="chip">MRS. BENNET</span></div>
+        <p class="seg serif" data-d="2.6">Mr. Bennet replied that he had not.</p>
+        <div class="margin"><span class="chip narr">narration</span></div>
+        <p class="seg serif dlg" data-d="5.7">“But it is,” returned she; “for Mrs. Long has just been here, and she told me all about it.”</p>
+        <div class="margin"><span class="chip">MRS. BENNET</span></div>
+        <p class="seg serif" data-d="2.3">Mr. Bennet made no answer.</p>
+        <div class="margin"><span class="chip narr">narration</span></div>
+        <p class="seg serif dlg" data-d="4.4">“Do you not want to know who has taken it?” cried his wife impatiently.</p>
+        <div class="margin"><span class="chip">MRS. BENNET</span></div>
+        <p class="seg serif dlg" data-d="5.2">“<i>You</i> want to tell me, and I have no objection to hearing it.”</p>
+        <div class="margin"><span class="chip">MR. BENNET</span></div>
+        <p class="seg serif" data-d="3.1">This was invitation enough.</p>
+        <div class="margin"><span class="chip narr">narration</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CHARACTER REVIEW ================= -->
+  <section class="screen" id="review">
+    <h1>Character Review — Pride and Prejudice</h1>
+    <p class="sub">The machine's attributions in the margin, the book on the page. Fixes are durable edits replayed over every re-attribution — anchors record what you were looking at.</p>
+    <div class="drainstrip">
+      <span class="state"><i class="led warn"></i>review queue</span>
+      <div class="bar"></div>
+      <span class="mono" style="font-size:11.5px;color:var(--ink-2)">17 low-confidence remaining</span>
+      <button class="key quiet">next ▸</button>
+    </div>
+    <div class="review">
+      <div class="panel roster" style="margin:0">
+        <div class="panel-h"><b>Cast</b><span class="tag" style="margin-left:8px">12 characters</span>
+          <button class="key quiet" style="margin-left:auto;padding:3px 9px" title="hide characters that first appear beyond your reading frontier">spoiler-safe ✓</button></div>
+        <div class="frontier"><span class="tag">frontier</span> listened through ch 3 — later characters stay hidden</div>
+        <table>
+          <tr><th>character</th><th>lines</th><th>low-c</th><th>flags</th></tr>
+          <tr><td>Narration<span class="sample">It is a truth universally acknowledged…</span></td><td>4,211</td><td>—</td><td>—</td></tr>
+          <tr class="sel"><td>Mrs. Bennet<span class="sample">“…Netherfield Park is let at last?”</span></td><td>318</td><td class="lowc">6</td><td>—</td></tr>
+          <tr><td>Elizabeth Bennet<span class="sample">“I could easily forgive his pride…”</span></td><td>602</td><td class="lowc">4</td><td>—</td></tr>
+          <tr><td>Mr. Bennet<span class="sample">“You want to tell me, and I have no objection…”</span></td><td>141</td><td class="lowc">3</td><td>—</td></tr>
+          <tr><td>Mr. Darcy<span class="sample">“She is tolerable; but not handsome enough…”</span></td><td>310</td><td class="lowc">2</td><td class="flags">1</td></tr>
+          <tr><td>Jane Bennet<span class="sample">“He is just what a young man ought to be…”</span></td><td>187</td><td class="lowc">2</td><td>—</td></tr>
+          <tr class="masked"><td><span class="mask">▮▮▮▮▮▮▮▮▮</span><span class="sample">enters ch 13 · <a class="link" href="#" style="font-style:normal">reveal</a></span></td><td>294</td><td class="lowc">5</td><td>—</td></tr>
+          <tr class="masked"><td><span class="mask">▮▮▮▮▮▮▮</span><span class="sample">enters ch 15 · <a class="link" href="#" style="font-style:normal">reveal</a></span></td><td>103</td><td class="lowc">4</td><td class="flags">1</td></tr>
+          <tr class="masked"><td><span class="mask">▮▮▮▮▮▮▮▮▮▮▮▮</span><span class="sample">enters ch 29 · <a class="link" href="#" style="font-style:normal">reveal</a></span></td><td>88</td><td>—</td><td>—</td></tr>
+        </table>
+      </div>
+
+      <div class="page-wrap">
+        <div class="tag" style="margin-bottom:14px">chapter 1 · ch001 · effective report (2 manual edits applied)</div>
+        <div class="paper page">
+          <p class="seg serif">It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife.</p>
+          <div class="margin"><span class="chip narr">narration</span><span class="conf">conf 1.00</span></div>
+
+          <p class="seg serif dlg">“My dear Mr.&nbsp;Bennet,” said his lady to him one day, “have you heard that Netherfield Park is let at last?”</p>
+          <div class="margin"><span class="chip">MRS. BENNET</span><span class="conf">conf 0.97</span></div>
+
+          <p class="seg serif">Mr. Bennet replied that he had not.</p>
+          <div class="margin"><span class="chip narr">narration</span><span class="conf">conf 1.00</span></div>
+
+          <p class="seg serif dlg" id="lowconf"><span class="hl">“But it is,” returned she; “for Mrs. Long has just been here, and she told me all about it.”</span></p>
+          <div class="margin"><span class="chip" data-block="ch001_b0004" data-idx="0">MR. BENNET</span><span class="conf low">conf 0.54 · in review</span></div>
+
+          <div class="mwarn">edit overlay — reassign skipped: ch001_b0011[1] is now different text than when the edit was recorded — re-record it if still wanted</div>
+
+          <p class="seg serif dlg">“Do you not want to know who has taken it?” cried his wife impatiently.</p>
+          <div class="margin"><span class="chip">MRS. BENNET</span><span class="conf">conf 0.95</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= VOICE STUDIO ================= -->
+  <section class="screen" id="voices">
+    <h1>Voice Studio</h1>
+    <p class="sub">Presets, blends, and consent-attested clones. Auditions are live synthesis — the console refuses with a reason when the GPU or the cloud is otherwise engaged.</p>
+    <div class="panel">
+      <div class="panel-h"><b>Voices</b><span class="tag" style="margin-left:14px">5 in library</span>
+        <div class="slotbank" title="ElevenLabs voice slots"><span class="tag" style="margin-right:6px">cloud slots 3/10</span><i class="lit"></i><i class="lit"></i><i class="lit"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <button class="key" style="margin-left:14px" id="newclone">new clone</button>
+      </div>
+      <div class="voices" style="padding:14px">
+        <div class="vcard">
+          <span class="eng">kokoro · preset</span><h3>Narrator</h3>
+          <span class="kind">af_heart · seed 41172</span>
+          <span class="consent" style="visibility:hidden">.</span>
+          <div class="foot audit"><span class="play"></span><span class="lbl">audition</span></div>
+        </div>
+        <div class="vcard">
+          <span class="eng">kokoro · blend</span><h3>Elizabeth</h3>
+          <span class="kind">af_bella 2 : af_sarah 1</span>
+          <span class="consent" style="visibility:hidden">.</span>
+          <div class="foot audit"><span class="stop"></span><span class="lbl">auditioning…</span><span class="live"></span></div>
+        </div>
+        <div class="vcard">
+          <span class="eng">chatterbox · cloned</span><h3>Mr. Darcy</h3>
+          <span class="kind">reference.wav · 41 s</span>
+          <span class="consent"><i class="led ok"></i>consent: attested · 2026-07-04</span>
+          <div class="foot refusal"><span class="tag">gpu_busy</span><p>the render job holds the GPU — <a class="link" href="#" data-go="render">view blocking job</a></p></div>
+        </div>
+        <div class="vcard">
+          <span class="eng">chatterbox · cloned</span><h3>Wickham</h3>
+          <span class="kind">reference.wav · 28 s</span>
+          <span class="consent"><i class="led warn"></i>consent: not attested</span>
+          <div class="foot refusal"><span class="tag">consent_invalid</span><p>re-clone with a signed attestation to enable this voice</p></div>
+        </div>
+        <div class="vcard">
+          <span class="eng">elevenlabs · cloned</span><h3>Lady Catherine</h3>
+          <span class="kind">IVC · slot 3 · $0.0004 / audition</span>
+          <span class="consent"><i class="led ok"></i>consent: attested · 2026-07-02</span>
+          <div class="foot refusal"><span class="tag">engine_cold</span><p>chatterbox has never loaded here — <a class="link" href="#">warm up first</a></p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= RENDER & JOBS ================= -->
+  <section class="screen" id="render">
+    <h1>Render &amp; Jobs — Pride and Prejudice</h1>
+    <p class="sub">Turn the reviewed book into audio. Free renders start with one click; anything that costs money asks you to approve the exact price first.</p>
+    <div class="steps">
+      <div class="step"><span class="n">STEP 1</span><b>Estimate</b><span>free &amp; instant — see what's cached, what's local, what would bill</span></div>
+      <div class="step"><span class="n">STEP 2</span><b>Approve</b><span>mint a quote: a single-use price ticket, valid 15 minutes</span></div>
+      <div class="step"><span class="n">STEP 3</span><b>Render</b><span>confirm on the ticket — the job appears on the right, cancellable anytime</span></div>
+    </div>
+    <div class="rjgrid">
+      <div>
+        <div class="panel est" style="margin-bottom:0">
+          <div class="panel-h"><b>Step 1 — Estimate</b><span class="tag" style="margin-left:auto">multivoice · ch 1–61</span></div>
+          <div class="humanline">Almost all of this render is free. 14 short lines use the paid ElevenLabs voice — about <b class="mono">$4.87</b>.</div>
+          <div class="estbar"><i class="paid" style="width:7%"></i><i class="cached" style="width:31%"></i><i class="free" style="flex:1"></i></div>
+          <div class="estrow"><span>paid segments (elevenlabs)</span><b>14</b></div>
+          <div class="estrow"><span>cached — free to reuse</span><b>212</b></div>
+          <div class="estrow"><span>free segments (local)</span><b>1,882</b></div>
+          <div class="estwarn">
+            <div>edit overlay — 2 warnings apply to this estimate:</div>
+            <div>· reassign skipped: ch001_b0011[1] text changed since recorded</div>
+            <div>· rename skipped: ‘kitty’ is now ‘Catherine Bennet’</div>
+          </div>
+          <div class="est acts"><button class="key">step 2 · approve — mint quote for $4.87</button><span class="mono" style="font-size:11px;color:var(--ink-3);align-self:center">re-estimate</span></div>
+        </div>
+
+        <div class="paper quote hot">
+          <div class="fuse"></div>
+          <div class="quote-inner">
+            <div class="head"><span>cost quote · single use</span><span style="color:#8A6D00">expires 00:41</span></div>
+            <div class="line"><span>book</span><span>pride-and-prejudice-7a5c08be</span></div>
+            <div class="line"><span>chapters</span><span>1–61 (all)</span></div>
+            <div class="line"><span>paid segments</span><span>14</span></div>
+            <div class="line warnline"><span>edit warnings</span><span>2 — reviewed above</span></div>
+            <div class="line"><span>ceiling</span><span>$25.00 ok</span></div>
+            <div class="total"><span class="tag" style="color:var(--paper-ink-2)">step 3 — the render never bills past this</span><b>$4.87</b></div>
+            <button class="confirm">CONFIRM &amp; RENDER</button>
+            <div class="sig"><span>fingerprint 6b01…e29c</span><span>sig …a41f09c2</span></div>
+          </div>
+        </div>
+
+        <details class="fine">
+          <summary>what if the price changes or the ticket expires?</summary>
+          You never get double-billed: the ticket is single-use and bound to the exact work you saw.
+          If anything shifts before you confirm — the cache, an edit, the clock — the paper is stamped
+          <span class="mono" style="color:var(--clip)">DRIFT</span> or <span class="mono" style="color:var(--clip)">EXPIRED</span>,
+          the confirm key deadens, and you simply mint a fresh quote.
+          <div class="paper quote dead">
+            <div class="fuse"></div>
+            <div class="stamp">DRIFT</div>
+            <div class="quote-inner">
+              <div class="head"><span>cost quote · single use</span><span>refused</span></div>
+              <div class="line"><span>quoted</span><span>$4.12</span></div>
+              <div class="line" style="color:var(--clip)"><span>recomputed now</span><span>$4.87 — cache or pricing changed</span></div>
+              <div class="total"><span class="tag" style="color:var(--paper-ink-2)">token intact — not consumed</span><b>re-mint</b></div>
+              <button class="confirm" disabled>CONFIRM &amp; RENDER</button>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div>
+        <div class="panel joblist">
+          <div class="panel-h"><b>Jobs</b><span class="tag" style="margin-left:auto">live</span></div>
+          <div class="panel-sub">Everything the machine is doing or has done, newest first. Click a row for its details.</div>
+          <div class="job">
+            <div class="jobtop"><span class="state"><i class="led run"></i>running</span><span class="what">render — multivoice</span><span class="id">9f3ac2d1e07b44aa</span><span class="when">14:32, elapsed 22:41</span></div>
+          </div>
+          <div class="job">
+            <div class="jobtop"><span class="state"><i class="led q"></i>queued</span><span class="what">attribute — the-time-machine</span><span class="id">c41b09aa27e0d3f5</span><span class="when">14:49</span></div>
+          </div>
+          <div class="job">
+            <div class="jobtop"><span class="state"><i class="led cxl"></i>canceling</span><span class="what">master — 64k</span><span class="id">77d2e90b13cc41f8</span><span class="when">13:58</span></div>
+          </div>
+          <div class="job">
+            <div class="jobtop"><span class="state"><i class="led err"></i>failed</span><span class="what">render — single<span class="more">why? ▸</span></span><span class="id">4e8b21f6a90d37cc</span><span class="when">12:06</span></div>
+            <div class="jdetail"><div class="errblock">CostGateError: cost token expired; re-run estimate-cost</div></div>
+          </div>
+          <div class="job">
+            <div class="jobtop"><span class="state"><i class="led ok"></i>succeeded</span><span class="what">assemble — 61 chapters<span class="more">1 audio check ▸</span></span><span class="id">b09cd4a1f2e35688</span><span class="when">11:31</span></div>
+            <div class="jdetail"><div class="valrow">
+              <div class="vhead"><i class="led warn"></i>whisper validation — 1 failure of 96 validated <button class="key quiet" style="margin-left:auto;padding:2px 8px">▶ play segment</button></div>
+              <div class="vdiff">
+                <div class="paper exp"><span class="cap" style="color:var(--paper-ink-2)">expected (book)</span>“You mistake me, my dear. I have a high respect for your nerves.”</div>
+                <div class="got"><span class="cap" style="color:var(--ink-3)">whisper heard · score 0.41</span>you must take me my dear I have high respect for your nerves nerves nerves</div>
+              </div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="panel dl">
+          <div class="panel-h"><b>Outputs</b><button class="key quiet" style="margin-left:auto">assemble</button><button class="key" style="margin-left:10px">master m4b</button></div>
+          <div class="panel-sub">After a render: <b>assemble</b> makes per-chapter MP3s, <b>master</b> makes the final chaptered .m4b audiobook.</div>
+          <table>
+            <tr><td class="mono">pride-and-prejudice.m4b</td><td class="mono" style="color:var(--ink-3)">not yet mastered</td><td>—</td></tr>
+            <tr><td class="mono">chapters/ch001.mp3</td><td class="mono" style="color:var(--ink-2)">4.1 MB</td><td><a class="link" href="#">download</a></td></tr>
+            <tr><td class="mono">chapters/ch002.mp3</td><td class="mono" style="color:var(--ink-2)">3.8 MB</td><td><a class="link" href="#">download</a></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- transport bar: job mode everywhere, audio transport on the Listen screen -->
+  <div class="transport">
+    <div class="tmode" id="tJob">
+      <span class="state"><i class="led run"></i>render</span>
+      <span style="color:var(--ink-2)">pride-and-prejudice-7a5c08be</span>
+      <div class="meter"><div class="peak"></div></div>
+      <span style="color:var(--ink-2)">ch 26/61 · block 1,102 · elizabeth_blend</span>
+      <span style="color:var(--ink-3)">22:41</span>
+      <button class="cancel">cancel</button>
+    </div>
+    <div class="tmode" id="tPlay" hidden>
+      <button class="playkey" id="playBtn" aria-label="play/pause">▶</button>
+      <span class="state"><i class="led off" id="playLed"></i><span id="playState">paused</span></span>
+      <span style="color:var(--ink-2)">ch 1</span>
+      <div class="pmeter" id="pmeter" title="click to seek"><i id="pfill"></i></div>
+      <span class="mono" id="ptime" style="color:var(--ink-2)">0:00 / 4:12</span>
+      <span class="mono" id="pspeaker" style="color:var(--ink-3)">narration</span>
+      <span class="vol"><span class="tag">vol</span><input type="range" id="vol" min="0" max="100" value="35" aria-label="volume"></span>
+    </div>
+  </div>
+</div>
+
+<!-- clone dialog -->
+<div class="overlay" id="cloneDlg">
+  <div class="dialog">
+    <div class="dh"><b>New cloned voice</b><button class="key quiet" data-close>esc</button></div>
+    <div class="db">
+      <label>reference clip (wav/mp3, ≥ 20 s recommended)</label>
+      <input type="text" value="C:\Users\Cyber\clips\darcy_take3.wav">
+      <label>voice name</label>
+      <input type="text" value="Mr. Darcy">
+      <label>engine</label>
+      <select class="eng-select">
+        <option selected>chatterbox — local, free</option>
+        <option>elevenlabs — cloud IVC, paid</option>
+      </select>
+      <div class="paper release slim">
+        <div class="att"><input type="checkbox" id="att"> <label for="att" class="attlbl">I have the speaker’s permission to clone this voice</label> <span style="margin-left:auto;color:var(--paper-ink-2)">as <b>cyberfang</b> · remembered</span></div>
+      </div>
+      <div class="tag" style="margin-top:8px;color:var(--ink-3);letter-spacing:.04em;text-transform:none">one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate</div>
+    </div>
+    <div class="df"><button class="key quiet" data-close>cancel</button><button class="key">clone voice</button></div>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll("[data-go]").forEach(el=>{
+  el.addEventListener("click",e=>{
+    e.preventDefault();
+    const id=el.dataset.go;
+    document.querySelectorAll(".screen").forEach(s=>s.classList.toggle("on",s.id===id));
+    document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.go===id));
+    document.querySelector(".main").scrollTop=0;
+    document.getElementById("tJob").hidden = (id==="listen");
+    document.getElementById("tPlay").hidden = (id!=="listen");
+  });
+});
+
+/* ---- read-along demo: word timing interpolated from per-segment durations, exactly
+   as the real app will do it (manifest gives each segment's duration; words inside a
+   segment get time proportional to their length — click any word to seek there).
+   Placeholder tones stand in for narration so play/volume are testable; the real app
+   plays your rendered chapter audio. ---- */
+(function(){
+  const segs=[...document.querySelectorAll("#lpage .seg")];
+  const words=[]; let total=0;
+  segs.forEach(seg=>{
+    const dur=parseFloat(seg.dataset.d);
+    const text=seg.textContent;
+    const parts=text.split(/\s+/).filter(Boolean);
+    const weight=parts.reduce((a,w)=>a+w.length+1,0);
+    seg.innerHTML=parts.map(w=>`<span class="w">${w.replace(/&/g,"&amp;").replace(/</g,"&lt;")}</span>`).join(" ");
+    let t=total;
+    seg.querySelectorAll(".w").forEach((el,i)=>{
+      const d=dur*(parts[i].length+1)/weight;
+      words.push({el,seg,t,d}); t+=d;
+    });
+    total+=dur;
+  });
+  const fill=document.getElementById("pfill"),ptime=document.getElementById("ptime"),
+        led=document.getElementById("playLed"),pstate=document.getElementById("playState"),
+        btn=document.getElementById("playBtn"),spk=document.getElementById("pspeaker"),
+        vol=document.getElementById("vol"),pmeter=document.getElementById("pmeter");
+  let pos=0,playing=false,timer=null,cur=-1,actx=null,gain=null;
+  const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+  function audio(){
+    if(!actx){actx=new (window.AudioContext||window.webkitAudioContext)();gain=actx.createGain();gain.connect(actx.destination);}
+    gain.gain.value=(vol.value/100)*0.25;
+    return actx;
+  }
+  vol.addEventListener("input",()=>{if(gain)gain.gain.value=(vol.value/100)*0.25;});
+  function blip(isDialogue){
+    const ctx=audio();if(ctx.state==="suspended")ctx.resume();
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.type="sine";o.frequency.value=isDialogue?196:147; // placeholder murmur, not speech
+    g.gain.setValueAtTime(0.0001,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(1,ctx.currentTime+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.14);
+    o.connect(g);g.connect(gain);o.start();o.stop(ctx.currentTime+0.16);
+  }
+  function paint(makeSound){
+    let i=words.findIndex(w=>pos<w.t+w.d); if(i<0)i=words.length-1;
+    if(i!==cur){
+      if(cur>=0){words[cur].el.classList.remove("now");words[cur].seg.classList.remove("now-seg");}
+      words[i].el.classList.add("now");words[i].seg.classList.add("now-seg");
+      const chip=words[i].seg.nextElementSibling?.querySelector(".chip");
+      spk.textContent=chip?chip.textContent.toLowerCase():"narration";
+      if(makeSound&&playing)blip(words[i].seg.classList.contains("dlg"));
+      cur=i;
+    }
+    fill.style.width=(pos/total*100)+"%";
+    ptime.textContent=`${fmt(pos)} / ${fmt(total)}`;
+  }
+  function setPlaying(on){
+    playing=on;
+    btn.textContent=on?"⏸":"▶";
+    led.className="led "+(on?"run":"off");
+    pstate.textContent=on?"playing":"paused";
+    clearInterval(timer);
+    if(on){audio();timer=setInterval(()=>{pos+=0.1;if(pos>=total){pos=0;setPlaying(false);}paint(true);},100);}
+  }
+  btn.addEventListener("click",()=>setPlaying(!playing));
+  pmeter.addEventListener("click",e=>{ // seek on the transport line
+    const r=pmeter.getBoundingClientRect();
+    pos=Math.min(Math.max((e.clientX-r.left)/r.width,0),0.999)*total;
+    paint(false);if(!playing)setPlaying(true);
+  });
+  words.forEach(w=>w.el.addEventListener("click",()=>{pos=w.t;paint(false);if(!playing)setPlaying(true);}));
+  paint(false);
+})();
+
+/* ---- character review: chips open the reassign popover, roster selects, masks reveal ---- */
+(function(){
+  const cast=["Mrs. Bennet","Mr. Bennet","Elizabeth Bennet","Jane Bennet","Mr. Darcy","— narration —"];
+  let pop=null;
+  function closePop(){if(pop){pop.remove();pop=null;}}
+  document.querySelectorAll("#review .margin .chip").forEach(chip=>{
+    chip.addEventListener("click",()=>{
+      closePop();
+      const seg=chip.closest(".margin").previousElementSibling;
+      const current=chip.classList.contains("narr")?"— narration —":chip.textContent;
+      const anchor=seg.textContent.replace(/\s+/g," ").trim().slice(0,58);
+      pop=document.createElement("span");
+      pop.className="popover";
+      pop.innerHTML=`<span class="tag">reassign · ${chip.dataset.block||"ch001_b000x"} [${chip.dataset.idx||0}]</span>
+        <span class="row"><select>${cast.map(c=>`<option${c.toLowerCase()===current.toLowerCase()?" selected":""}>${c}</option>`).join("")}</select></span>
+        <span style="display:block;font-family:var(--mono);font-size:10px;color:var(--ink-3)">anchor: ${anchor}…</span>
+        <span class="acts"><button class="key quiet" data-x>cancel</button><button class="key" data-ok>record edit</button></span>`;
+      seg.style.position="relative";
+      seg.appendChild(pop);
+      pop.querySelector("[data-x]").addEventListener("click",e=>{e.stopPropagation();closePop();});
+      pop.querySelector("[data-ok]").addEventListener("click",e=>{
+        e.stopPropagation();
+        const pick=pop.querySelector("select").value;
+        const conf=chip.closest(".margin").querySelector(".conf");
+        if(pick==="— narration —"){chip.classList.add("narr");chip.textContent="narration";}
+        else{chip.classList.remove("narr");chip.textContent=pick.toUpperCase();}
+        if(conf){conf.textContent="conf 1.00 · manual";conf.classList.remove("low");}
+        closePop();
+      });
+    });
+  });
+  addEventListener("keydown",e=>{if(e.key==="Escape")closePop();});
+  document.querySelectorAll("#review .roster tr").forEach(tr=>{
+    if(!tr.querySelector("td"))return;
+    tr.addEventListener("click",()=>{
+      document.querySelectorAll("#review .roster tr.sel").forEach(r=>r.classList.remove("sel"));
+      tr.classList.add("sel");
+    });
+  });
+  const names=[["Mr. Collins","“My dear Miss Elizabeth, my situation in life…”"],
+               ["Mr. Wickham","“It is wonderful, for almost all his actions…”"],
+               ["Lady Catherine","“I take no leave of you, Miss Bennet.”"]];
+  document.querySelectorAll("#review tr.masked").forEach((tr,i)=>{
+    tr.querySelector("a.link").addEventListener("click",e=>{
+      e.preventDefault();e.stopPropagation();
+      const td=tr.querySelector("td");
+      td.innerHTML=`${names[i][0]}<span class="sample">${names[i][1]}</span>`;
+      tr.classList.remove("masked");
+    });
+  });
+  const next=document.querySelector("#review .drainstrip .key");
+  next.addEventListener("click",()=>{
+    document.getElementById("lowconf").scrollIntoView({behavior:"smooth",block:"center"});
+  });
+})();
+
+/* ---- jobs: rows expand their details ---- */
+document.querySelectorAll(".job").forEach(j=>{
+  if(!j.querySelector(".jdetail"))return;
+  j.addEventListener("click",()=>j.classList.toggle("open"));
+});
+const dlg=document.getElementById("cloneDlg");
+document.getElementById("newclone").addEventListener("click",()=>dlg.classList.add("on"));
+dlg.querySelectorAll("[data-close]").forEach(b=>b.addEventListener("click",()=>dlg.classList.remove("on")));
+dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.classList.remove("on")});
+addEventListener("keydown",e=>{if(e.key==="Escape")dlg.classList.remove("on")});
+</script>
