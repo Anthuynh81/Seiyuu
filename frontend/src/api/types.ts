@@ -146,6 +146,73 @@ export interface ValidationReportOut {
   results: ValidationRow[];
 }
 
+// -- character review ----------------------------------------------------------------------
+
+export interface CharacterSummary {
+  id: string;
+  name: string;
+  aliases: string[];
+  gender: string | null;
+  age_hint: string | null;
+  line_count: number;
+  sample_lines: string[];
+  first_appearance: string | null; // block id like "ch013_b0042"
+}
+
+export interface FlaggedBlock {
+  block_id: string;
+  chapter_index: number;
+  reason: string;
+}
+
+export interface CharactersOverview {
+  book_id: string;
+  provider_id: string;
+  model_id: string;
+  prompt_version: string;
+  narration_segments: number;
+  low_confidence_segments: number;
+  confidence_threshold: number;
+  characters: CharacterSummary[];
+  flagged: FlaggedBlock[];
+  notes: string[];
+  edit_warnings: string[];
+}
+
+export interface SegmentRow {
+  block_id: string;
+  segment_index: number;
+  type: "narration" | "dialogue" | "thought";
+  speaker: string | null;
+  speaker_name: string | null;
+  text: string;
+  confidence: number;
+  has_audio: boolean;
+}
+
+export interface SegmentBrowserOut {
+  chapter_index: number;
+  title: string;
+  segments: SegmentRow[];
+  edit_warnings: string[];
+}
+
+export type EditRequest =
+  | { op: "rename"; character_id: string; new_name: string }
+  | { op: "merge"; loser_id: string; winner_id: string }
+  | { op: "reassign"; block_id: string; segment_index: number; speaker: string | null };
+
+export interface EditLog {
+  version: number;
+  ops: Record<string, unknown>[];
+}
+
+/** "ch013_b0042" -> 13; null when unparsable. */
+export function chapterOfBlock(blockId: string | null): number | null {
+  const m = blockId?.match(/^ch(\d+)_/);
+  return m ? Number(m[1]) : null;
+}
+
 /** The six pipeline stages in signal-path order, with the card flag for each. */
 export const STAGES = [
   ["ingested", "ingest"],

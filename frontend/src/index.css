@@ -190,6 +190,50 @@ details.fine summary:hover { color: var(--tungsten); }
 .dl tr:last-child td { border-bottom: none; }
 .dl td:last-child { text-align: right; }
 
+/* character review */
+.review { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.roster table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.roster th { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--hairline); font-weight: 600; }
+.roster th:first-child { text-align: left; }
+.roster td { padding: 7px 10px; border-bottom: 1px solid var(--hairline); text-align: right; font-variant-numeric: tabular-nums; vertical-align: top; }
+.roster td:first-child { text-align: left; font-weight: 500; }
+.roster tr:hover td { background: var(--console-hi); }
+.roster tr.sel td { background: var(--console-hi); box-shadow: inset 2px 0 0 var(--tungsten); }
+.roster .sample { font-family: var(--serif); font-style: italic; color: var(--ink-2); font-weight: 400; font-size: 12px; display: block; margin-top: 1px; }
+.roster tr.masked td { color: var(--ink-3); }
+.roster .mask { letter-spacing: 1px; color: var(--ink-3); }
+.roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
+.rowedit { margin-left: 8px; color: var(--ink-3); font-size: 12px; visibility: hidden; }
+.roster tr:hover .rowedit { visibility: visible; }
+.rowedit:hover { color: var(--tungsten); }
+.frontier { padding: 7px 14px; border-bottom: 1px solid var(--hairline); font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.frontin { width: 48px; background: var(--booth); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 1px 4px; }
+.drainstrip { display: flex; align-items: center; gap: 12px; background: var(--console); border: 1px solid var(--hairline); padding: 8px 14px; margin-bottom: 14px; }
+.page-wrap { background: var(--console); border: 1px solid var(--hairline); padding: 22px 26px; }
+.page { display: grid; grid-template-columns: minmax(auto, 66ch) 190px; gap: 0 18px; padding: 30px 34px; max-width: 960px; }
+.seg { grid-column: 1; font-family: var(--serif); font-size: 17px; line-height: 1.65; margin: 0 0 14px; color: var(--paper-ink); }
+.seg.dlg { padding-left: 2ch; text-indent: -0.62ch; }
+.seg .hl { background: rgba(217, 142, 43, 0.22); box-shadow: 0 0 0 1px rgba(217, 142, 43, 0.45); }
+.margin { grid-column: 2; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; color: var(--paper-ink-2); margin: 0 0 14px; align-self: start; }
+.chip { display: inline-block; border: 1px solid var(--paper-ink-2); padding: 1px 7px; font-weight: 600; letter-spacing: 0.05em; cursor: pointer; }
+.chip:hover { border-color: var(--paper-ink); color: var(--paper-ink); }
+.chip.narr { border-style: dotted; }
+.conf { display: block; margin-top: 2px; }
+.conf.low { color: #9c6a00; font-weight: 600; }
+.mwarn { background: rgba(240, 210, 100, 0.28); border: 1px solid #b99b33; color: #5c4a00; font-family: var(--mono); font-size: 10.5px; padding: 6px 8px; }
+.popover { position: absolute; left: 0; top: 100%; z-index: 5; background: var(--console); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--sans); font-size: 12.5px; text-indent: 0; width: 300px; padding: 12px 14px; font-style: normal; }
+.popover .tag { display: block; margin-bottom: 8px; }
+.popover .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.popover select { flex: 1; }
+.popover .acts { display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--hairline); padding-top: 10px; margin-top: 8px; }
+
+/* form controls on console surfaces */
+select, .dialog input[type="text"] { background: var(--booth); border: 1px solid var(--hairline); color: var(--ink); font: inherit; padding: 6px 9px; }
+.dialog label { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); margin: 14px 0 5px; }
+.dialog label:first-child { margin-top: 0; }
+.dialog input[type="text"] { flex: 1; width: 100%; }
+.dialog select { flex: 1; }
+
 /* dialogs */
 .overlay { position: fixed; inset: 0; background: rgba(15, 15, 13, 0.72); display: none; align-items: center; justify-content: center; z-index: 50; }
 .overlay.on { display: flex; }

@@ -4,7 +4,10 @@ import { api, postForm, postJson } from "./client";
 import type {
   BookDetail,
   BooksOut,
+  CharactersOverview,
   CostEstimateOut,
+  EditLog,
+  EditRequest,
   IngestResponse,
   JobOut,
   JobsOut,
@@ -12,6 +15,7 @@ import type {
   RenderMode,
   RenderRequest,
   RenderSummaryOut,
+  SegmentBrowserOut,
   ValidationReportOut,
 } from "./types";
 
@@ -113,6 +117,54 @@ export function useMintQuote(bookId: string) {
         chapters,
         ...(mode === "single" ? { single: {} } : {}),
       }),
+  });
+}
+
+// -- character review ----------------------------------------------------------------------
+
+export function useCharacters(bookId: string | null, attributed: boolean) {
+  return useQuery({
+    queryKey: ["characters", bookId],
+    queryFn: () => api<CharactersOverview>(`/api/books/${bookId}/characters?sample_lines=1`),
+    enabled: bookId !== null && attributed,
+  });
+}
+
+export function useSegments(bookId: string | null, chapter: number, attributed: boolean) {
+  return useQuery({
+    queryKey: ["segments", bookId, chapter],
+    queryFn: () => api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`),
+    enabled: bookId !== null && attributed,
+  });
+}
+
+export function useEditLog(bookId: string | null) {
+  return useQuery({
+    queryKey: ["edits", bookId],
+    queryFn: () => api<EditLog>(`/api/books/${bookId}/edits`),
+    enabled: bookId !== null,
+  });
+}
+
+function invalidateReview(qc: ReturnType<typeof useQueryClient>, bookId: string) {
+  for (const key of ["characters", "segments", "edits", "estimate"] as const) {
+    qc.invalidateQueries({ queryKey: [key, bookId] });
+  }
+}
+
+export function useRecordEdit(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (edit: EditRequest) => postJson<Record<string, unknown>>(`/api/books/${bookId}/edits`, edit),
+    onSuccess: () => invalidateReview(qc, bookId),
+  });
+}
+
+export function useUndoEdit(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ removed: Record<string, unknown> }>(`/api/books/${bookId}/edits/last`, { method: "DELETE" }),
+    onSuccess: () => invalidateReview(qc, bookId),
   });
 }
 

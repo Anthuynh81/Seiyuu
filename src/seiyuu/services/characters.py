@@ -18,6 +18,9 @@ class CharacterSummary(BaseModel):
     age_hint: str | None = None
     line_count: int = 0
     sample_lines: list[str] = []
+    # Block id of the character's first attributed line ("ch013_b0042") — the M6c
+    # spoiler-safe cast masks characters whose debut is past the reading frontier.
+    first_appearance: str | None = None
 
 
 class CharactersOverview(BaseModel):
@@ -65,6 +68,7 @@ def characters_overview(
             age_hint=char.age_hint,
             line_count=counts.get(char.id, 0),
             sample_lines=samples.get(char.id, []),
+            first_appearance=char.first_appearance,
         )
         for char in report.registry.characters
     ]
