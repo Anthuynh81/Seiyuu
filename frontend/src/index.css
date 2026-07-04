@@ -134,6 +134,10 @@ a.link:hover { text-decoration: underline; }
 .chap.on { border-color: var(--tungsten); color: var(--tungsten); }
 .chap[disabled] { color: var(--ink-3); cursor: not-allowed; border-style: dashed; background: none; }
 .bookpick { background: var(--console); border: 1px solid var(--hairline); color: var(--ink); font: inherit; font-size: 13px; padding: 4px 8px; }
+.scoperow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.rangelbl { display: inline-flex; gap: 5px; align-items: center; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.rangelbl input { width: 56px; background: var(--booth); border: 1px solid var(--hairline); color: var(--ink); font: inherit; font-family: var(--mono); font-size: 12px; padding: 3px 6px; }
+.scopehint { font-size: 11px; color: var(--ink-3); }
 .humanline { padding: 10px 14px 2px; font-size: 13px; color: var(--ink); }
 .estrow { display: flex; justify-content: space-between; padding: 6px 14px; font-family: var(--mono); font-size: 12px; }
 .estbar { display: flex; height: 10px; margin: 8px 14px; border: 1px solid var(--hairline); }

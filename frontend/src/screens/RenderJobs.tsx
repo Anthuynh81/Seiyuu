@@ -8,10 +8,18 @@ import {
   useBooks,
   useEstimate,
   useMintQuote,
+  useRenderSummary,
   useStartJob,
   useValidation,
 } from "../api/hooks";
-import type { CostEstimateOut, JobOut, QuoteResponse, RenderMode, ValidationRow } from "../api/types";
+import type {
+  ChapterSummary,
+  CostEstimateOut,
+  JobOut,
+  QuoteResponse,
+  RenderMode,
+  ValidationRow,
+} from "../api/types";
 
 /* -------------------------------------------------- steps strip */
 
@@ -112,6 +120,92 @@ function QuoteTicket({
           <span>sig …{quote.token.slice(-8)}</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- chapter scope */
+
+type Scope = { kind: "whole" } | { kind: "range"; from: number; to: number };
+
+function scopeChapters(scope: Scope, total: number): number[] {
+  if (scope.kind === "whole") return [];
+  const from = Math.max(1, Math.min(scope.from, total));
+  const to = Math.max(from, Math.min(scope.to, total));
+  return Array.from({ length: to - from + 1 }, (_, i) => from + i);
+}
+
+function ScopeRow({
+  scope,
+  setScope,
+  chapters,
+  renderedSet,
+}: {
+  scope: Scope;
+  setScope: (s: Scope) => void;
+  chapters: ChapterSummary[];
+  renderedSet: Set<number>;
+}) {
+  const total = chapters.length;
+  const firstUnrendered = chapters.find((c) => !renderedSet.has(c.index))?.index;
+  const selected = scopeChapters(scope, total);
+  const speakable = selected.length
+    ? chapters.filter((c) => selected.includes(c.index)).reduce((a, c) => a + c.speakable_blocks, 0)
+    : chapters.reduce((a, c) => a + c.speakable_blocks, 0);
+
+  return (
+    <div className="scoperow">
+      <span className="tag">scope</span>
+      <button className={`chap ${scope.kind === "whole" ? "on" : ""}`} onClick={() => setScope({ kind: "whole" })}>
+        whole book
+      </button>
+      <button
+        className={`chap ${scope.kind === "range" ? "on" : ""}`}
+        onClick={() => setScope({ kind: "range", from: firstUnrendered ?? 1, to: Math.min((firstUnrendered ?? 1) + 9, total) })}
+      >
+        chapter range
+      </button>
+      {scope.kind === "range" && (
+        <>
+          <label className="rangelbl">
+            ch
+            <input
+              type="number"
+              min={1}
+              max={total}
+              value={scope.from}
+              onChange={(e) => setScope({ ...scope, from: Number(e.target.value) || 1 })}
+            />
+          </label>
+          <label className="rangelbl">
+            to
+            <input
+              type="number"
+              min={1}
+              max={total}
+              value={scope.to}
+              onChange={(e) => setScope({ ...scope, to: Number(e.target.value) || scope.from })}
+            />
+          </label>
+          {firstUnrendered !== undefined && renderedSet.size > 0 && (
+            <button
+              className="key quiet"
+              style={{ padding: "3px 9px" }}
+              title={`chapters 1–${firstUnrendered - 1} already have audio`}
+              onClick={() =>
+                setScope({ kind: "range", from: firstUnrendered, to: Math.min(firstUnrendered + 9, total) })
+              }
+            >
+              continue · next 10 from ch {firstUnrendered}
+            </button>
+          )}
+        </>
+      )}
+      <span className="mono scopehint">
+        {selected.length ? `${selected.length} chapter(s)` : `all ${total} chapters`} · {speakable.toLocaleString()}{" "}
+        segments
+        {renderedSet.size > 0 && ` · ${renderedSet.size} ch already rendered`}
+      </span>
     </div>
   );
 }
@@ -272,10 +366,19 @@ export function RenderJobs() {
   const [modeChoice, setModeChoice] = useState<RenderMode | null>(null);
   const mode = modeChoice ?? defaultMode;
 
+  const [scope, setScope] = useState<Scope>({ kind: "whole" });
+  const chapterCount = book.data?.chapters?.length ?? 0;
+  const chapters = useMemo(() => scopeChapters(scope, chapterCount), [scope, chapterCount]);
+
   const ready = !!status?.ingested && (mode === "single" || (status?.attributed && status?.assigned));
-  const estimate = useEstimate(bookId, mode, ready);
+  const estimate = useEstimate(bookId, mode, chapters, ready);
   const jobs = useBookJobs(bookId);
   const validation = useValidation(bookId, !!status?.rendered);
+  const summary = useRenderSummary(bookId, !!status?.rendered);
+  const renderedSet = useMemo(
+    () => new Set(summary.data?.chapters.map((c) => c.index) ?? []),
+    [summary.data],
+  );
 
   const mint = useMintQuote(bookId ?? "");
   const render = useStartJob(bookId ?? "", "render");
@@ -290,16 +393,19 @@ export function RenderJobs() {
 
   const doMint = () => {
     setFlowError(null);
-    mint.mutate(mode, {
-      onSuccess: (quote) => setTicket({ kind: "live", quote }),
-      onError: (e) => setFlowError(e instanceof ApiError ? e.message : String(e)),
-    });
+    mint.mutate(
+      { mode, chapters },
+      {
+        onSuccess: (quote) => setTicket({ kind: "live", quote }),
+        onError: (e) => setFlowError(e instanceof ApiError ? e.message : String(e)),
+      },
+    );
   };
 
   const startRender = (opts: { token?: string; confirmFull?: boolean }) => {
     setFlowError(null);
     render.mutate(
-      { mode, ...singleSpec, ...(opts.token ? { cost_token: opts.token } : {}), ...(opts.confirmFull ? { confirm_full: true } : {}) },
+      { mode, chapters, ...singleSpec, ...(opts.token ? { cost_token: opts.token } : {}), ...(opts.confirmFull ? { confirm_full: true } : {}) },
       {
         onSuccess: () => {
           setTicket({ kind: "none" });
@@ -380,6 +486,9 @@ export function RenderJobs() {
                   : "multivoice needs attribution + a voice assignment first — or switch to single voice"}
               </p>
             </div>
+          )}
+          {book.data?.chapters && (
+            <ScopeRow scope={scope} setScope={setScope} chapters={book.data.chapters} renderedSet={renderedSet} />
           )}
           {estimate.isPending && ready && <div className="loadline">estimating against the segment cache…</div>}
           {estimate.isError && <div className="errline">{estimate.error.message}</div>}

@@ -120,6 +120,14 @@ export interface RenderRequest {
   single?: { engine?: string; voice?: string; speed?: number; seed?: number };
 }
 
+export interface RenderSummaryOut {
+  book_id: string;
+  mode: RenderMode;
+  chapters: { index: number; title: string; segments: number; duration_seconds: number }[];
+  total_seconds: number;
+  validation_failures: number;
+}
+
 export interface ValidationRow {
   chapter_index: number;
   block_id: string;

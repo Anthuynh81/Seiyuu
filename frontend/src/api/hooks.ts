@@ -11,6 +11,7 @@ import type {
   QuoteResponse,
   RenderMode,
   RenderRequest,
+  RenderSummaryOut,
   ValidationReportOut,
 } from "./types";
 
@@ -74,11 +75,25 @@ export function useBookJobs(bookId: string | null) {
   });
 }
 
-export function useEstimate(bookId: string | null, mode: RenderMode, ready: boolean) {
+function chapterParams(chapters: number[]): string {
+  return chapters.map((c) => `&chapters=${c}`).join("");
+}
+
+export function useEstimate(bookId: string | null, mode: RenderMode, chapters: number[], ready: boolean) {
   return useQuery({
-    queryKey: ["estimate", bookId, mode],
-    queryFn: () => api<CostEstimateOut>(`/api/books/${bookId}/cost-estimate?mode=${mode}`),
+    queryKey: ["estimate", bookId, mode, chapters],
+    queryFn: () =>
+      api<CostEstimateOut>(`/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}`),
     enabled: bookId !== null && ready,
+  });
+}
+
+/** Which chapters already have rendered audio (404 until the first render = none). */
+export function useRenderSummary(bookId: string | null, rendered: boolean) {
+  return useQuery({
+    queryKey: ["render-summary", bookId, rendered],
+    queryFn: () => api<RenderSummaryOut>(`/api/books/${bookId}/render`),
+    enabled: bookId !== null && rendered,
   });
 }
 
@@ -92,9 +107,10 @@ export function useValidation(bookId: string | null, rendered: boolean) {
 
 export function useMintQuote(bookId: string) {
   return useMutation({
-    mutationFn: (mode: RenderMode) =>
+    mutationFn: ({ mode, chapters }: { mode: RenderMode; chapters: number[] }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
+        chapters,
         ...(mode === "single" ? { single: {} } : {}),
       }),
   });
