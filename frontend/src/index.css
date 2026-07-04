@@ -227,6 +227,19 @@ details.fine summary:hover { color: var(--tungsten); }
 .popover select { flex: 1; }
 .popover .acts { display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--hairline); padding-top: 10px; margin-top: 8px; }
 
+/* listen (read-along) */
+.chapters { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.page-wrap .seg .w { cursor: default; }
+.page-wrap .seg .w.now { background: rgba(217, 142, 43, 0.34); box-shadow: 0 1px 0 var(--tungsten); }
+.page-wrap .seg.now-seg { box-shadow: inset 3px 0 0 rgba(217, 142, 43, 0.5); padding-left: 10px; margin-left: -13px; }
+.transport .playkey { font-size: 15px; color: var(--tungsten); border: 1px solid var(--tungsten-dim); width: 34px; height: 28px; line-height: 1; }
+.transport .playkey:hover { background: var(--tungsten); color: #1b1b19; }
+.transport .pmeter { flex: 1; max-width: 420px; height: 10px; border: 1px solid var(--hairline); background: var(--booth); cursor: pointer; }
+.transport .pmeter:hover { border-color: var(--tungsten-dim); }
+.transport .pmeter i { display: block; height: 100%; width: 0%; background: var(--tungsten); pointer-events: none; }
+.transport .vol { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.transport .vol input { width: 90px; accent-color: var(--tungsten); height: 4px; }
+
 /* voice studio */
 .slotbank { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .slotbank i { width: 8px; height: 14px; border: 1px solid var(--hairline); }

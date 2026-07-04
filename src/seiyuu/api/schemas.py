@@ -216,6 +216,12 @@ class SegmentRow(BaseModel):
     text: str
     confidence: float
     has_audio: bool  # any rendered wav for this block in the manifest
+    # Listen read-along timing (M6c-5, additive): which manifest segment of the block
+    # plays this row (the ?segment= index for the audio route) and its duration. A
+    # single-voice render has ONE wav per block, shared by every row of that block;
+    # None when unrendered or when re-attribution re-split the block since the render.
+    audio_segment: int | None = None
+    duration_seconds: float | None = None
 
 
 class SegmentBrowserOut(BaseModel):

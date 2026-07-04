@@ -330,7 +330,7 @@ def segment_browser(
     names = {c.id: c.canonical_name for c in report.registry.characters}
 
     manifest_path = cfg.output_dir / book_id / MANIFEST_NAME
-    blocks_with_audio: set[str] = set()
+    block_audio: dict[str, list] = {}
     if manifest_path.is_file():
         from seiyuu.render.models import RenderManifest
 
@@ -340,9 +340,32 @@ def segment_browser(
             raise ApiError(
                 500, "corrupt_artifact", f"corrupt render manifest {manifest_path}: {exc}"
             ) from exc
-        blocks_with_audio = {
-            seg.block_id for ch in manifest.chapters for seg in ch.segments if seg.wav
-        }
+        for man_chapter in manifest.chapters:
+            for man_seg in man_chapter.segments:
+                block_audio.setdefault(man_seg.block_id, []).append(man_seg)
+
+    # Rendered-audio alignment for the Listen read-along: a MULTIVOICE render emits one
+    # manifest segment per attribution segment (1:1 by position); a SINGLE-VOICE render
+    # emits one per BLOCK, which every attribution segment of that block shares. Any
+    # other shape (re-attribution changed the splits since the render) is ambiguous —
+    # has_audio stays truthful but no timing is claimed.
+    rows_per_block: dict[str, int] = {}
+    for seg in chapter.segments:
+        rows_per_block[seg.block_id] = rows_per_block.get(seg.block_id, 0) + 1
+
+    def audio_for(block_id: str, seg_index: int) -> tuple[bool, int | None, float | None]:
+        rendered = block_audio.get(block_id)
+        if not rendered:
+            return (False, None, None)
+        if len(rendered) == rows_per_block[block_id]:
+            man_seg = rendered[seg_index]
+        elif len(rendered) == 1:
+            man_seg = rendered[0]
+        else:
+            return (any(m.wav for m in rendered), None, None)
+        if not man_seg.wav:
+            return (False, None, None)
+        return (True, rendered.index(man_seg), man_seg.duration_seconds)
 
     rows: list[SegmentRow] = []
     position_in_block: dict[str, int] = {}
@@ -361,6 +384,7 @@ def segment_browser(
             continue
         if low_confidence and seg.confidence >= cfg.attribution_confidence_threshold:
             continue
+        has_audio, audio_segment, duration = audio_for(seg.block_id, seg_index)
         rows.append(
             SegmentRow(
                 block_id=seg.block_id,
@@ -370,7 +394,9 @@ def segment_browser(
                 speaker_name=names.get(seg.speaker) if seg.speaker else None,
                 text=seg.text,
                 confidence=seg.confidence,
-                has_audio=seg.block_id in blocks_with_audio,
+                has_audio=has_audio,
+                audio_segment=audio_segment,
+                duration_seconds=duration,
             )
         )
     return SegmentBrowserOut(

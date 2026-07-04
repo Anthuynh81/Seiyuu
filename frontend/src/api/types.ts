@@ -188,6 +188,8 @@ export interface SegmentRow {
   text: string;
   confidence: number;
   has_audio: boolean;
+  audio_segment: number | null; // ?segment= index for the audio route; null = no timing
+  duration_seconds: number | null;
 }
 
 export interface SegmentBrowserOut {
