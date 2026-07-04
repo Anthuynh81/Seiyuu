@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { PlayerContext, type PlayClip, type PlayerApi } from "./usePlayer";
+import { PlayerContext, type LoadOptions, type PlayClip, type PlayerApi } from "./usePlayer";
 
 interface PlayerState {
   bookId: string | null;
@@ -13,6 +13,7 @@ interface PlayerState {
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const onEndedRef = useRef<(() => void) | undefined>(undefined);
   const [state, setState] = useState<PlayerState>({
     bookId: null,
     chapterTitle: "",
@@ -31,7 +32,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       el.addEventListener("ended", () =>
         setState((s) => {
           const next = s.index + 1;
-          if (next >= s.clips.length) return { ...s, playing: false, clipElapsed: 0 };
+          if (next >= s.clips.length) {
+            onEndedRef.current?.();
+            return { ...s, playing: false, clipElapsed: 0 };
+          }
           el.src = s.clips[next].src;
           el.play().catch(() => {});
           return { ...s, index: next, clipElapsed: 0 };
@@ -56,9 +60,24 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const el = ensureAudio();
       const clip = state.clips[index];
       if (!clip) return;
-      if (!el.src.endsWith(clip.src)) el.src = clip.src;
-      el.currentTime = Math.min(offset, Math.max(0, clip.duration - 0.05));
-      if (play) el.play().catch(() => {});
+      const apply = () => {
+        // clamp inside the clip; seeking an unloaded source is silently ignored by
+        // browsers, hence the loadedmetadata gate below
+        try {
+          el.currentTime = Math.min(Math.max(offset, 0), Math.max(0, clip.duration - 0.05));
+        } catch {
+          /* not seekable yet */
+        }
+        if (play) el.play().catch(() => {});
+      };
+      const target = new URL(clip.src, window.location.href).href;
+      if (el.src !== target) {
+        el.src = clip.src;
+        el.addEventListener("loadedmetadata", apply, { once: true });
+        el.load();
+      } else {
+        apply();
+      }
       setState((s) => ({ ...s, index, clipElapsed: offset, playing: play }));
     };
     return {
@@ -66,13 +85,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       volume,
       audio: audioRef.current,
       totalDuration: cumulative().total,
-      load: (bookId, chapterTitle, clips, startIndex = 0) => {
+      load: (bookId, chapterTitle, clips, opts?: LoadOptions) => {
         const el = ensureAudio();
+        onEndedRef.current = opts?.onEnded;
+        setState({ bookId, chapterTitle, index: 0, clips, playing: !!opts?.autoplay && clips.length > 0, clipElapsed: 0 });
         if (clips.length) {
-          el.src = clips[startIndex]?.src ?? clips[0].src;
+          el.src = clips[0].src;
           el.currentTime = 0;
+          if (opts?.autoplay) el.play().catch(() => {});
+          else el.pause();
+        } else {
+          el.pause();
         }
-        setState({ bookId, chapterTitle, index: startIndex, clips, playing: false, clipElapsed: 0 });
       },
       toggle: () => {
         const el = ensureAudio();

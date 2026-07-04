@@ -422,12 +422,17 @@ def test_cloud_slots_read_only_view(client) -> None:
 def test_cover_upload_replace_delete(client) -> None:
     _write_attribution(client.app.state.settings, "bk")  # the book must exist
 
+    assert client.get("/api/books/bk/cover").status_code == 404  # nothing uploaded yet
     png = client.put(
         "/api/books/bk/cover",
         files={"file": ("c.png", b"\x89PNG\r\n\x1a\nrest", "image/png")},
     )
     assert png.status_code == 200, png.text
     assert png.json()["content_type"] == "image/png"
+    served = client.get("/api/books/bk/cover")
+    assert served.status_code == 200
+    assert served.headers["content-type"].startswith("image/png")
+    assert served.content.startswith(b"\x89PNG")
     cfg = client.app.state.settings
     assert (cfg.output_dir / "bk" / "cover.png").is_file()
     assert client.get("/api/books/bk").json()["cover"]["content_type"] == "image/png"
@@ -476,7 +481,9 @@ def test_route_surface_is_complete() -> None:
     }
     assert ("/api/books/{book_id}/assemble", "POST") in paths
     assert ("/api/books/{book_id}/master", "POST") in paths
-    assert len(paths) == 44  # the scoping doc's full route table
+    assert ("/api/books/{book_id}/cover", "GET") in paths
+    # the scoping doc's 44 rows + GET cover (M6c-5b: the shelf shows books by cover art)
+    assert len(paths) == 45
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

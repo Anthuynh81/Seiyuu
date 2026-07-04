@@ -482,6 +482,18 @@ def upload_cover(
     return CoverOut(content_type=content_type, bytes=len(data))
 
 
+@router.get("/books/{book_id}/cover")
+def get_cover(book_id: str, cfg: SettingsDep) -> FileResponse:
+    """Serve the uploaded cover art (the M6c shelf shows books by cover)."""
+    status_or_404(cfg, book_id)
+    odir = cfg.output_dir / book_id
+    for name, ctype in _COVER_TYPES.items():
+        path = odir / name
+        if path.is_file():
+            return FileResponse(path, media_type=ctype)
+    raise ApiError(404, "not_found", f"book {book_id!r} has no cover uploaded")
+
+
 @router.delete("/books/{book_id}/cover", status_code=204)
 def delete_cover(book_id: str, cfg: SettingsDep, store: StoreDep) -> None:
     """Idempotent: removing an absent cover is a success, not an error."""

@@ -9,9 +9,14 @@ export interface PlayWord {
 export interface PlayClip {
   src: string;
   duration: number;
-  blockId: string;
+  key: string; // `${block_id}:${audio_segment}` — one clip per rendered wav
   speaker: string;
   words: PlayWord[]; // may be empty (no per-word highlight, still plays)
+}
+
+export interface LoadOptions {
+  autoplay?: boolean;
+  onEnded?: () => void; // the chapter finished end-to-end
 }
 
 export interface PlayerApi {
@@ -21,7 +26,7 @@ export interface PlayerApi {
   clips: PlayClip[];
   playing: boolean;
   clipElapsed: number;
-  load: (bookId: string, chapterTitle: string, clips: PlayClip[], startIndex?: number) => void;
+  load: (bookId: string, chapterTitle: string, clips: PlayClip[], opts?: LoadOptions) => void;
   toggle: () => void;
   seekClip: (index: number, offset?: number) => void;
   seekFraction: (frac: number) => void;

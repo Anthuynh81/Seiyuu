@@ -1,149 +1,300 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { useBook, useBooks, useSegments } from "../api/hooks";
-import type { SegmentRow } from "../api/types";
+import { useBook, useBooks, useRenderSummary, useSegments } from "../api/hooks";
+import type { BookCard, SegmentRow } from "../api/types";
 import { usePlayer, type PlayClip } from "../app/usePlayer";
 
-/** Split a segment's text into word spans; interpolate each word's start offset within
-    the clip by character length — the same algorithm the design demo used, now driving
-    the real rendered audio. */
-function buildWords(text: string, duration: number, container: HTMLElement): { el: HTMLElement; offset: number }[] {
-  const parts = text.split(/\s+/).filter(Boolean);
-  const weight = parts.reduce((a, w) => a + w.length + 1, 0) || 1;
-  container.textContent = "";
-  const out: { el: HTMLElement; offset: number }[] = [];
-  let t = 0;
-  parts.forEach((w, i) => {
-    const span = document.createElement("span");
-    span.className = "w";
-    span.textContent = w;
-    container.appendChild(span);
-    container.appendChild(document.createTextNode(" "));
-    out.push({ el: span, offset: t });
-    t += (duration * (parts[i].length + 1)) / weight;
+/* -------------------------------------------------- reading preferences */
+
+type ReadingTheme = "paper" | "sepia" | "dark";
+type ReadingSize = "s" | "m" | "l";
+
+function usePrefs() {
+  const [prefs, setPrefs] = useState<{ theme: ReadingTheme; size: ReadingSize }>(() => {
+    try {
+      return { theme: "paper", size: "m", ...JSON.parse(localStorage.getItem("seiyuu.reading") ?? "{}") };
+    } catch {
+      return { theme: "paper", size: "m" };
+    }
   });
-  return out;
+  const update = (next: Partial<{ theme: ReadingTheme; size: ReadingSize }>) => {
+    const merged = { ...prefs, ...next };
+    setPrefs(merged);
+    localStorage.setItem("seiyuu.reading", JSON.stringify(merged));
+  };
+  return [prefs, update] as const;
 }
+
+/* -------------------------------------------------- word timing */
+
+/** TTS lingers on clause and sentence boundaries — weight those tokens heavier so the
+    interpolated word offsets track the narration much more closely. */
+function wordWeight(w: string): number {
+  let extra = 0;
+  if (/[.!?…]["”']?$/.test(w)) extra = 5;
+  else if (/[;:—]["”']?$/.test(w)) extra = 3;
+  else if (/,["”']?$/.test(w)) extra = 2;
+  return w.length + 1 + extra;
+}
+
+/** One clip may span SEVERAL text segments (a single-voice render has one wav per
+    block). Build word spans across all of a clip's rows, distributing the clip's
+    duration over the combined weighted text. */
+function buildClipWords(rows: { text: string; el: HTMLElement }[], duration: number) {
+  const perRow = rows.map((r) => ({ el: r.el, parts: r.text.split(/\s+/).filter(Boolean) }));
+  const totalWeight = perRow.reduce((a, r) => a + r.parts.reduce((x, w) => x + wordWeight(w), 0), 0) || 1;
+  const words: { el: HTMLElement; offset: number }[] = [];
+  let t = 0;
+  for (const row of perRow) {
+    row.el.textContent = "";
+    for (const part of row.parts) {
+      const span = document.createElement("span");
+      span.className = "w";
+      span.textContent = part;
+      row.el.appendChild(span);
+      row.el.appendChild(document.createTextNode(" "));
+      words.push({ el: span, offset: t });
+      t += (duration * wordWeight(part)) / totalWeight;
+    }
+  }
+  return words;
+}
+
+/* -------------------------------------------------- the shelf (cover picker) */
+
+function CoverTile({ book, onPick }: { book: BookCard; onPick: () => void }) {
+  const [imgOk, setImgOk] = useState(true);
+  return (
+    <button className="covertile" onClick={onPick} disabled={!book.rendered} title={book.rendered ? "" : "no audio yet — render it first"}>
+      {imgOk ? (
+        <img src={`/api/books/${book.book_id}/cover`} alt="" onError={() => setImgOk(false)} />
+      ) : (
+        <span className="coverfb">
+          <b className="serif">{book.title ?? book.book_id}</b>
+          <i />
+          <span>{book.authors.join(", ") || "—"}</span>
+        </span>
+      )}
+      {!book.rendered && <span className="coverbadge">not rendered</span>}
+    </button>
+  );
+}
+
+/* -------------------------------------------------- the screen */
 
 export function Listen() {
   const [params, setParams] = useSearchParams();
   const books = useBooks();
   const player = usePlayer();
-  const bookId = params.get("book") ?? books.data?.books.find((b) => b.rendered)?.book_id ?? null;
+  const bookId = params.get("book");
   const book = useBook(bookId);
   const rendered = !!book.data?.status.rendered;
 
-  const [chapter, setChapter] = useState(2);
-  const segments = useSegments(bookId, chapter, rendered);
+  const summary = useRenderSummary(bookId, rendered);
+  const renderedChapters = useMemo(() => new Set(summary.data?.chapters.map((c) => c.index) ?? []), [summary.data]);
+
+  const [chapter, setChapterRaw] = useState<number | null>(null);
+  const effectiveChapter = chapter ?? summary.data?.chapters[0]?.index ?? 1;
+  const segments = useSegments(bookId, effectiveChapter, rendered);
+
+  const [prefs, setPrefs] = usePrefs();
+  const [tocOpen, setTocOpen] = useState(false);
   const pageRef = useRef<HTMLDivElement>(null);
-  const [activeWord, setActiveWord] = useState<HTMLElement | null>(null);
+  const autoplayNext = useRef(false);
 
-  // Which chapters actually have audio (a segment with a duration).
-  const chapterCount = book.data?.chapters?.length ?? 1;
+  const setChapter = (c: number) => {
+    setChapterRaw(c);
+    setTocOpen(false);
+  };
 
-  // Build the clip list + word spans once the DOM is laid out for this chapter.
   const playableRows = useMemo<SegmentRow[]>(
     () => segments.data?.segments.filter((s) => s.has_audio && s.duration_seconds !== null && s.audio_segment !== null) ?? [],
     [segments.data],
   );
 
+  // rows sharing one rendered wav collapse into ONE clip; remember where each row
+  // starts inside its clip so clicking a segment seeks to ITS words, not the block top
+  const rowSeek = useRef(new Map<string, { clip: number; offset: number }>());
+
   useEffect(() => {
-    if (!player || !bookId || playableRows.length === 0 || !pageRef.current) return;
-    const clips: PlayClip[] = playableRows.map((row) => {
-      const el = pageRef.current!.querySelector<HTMLElement>(`[data-seg="${row.block_id}:${row.segment_index}"] .segtext`);
-      const words = el ? buildWords(row.text, row.duration_seconds!, el) : [];
+    if (!player || !bookId || !pageRef.current || playableRows.length === 0) return;
+    type Group = { key: string; duration: number; speaker: string; rows: SegmentRow[] };
+    const groups: Group[] = [];
+    for (const row of playableRows) {
+      const key = `${row.block_id}:${row.audio_segment}`;
+      const last = groups[groups.length - 1];
+      if (last && last.key === key) last.rows.push(row);
+      else
+        groups.push({
+          key,
+          duration: row.duration_seconds!,
+          speaker: row.speaker_name ?? (row.speaker === null ? "narration" : row.speaker),
+          rows: [row],
+        });
+    }
+    rowSeek.current.clear();
+    const clips: PlayClip[] = groups.map((g, ci) => {
+      const pairs = g.rows
+        .map((row) => ({
+          row,
+          el: pageRef.current!.querySelector<HTMLElement>(`[data-seg="${row.block_id}:${row.segment_index}"] .segtext`),
+        }))
+        .filter((p): p is { row: SegmentRow; el: HTMLElement } => p.el !== null);
+      const words = buildClipWords(pairs.map((p) => ({ text: p.row.text, el: p.el })), g.duration);
+      // first word of each row = that row's seek point
+      let w = 0;
+      for (const p of pairs) {
+        rowSeek.current.set(`${p.row.block_id}:${p.row.segment_index}`, {
+          clip: ci,
+          offset: words[w]?.offset ?? 0,
+        });
+        w += p.row.text.split(/\s+/).filter(Boolean).length;
+      }
+      words.forEach((word) => {
+        word.el.style.cursor = "pointer";
+        word.el.onclick = (e) => {
+          e.stopPropagation();
+          player.seekClip(ci, word.offset);
+        };
+      });
+      const [blockId, audioSegment] = g.key.split(":");
       return {
-        src: `/api/books/${bookId}/segments/${row.block_id}/audio?segment=${row.audio_segment}`,
-        duration: row.duration_seconds!,
-        blockId: row.block_id,
-        speaker: row.speaker_name ?? (row.speaker === null ? "narration" : row.speaker),
+        src: `/api/books/${bookId}/segments/${blockId}/audio?segment=${audioSegment}`,
+        duration: g.duration,
+        key: g.key,
+        speaker: g.speaker,
         words,
       };
     });
-    // click any word to seek playback to it (offset within its clip)
-    clips.forEach((clip, ci) => {
-      clip.words.forEach((w) => {
-        w.el.style.cursor = "pointer";
-        w.el.onclick = (e) => {
-          e.stopPropagation();
-          player.seekClip(ci, w.offset);
-        };
-      });
+    const chapterDone = () => {
+      // advance the spoiler frontier, then roll into the next rendered chapter
+      const key = `seiyuu.frontier.${bookId}`;
+      const prev = Number(localStorage.getItem(key)) || 1;
+      localStorage.setItem(key, String(Math.max(prev, effectiveChapter)));
+      const next = effectiveChapter + 1;
+      if (renderedChapters.has(next)) {
+        autoplayNext.current = true;
+        setChapterRaw(next);
+      }
+    };
+    player.load(bookId, segments.data?.title ?? `Chapter ${effectiveChapter}`, clips, {
+      autoplay: autoplayNext.current,
+      onEnded: chapterDone,
     });
-    player.load(bookId, segments.data?.title ?? `Chapter ${chapter}`, clips);
+    autoplayNext.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookId, chapter, playableRows]);
+  }, [bookId, effectiveChapter, playableRows]);
 
-  // Highlight the current word as the shared player advances.
+  // Highlight loop: rAF reading the audio element's clock directly — smooth and never
+  // behind the 250ms timeupdate events.
+  const hlRef = useRef<{ clips: PlayClip[]; index: number }>({ clips: [], index: 0 });
+  hlRef.current = { clips: player?.clips ?? [], index: player?.index ?? 0 };
   useEffect(() => {
-    if (!player || !player.clips.length) return;
-    const clip = player.clips[player.index];
-    if (!clip) return;
-    let idx = clip.words.findIndex((_, i) => player.clipElapsed < (clip.words[i + 1]?.offset ?? clip.duration));
-    if (idx < 0) idx = clip.words.length - 1;
-    const el = clip.words[idx]?.el ?? null;
-    if (el !== activeWord) {
-      activeWord?.classList.remove("now");
-      activeWord?.closest(".seg")?.classList.remove("now-seg");
-      el?.classList.add("now");
-      el?.closest(".seg")?.classList.add("now-seg");
-      el?.closest(".seg")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      setActiveWord(el);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player?.index, player?.clipElapsed]);
+    let raf = 0;
+    let last: HTMLElement | null = null;
+    const loop = () => {
+      const audio = player?.audio;
+      const { clips, index } = hlRef.current;
+      const clip = clips[index];
+      if (audio && clip && clip.words.length) {
+        const t = audio.currentTime;
+        let i = clip.words.findIndex((_, k) => t < (clip.words[k + 1]?.offset ?? clip.duration));
+        if (i < 0) i = clip.words.length - 1;
+        const el = clip.words[i]?.el ?? null;
+        if (el !== last) {
+          last?.classList.remove("now");
+          last?.closest(".seg")?.classList.remove("now-seg");
+          el?.classList.add("now");
+          el?.closest(".seg")?.classList.add("now-seg");
+          el?.closest(".seg")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          last = el;
+        }
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [player?.audio]);
 
+  /* ---------------- shelf (no book chosen) ---------------- */
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
-  if (!bookId || !books.data?.books.some((b) => b.rendered)) {
+  if (!bookId) {
     return (
       <section className="screen">
         <h1>Listen</h1>
-        <p className="sub">Nothing rendered yet — render a book (or a few chapters) from Render &amp; Jobs, then come back to read along.</p>
+        <p className="sub">Pick a book from the shelf — upload cover art in Render &amp; Jobs to make this prettier.</p>
+        <div className="shelf">
+          {books.data?.books.map((b) => (
+            <CoverTile key={b.book_id} book={b} onPick={() => setParams({ book: b.book_id })} />
+          ))}
+        </div>
+        {books.data?.books.length === 0 && <div className="loadline">no books yet — ingest one from the Library</div>}
       </section>
     );
   }
 
-  const clipForRow = (row: SegmentRow) =>
-    player?.clips.findIndex((c) => c.blockId === row.block_id) ?? -1;
+  const chapterTitles = new Map(book.data?.chapters?.map((c) => [c.index, c.title] as const) ?? []);
 
   return (
     <section className="screen">
-      <h1 style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
-        Listen
-        <select className="bookpick" value={bookId} onChange={(e) => setParams({ book: e.target.value })} aria-label="book">
-          {books.data.books.filter((b) => b.rendered).map((b) => (
-            <option key={b.book_id} value={b.book_id}>{b.title ?? b.book_id}</option>
-          ))}
-        </select>
-      </h1>
-      <p className="sub">
-        Read along while it plays: the current word lights as the rendered audio runs, and clicking any word seeks the
-        playback there. The transport bar below is the audio transport on this screen — volume included.
-      </p>
-      <div className="chapters">
-        {Array.from({ length: chapterCount }, (_, i) => i + 1).map((c) => (
-          <button key={c} className={`chap ${c === chapter ? "on" : ""}`} onClick={() => setChapter(c)}>
-            ch {c}
+      <div className="readerhead">
+        <button className="key quiet" onClick={() => setParams({})}>‹ shelf</button>
+        <h1 style={{ margin: 0 }}>{book.data?.status.title ?? bookId}</h1>
+        <div className="tocwrap">
+          <button className="key quiet" onClick={() => setTocOpen(!tocOpen)}>
+            contents ▾
+          </button>
+          {tocOpen && (
+            <div className="tocmenu">
+              {(book.data?.chapters ?? []).map((c) => (
+                <button
+                  key={c.index}
+                  className={`tocrow ${c.index === effectiveChapter ? "on" : ""}`}
+                  disabled={!renderedChapters.has(c.index)}
+                  onClick={() => setChapter(c.index)}
+                >
+                  <i className={`led ${renderedChapters.has(c.index) ? "ok" : "off"}`} />
+                  <span className="mono" style={{ width: 34 }}>{c.index}</span>
+                  <span className="toctitle">{c.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <span style={{ flex: 1 }} />
+        <span className="tag">page</span>
+        {(["paper", "sepia", "dark"] as const).map((t) => (
+          <button key={t} className={`swatch sw-${t} ${prefs.theme === t ? "on" : ""}`} title={t} onClick={() => setPrefs({ theme: t })} />
+        ))}
+        <span className="tag" style={{ marginLeft: 10 }}>text</span>
+        {(["s", "m", "l"] as const).map((s) => (
+          <button key={s} className={`chap ${prefs.size === s ? "on" : ""}`} style={{ padding: "2px 8px" }} onClick={() => setPrefs({ size: s })}>
+            {s === "s" ? "A" : s === "m" ? "A+" : "A++"}
           </button>
         ))}
       </div>
+      <p className="sub" style={{ marginTop: 6 }}>
+        {chapterTitles.get(effectiveChapter) ?? `Chapter ${effectiveChapter}`} — click any word to play from there; the
+        transport below seeks, pauses, and holds the volume.
+      </p>
       {segments.isPending && <div className="loadline">setting the page…</div>}
+      {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
       {segments.data && playableRows.length === 0 && (
-        <div className="refusal"><span className="tag">not rendered</span><p>this chapter has no audio yet — render it from Render &amp; Jobs (chapter range works)</p></div>
+        <div className="refusal"><span className="tag">not rendered</span><p>this chapter has no audio yet — render it from Render &amp; Jobs (a chapter range works)</p></div>
       )}
-      <div className="page-wrap" ref={pageRef}>
+      <div className={`page-wrap rt-${prefs.theme} sz-${prefs.size}`} ref={pageRef}>
         {segments.data && (
           <div className="paper page" style={{ gridTemplateColumns: "minmax(auto,66ch) 150px" }}>
             {segments.data.segments.map((row) => {
-              const ci = clipForRow(row);
+              const seek = rowSeek.current.get(`${row.block_id}:${row.segment_index}`);
               const playable = row.has_audio && row.duration_seconds !== null;
               return (
                 <div key={`${row.block_id}:${row.segment_index}`} style={{ display: "contents" }}>
                   <p
                     className={`seg serif ${row.type !== "narration" ? "dlg" : ""}`}
                     data-seg={`${row.block_id}:${row.segment_index}`}
-                    onClick={() => playable && ci >= 0 && player?.seekClip(ci, 0)}
+                    onClick={() => playable && seek && player?.seekClip(seek.clip, seek.offset)}
                     style={{ cursor: playable ? "pointer" : "default", opacity: playable ? 1 : 0.5 }}
                   >
                     <span className="segtext">{row.text}</span>
