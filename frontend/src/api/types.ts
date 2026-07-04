@@ -207,6 +207,54 @@ export interface EditLog {
   ops: Record<string, unknown>[];
 }
 
+// -- voice studio --------------------------------------------------------------------------
+
+export interface VoiceOut {
+  voice_id: string;
+  name: string;
+  kind: "preset" | "blend" | "cloned";
+  engine: string;
+  preset_id: string | null;
+  blend: { preset_id: string; weight: number }[] | null;
+  reference_audio: string | null;
+  seed: number;
+  consent_attested: boolean;
+  consent: { attested_by: string; reference_sha256: string; attested_at: string } | null;
+  has_audition: boolean;
+}
+
+export interface VoiceListOut {
+  voices: VoiceOut[];
+  unreadable: { voice_id: string; error: string }[];
+}
+
+export type VoiceCreate =
+  | { kind: "preset"; name: string; engine: string; preset_id: string; voice_id?: string }
+  | { kind: "blend"; name: string; gender?: string | null; accent?: "a" | "b"; voice_id?: string };
+
+export interface AuditionOut {
+  voice_id: string;
+  duration_seconds: number;
+  cost_usd: number;
+  audition_url: string;
+}
+
+export interface VoiceReferencesOut {
+  voice_id: string;
+  references: { book_id: string; role: string }[];
+}
+
+export interface CloudSlotsOut {
+  max_slots: number;
+  count: number;
+  slots: { voice_id: string; cloud_id: string; seq: number }[];
+}
+
+export interface EngineVoicesOut {
+  engine_id: string;
+  voices: { id: string; name: string; language: string | null; gender: string | null }[];
+}
+
 /** "ch013_b0042" -> 13; null when unparsable. */
 export function chapterOfBlock(blockId: string | null): number | null {
   const m = blockId?.match(/^ch(\d+)_/);

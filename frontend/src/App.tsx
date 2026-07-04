@@ -6,6 +6,7 @@ import { Library } from "./screens/Library";
 import { Placeholder } from "./screens/Placeholder";
 import { RenderJobs } from "./screens/RenderJobs";
 import { Review } from "./screens/Review";
+import { Voices } from "./screens/Voices";
 
 export default function App() {
   return (
@@ -16,7 +17,7 @@ export default function App() {
           <Route path="/" element={<Library />} />
           <Route path="/listen" element={<Placeholder title="Listen" section="M6c-5" />} />
           <Route path="/review" element={<Review />} />
-          <Route path="/voices" element={<Placeholder title="Voice Studio" section="M6c-4" />} />
+          <Route path="/voices" element={<Voices />} />
           <Route path="/render" element={<RenderJobs />} />
         </Routes>
       </main>

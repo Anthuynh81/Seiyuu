@@ -1,13 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, postForm, postJson } from "./client";
+import { api, ApiError, postForm, postJson } from "./client";
 import type {
+  AuditionOut,
   BookDetail,
   BooksOut,
   CharactersOverview,
+  CloudSlotsOut,
   CostEstimateOut,
   EditLog,
   EditRequest,
+  EngineVoicesOut,
   IngestResponse,
   JobOut,
   JobsOut,
@@ -17,6 +20,10 @@ import type {
   RenderSummaryOut,
   SegmentBrowserOut,
   ValidationReportOut,
+  VoiceCreate,
+  VoiceListOut,
+  VoiceOut,
+  VoiceReferencesOut,
 } from "./types";
 
 /** Polling discipline: this is THE live poll — book payloads deliberately carry no
@@ -173,6 +180,84 @@ export function useStartJob(bookId: string, path: "render" | "assemble" | "maste
   return useMutation({
     mutationFn: (body: RenderRequest | Record<string, never>) =>
       postJson<JobOut>(`/api/books/${bookId}/${path}`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+// -- voice studio --------------------------------------------------------------------------
+
+export function useVoices() {
+  return useQuery({ queryKey: ["voices"], queryFn: () => api<VoiceListOut>("/api/voices") });
+}
+
+export function useCloudSlots() {
+  return useQuery({ queryKey: ["cloud-slots"], queryFn: () => api<CloudSlotsOut>("/api/cloud-slots") });
+}
+
+export function useKokoroPresets() {
+  return useQuery({
+    queryKey: ["engine-voices", "kokoro"],
+    queryFn: () => api<EngineVoicesOut>("/api/engines/kokoro/voices"),
+    staleTime: Infinity, // hardcoded preset catalog
+  });
+}
+
+export function useCreateVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: VoiceCreate) => postJson<VoiceOut>("/api/voices", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+export function useCloneVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { file: File; name: string; engine: string; attestedBy: string; replace?: boolean }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("name", input.name);
+      form.append("engine", input.engine);
+      form.append("consent", "true");
+      form.append("attested_by", input.attestedBy);
+      if (input.replace) form.append("replace", "true");
+      return postForm<VoiceOut>("/api/voices/clone", form);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+export function useAudition(voiceId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (confirmPaid: boolean) =>
+      postJson<AuditionOut>(`/api/voices/${voiceId}/audition`, { confirm_paid: confirmPaid }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["voices"] });
+      qc.invalidateQueries({ queryKey: ["cloud-slots"] });
+    },
+  });
+}
+
+export function useDeleteVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (voiceId: string) => {
+      const refs = await api<VoiceReferencesOut>(`/api/voices/${voiceId}/references`);
+      if (refs.references.length > 0) {
+        const roles = refs.references.map((r) => `${r.book_id} (${r.role})`).join(", ");
+        throw new ApiError(409, "voice_referenced", `still assigned in: ${roles}`);
+      }
+      return api<{ deleted: string }>(`/api/voices/${voiceId}`, { method: "DELETE" });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+export function useWarmup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (engineId: string) => api<JobOut>(`/api/engines/${engineId}/warmup`, { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
