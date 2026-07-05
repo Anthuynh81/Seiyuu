@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
+  useAttribute,
   useBook,
   useBookJobs,
   useBooks,
@@ -378,6 +379,7 @@ export function RenderJobs() {
   );
 
   const mint = useMintQuote(bookId ?? "");
+  const attribute = useAttribute(bookId ?? "");
   const render = useStartJob(bookId ?? "", "render");
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
@@ -502,6 +504,37 @@ export function RenderJobs() {
           )}
           {book.data?.chapters && (
             <ScopeRow scope={scope} setScope={setScope} chapters={book.data.chapters} renderedSet={renderedSet} />
+          )}
+          {status?.ingested && !status.attributed && (
+            book.data?.active_job?.kind === "attribute" ? (
+              <div className="drainstrip">
+                <span className="state"><i className="led run" />attribution running</span>
+                <span className="mono" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
+                  follow it in the transport bar — Character Review and the Listen read-along unlock when it lands
+                </span>
+              </div>
+            ) : (
+              <div className="refusal" style={{ marginBottom: 14 }}>
+                <span className="tag">not attributed</span>
+                <p>
+                  no speaker attribution yet — multivoice, Character Review, and the Listen read-along all need it
+                  (a bare single-voice render doesn't). Ollama must be running.{" "}
+                  <button
+                    className="link"
+                    style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
+                    disabled={attribute.isPending}
+                    onClick={() => attribute.mutate(chapters)}
+                  >
+                    {attribute.isPending
+                      ? "starting…"
+                      : `attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"} with the local model`}
+                  </button>
+                </p>
+                {attribute.error && (
+                  <p className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>{attribute.error.message}</p>
+                )}
+              </div>
+            )
           )}
           {estimate.isPending && ready && <div className="loadline">estimating against the segment cache…</div>}
           {estimate.isError && <div className="errline">{estimate.error.message}</div>}

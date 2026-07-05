@@ -130,6 +130,19 @@ export function useMintQuote(bookId: string) {
   });
 }
 
+export function useAttribute(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    // chapters: [] = whole book; a subset merges into the existing report, so a big
+    // book can be attributed in installments just like it's rendered
+    mutationFn: (chapters: number[]) => postJson<JobOut>(`/api/books/${bookId}/attribute`, { chapters }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["book", bookId] });
+    },
+  });
+}
+
 // -- character review ----------------------------------------------------------------------
 
 export function useCharacters(bookId: string | null, attributed: boolean) {
