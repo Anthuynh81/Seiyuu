@@ -8,4 +8,4 @@ output/
 data/
 *.wav
 *.pt
-node_modules/
+node_modules/voices/
