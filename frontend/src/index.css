@@ -234,6 +234,9 @@ details.fine summary:hover { color: var(--tungsten); }
 /* listen (read-along) */
 .chapters { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
 
+.provenance { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 7px 12px; background: var(--console); border: 1px solid var(--hairline); }
+.voicelabel { display: block; margin-top: 3px; font-size: 9.5px; color: var(--paper-ink-2); opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* shelf: pick a book by cover */
 .shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; max-width: 900px; }
 .covertile { position: relative; aspect-ratio: 2 / 3; background: var(--console); border: 1px solid var(--hairline); overflow: hidden; padding: 0; display: block; }

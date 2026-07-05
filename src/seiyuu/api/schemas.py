@@ -222,6 +222,11 @@ class SegmentRow(BaseModel):
     # None when unrendered or when re-attribution re-split the block since the render.
     audio_segment: int | None = None
     duration_seconds: float | None = None
+    # Render provenance (additive): the voice that actually rendered this row's audio,
+    # and the wav's SegmentKey hash — a stable identity the UI shows and uses to
+    # cache-bust audio URLs exactly when the content changed.
+    voice_id: str | None = None
+    audio_key: str | None = None
 
 
 class SegmentBrowserOut(BaseModel):

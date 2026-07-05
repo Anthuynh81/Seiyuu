@@ -125,6 +125,7 @@ export interface RenderSummaryOut {
   mode: RenderMode;
   chapters: { index: number; title: string; segments: number; duration_seconds: number }[];
   total_seconds: number;
+  voices_used: Record<string, { engine: string; engine_model_version: string; kind: string }>;
   validation_failures: number;
 }
 
@@ -190,6 +191,8 @@ export interface SegmentRow {
   has_audio: boolean;
   audio_segment: number | null; // ?segment= index for the audio route; null = no timing
   duration_seconds: number | null;
+  voice_id: string | null; // the voice that actually rendered this row's audio
+  audio_key: string | null; // wav SegmentKey hash — render identity + cache-buster
 }
 
 export interface SegmentBrowserOut {

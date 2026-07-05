@@ -159,8 +159,11 @@ export function Listen() {
         };
       });
       const [blockId, audioSegment] = g.key.split(":");
+      // v= is the wav's SegmentKey hash: a re-render changes it, so the browser can
+      // never serve a stale clip from before the re-render
+      const buster = g.rows[0].audio_key ? `&v=${g.rows[0].audio_key}` : "";
       return {
-        src: `/api/books/${bookId}/segments/${blockId}/audio?segment=${audioSegment}`,
+        src: `/api/books/${bookId}/segments/${blockId}/audio?segment=${audioSegment}${buster}`,
         duration: g.duration,
         key: g.key,
         speaker: g.speaker,
@@ -278,6 +281,22 @@ export function Listen() {
         {chapterTitles.get(effectiveChapter) ?? `Chapter ${effectiveChapter}`} — click any word to play from there; the
         transport below seeks, pauses, and holds the volume.
       </p>
+      {summary.data && (
+        <div className="provenance">
+          <span className="tag">audio</span>
+          <span className="state">
+            <i className={`led ${summary.data.mode === "multivoice" ? "ok" : "off"}`} />
+            {summary.data.mode === "multivoice"
+              ? `multivoice · ${Object.keys(summary.data.voices_used ?? {}).length || "cast"} voices`
+              : "single voice"}
+          </span>
+          {summary.data.mode === "single" && book.data?.status.assigned && (
+            <span className="mono" style={{ color: "var(--caution)", fontSize: 11 }}>
+              this audio predates your casting — re-render in multivoice to hear it
+            </span>
+          )}
+        </div>
+      )}
       {segments.isPending && <div className="loadline">setting the page…</div>}
       {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
       {segments.data && playableRows.length === 0 && (
@@ -303,6 +322,7 @@ export function Listen() {
                     <span className={`chip ${row.speaker === null ? "narr" : ""}`}>
                       {row.speaker === null ? "narration" : (row.speaker_name ?? row.speaker).toUpperCase()}
                     </span>
+                    {row.voice_id && <span className="voicelabel">{row.voice_id}</span>}
                   </div>
                 </div>
               );

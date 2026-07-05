@@ -353,19 +353,27 @@ def segment_browser(
     for seg in chapter.segments:
         rows_per_block[seg.block_id] = rows_per_block.get(seg.block_id, 0) + 1
 
-    def audio_for(block_id: str, seg_index: int) -> tuple[bool, int | None, float | None]:
+    def audio_for(block_id: str, seg_index: int):
         rendered = block_audio.get(block_id)
         if not rendered:
-            return (False, None, None)
+            return (False, None, None, None, None)
         if len(rendered) == rows_per_block[block_id]:
             man_seg = rendered[seg_index]
         elif len(rendered) == 1:
             man_seg = rendered[0]
         else:
-            return (any(m.wav for m in rendered), None, None)
+            return (any(m.wav for m in rendered), None, None, None, None)
         if not man_seg.wav:
-            return (False, None, None)
-        return (True, rendered.index(man_seg), man_seg.duration_seconds)
+            return (False, None, None, None, None)
+        # audio_key = the wav stem (the frozen SegmentKey hash): render identity for the
+        # UI and an exact cache-buster — it changes iff the audio content would
+        return (
+            True,
+            rendered.index(man_seg),
+            man_seg.duration_seconds,
+            man_seg.voice_id,
+            Path(man_seg.wav).stem,
+        )
 
     rows: list[SegmentRow] = []
     position_in_block: dict[str, int] = {}
@@ -384,7 +392,9 @@ def segment_browser(
             continue
         if low_confidence and seg.confidence >= cfg.attribution_confidence_threshold:
             continue
-        has_audio, audio_segment, duration = audio_for(seg.block_id, seg_index)
+        has_audio, audio_segment, duration, voice_id, audio_key = audio_for(
+            seg.block_id, seg_index
+        )
         rows.append(
             SegmentRow(
                 block_id=seg.block_id,
@@ -397,6 +407,8 @@ def segment_browser(
                 has_audio=has_audio,
                 audio_segment=audio_segment,
                 duration_seconds=duration,
+                voice_id=voice_id,
+                audio_key=audio_key,
             )
         )
     return SegmentBrowserOut(
