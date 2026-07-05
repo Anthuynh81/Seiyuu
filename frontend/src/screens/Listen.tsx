@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { useBook, useBooks, useRenderSummary, useSegments } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
 import { usePlayer, type PlayClip } from "../app/usePlayer";
+import { buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
 
@@ -24,41 +25,6 @@ function usePrefs() {
     localStorage.setItem("seiyuu.reading", JSON.stringify(merged));
   };
   return [prefs, update] as const;
-}
-
-/* -------------------------------------------------- word timing */
-
-/** TTS lingers on clause and sentence boundaries — weight those tokens heavier so the
-    interpolated word offsets track the narration much more closely. */
-function wordWeight(w: string): number {
-  let extra = 0;
-  if (/[.!?…]["”']?$/.test(w)) extra = 5;
-  else if (/[;:—]["”']?$/.test(w)) extra = 3;
-  else if (/,["”']?$/.test(w)) extra = 2;
-  return w.length + 1 + extra;
-}
-
-/** One clip may span SEVERAL text segments (a single-voice render has one wav per
-    block). Build word spans across all of a clip's rows, distributing the clip's
-    duration over the combined weighted text. */
-function buildClipWords(rows: { text: string; el: HTMLElement }[], duration: number) {
-  const perRow = rows.map((r) => ({ el: r.el, parts: r.text.split(/\s+/).filter(Boolean) }));
-  const totalWeight = perRow.reduce((a, r) => a + r.parts.reduce((x, w) => x + wordWeight(w), 0), 0) || 1;
-  const words: { el: HTMLElement; offset: number }[] = [];
-  let t = 0;
-  for (const row of perRow) {
-    row.el.textContent = "";
-    for (const part of row.parts) {
-      const span = document.createElement("span");
-      span.className = "w";
-      span.textContent = part;
-      row.el.appendChild(span);
-      row.el.appendChild(document.createTextNode(" "));
-      words.push({ el: span, offset: t });
-      t += (duration * wordWeight(part)) / totalWeight;
-    }
-  }
-  return words;
 }
 
 /* -------------------------------------------------- the shelf (cover picker) */
@@ -119,20 +85,7 @@ export function Listen() {
 
   useEffect(() => {
     if (!player || !bookId || !pageRef.current || playableRows.length === 0) return;
-    type Group = { key: string; duration: number; speaker: string; rows: SegmentRow[] };
-    const groups: Group[] = [];
-    for (const row of playableRows) {
-      const key = `${row.block_id}:${row.audio_segment}`;
-      const last = groups[groups.length - 1];
-      if (last && last.key === key) last.rows.push(row);
-      else
-        groups.push({
-          key,
-          duration: row.duration_seconds!,
-          speaker: row.speaker_name ?? (row.speaker === null ? "narration" : row.speaker),
-          rows: [row],
-        });
-    }
+    const groups = groupPlayableRows(playableRows);
     rowSeek.current.clear();
     const clips: PlayClip[] = groups.map((g, ci) => {
       const pairs = g.rows

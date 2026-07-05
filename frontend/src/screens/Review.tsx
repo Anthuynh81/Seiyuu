@@ -17,6 +17,7 @@ import {
 } from "../api/hooks";
 import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
+import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
 
 /* -------------------------------------------------- frontier (localStorage, per book) */
 
@@ -271,30 +272,15 @@ export function Review() {
   const voicesQ = useVoices();
   const draftCast = useDraftAssignment(bookId ?? "");
   const saveCast = useSaveAssignment(bookId ?? "");
-  const [casting, setCasting] = useState<{
-    narrator: string;
-    thought: string | null;
-    stage: "draft" | "final";
-    map: Record<string, string>;
-  } | null>(null);
+  const [casting, setCasting] = useState<CastingState | null>(null);
   useEffect(() => {
     const a = assignment.data;
-    setCasting(
-      a
-        ? { narrator: a.narrator_voice_id, thought: a.thought_voice_id, stage: a.stage, map: { ...a.assignments } }
-        : null,
-    );
+    setCasting(a ? castingFromServer(a) : null);
   }, [assignment.data]);
-  const castingDirty = useMemo(() => {
-    const a = assignment.data;
-    if (!a || !casting) return false;
-    return (
-      casting.narrator !== a.narrator_voice_id ||
-      casting.thought !== a.thought_voice_id ||
-      casting.stage !== a.stage ||
-      JSON.stringify(casting.map) !== JSON.stringify(a.assignments)
-    );
-  }, [assignment.data, casting]);
+  const castingDirty = useMemo(
+    () => (assignment.data && casting ? castingDiffers(assignment.data, casting) : false),
+    [assignment.data, casting],
+  );
 
   const [frontier, setFrontier] = useFrontier(bookId);
   const [spoilerSafe, setSpoilerSafe] = useState(true);

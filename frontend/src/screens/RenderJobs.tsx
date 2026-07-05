@@ -20,6 +20,8 @@ import type {
   RenderMode,
   ValidationRow,
 } from "../api/types";
+import { classifyRenderFailure } from "../lib/money";
+import { continueRange, scopeChapters, type Scope } from "../lib/scope";
 
 /* -------------------------------------------------- steps strip */
 
@@ -126,15 +128,6 @@ function QuoteTicket({
 
 /* -------------------------------------------------- chapter scope */
 
-type Scope = { kind: "whole" } | { kind: "range"; from: number; to: number };
-
-function scopeChapters(scope: Scope, total: number): number[] {
-  if (scope.kind === "whole") return [];
-  const from = Math.max(1, Math.min(scope.from, total));
-  const to = Math.max(from, Math.min(scope.to, total));
-  return Array.from({ length: to - from + 1 }, (_, i) => from + i);
-}
-
 function ScopeRow({
   scope,
   setScope,
@@ -147,7 +140,7 @@ function ScopeRow({
   renderedSet: Set<number>;
 }) {
   const total = chapters.length;
-  const firstUnrendered = chapters.find((c) => !renderedSet.has(c.index))?.index;
+  const cont = continueRange(renderedSet, total, 10);
   const selected = scopeChapters(scope, total);
   const speakable = selected.length
     ? chapters.filter((c) => selected.includes(c.index)).reduce((a, c) => a + c.speakable_blocks, 0)
@@ -161,7 +154,7 @@ function ScopeRow({
       </button>
       <button
         className={`chap ${scope.kind === "range" ? "on" : ""}`}
-        onClick={() => setScope({ kind: "range", from: firstUnrendered ?? 1, to: Math.min((firstUnrendered ?? 1) + 9, total) })}
+        onClick={() => setScope(cont ?? { kind: "range", from: 1, to: Math.min(10, total) })}
       >
         chapter range
       </button>
@@ -187,16 +180,14 @@ function ScopeRow({
               onChange={(e) => setScope({ ...scope, to: Number(e.target.value) || scope.from })}
             />
           </label>
-          {firstUnrendered !== undefined && renderedSet.size > 0 && (
+          {cont && (
             <button
               className="key quiet"
               style={{ padding: "3px 9px" }}
-              title={`chapters 1–${firstUnrendered - 1} already have audio`}
-              onClick={() =>
-                setScope({ kind: "range", from: firstUnrendered, to: Math.min(firstUnrendered + 9, total) })
-              }
+              title="the next ten chapters without rendered audio"
+              onClick={() => setScope(cont)}
             >
-              continue · next 10 from ch {firstUnrendered}
+              continue · next 10 from ch {cont.from}
             </button>
           )}
         </>
@@ -418,22 +409,23 @@ export function RenderJobs() {
           setConfirmFull(null);
         },
         onError: (e) => {
-          if (!(e instanceof ApiError)) return setFlowError(String(e));
-          if (e.code === "full_render_confirmation_required") {
-            setConfirmFull(e.detail as { speakable_blocks: number; runtime_estimate_seconds: number });
-          } else if (e.code === "quote_expired" && ticket.kind === "live") {
-            // per the design contract: expiry re-mints silently
-            setTicket({ kind: "none" });
-            doMint();
-          } else if ((e.code === "cost_drift" || e.code === "quote_mismatch" || e.code === "quote_used") && ticket.kind === "live") {
-            setTicket({
-              kind: "refused",
-              quote: ticket.quote,
-              stamp: e.code === "quote_used" ? "USED" : "DRIFT",
-              message: e.message,
-            });
-          } else {
-            setFlowError(e.message);
+          const action = classifyRenderFailure(e, ticket.kind === "live");
+          switch (action.kind) {
+            case "confirm-full":
+              setConfirmFull(action.detail);
+              break;
+            case "remint":
+              // per the design contract: expiry re-mints silently
+              setTicket({ kind: "none" });
+              doMint();
+              break;
+            case "stamp":
+              if (ticket.kind === "live") {
+                setTicket({ kind: "refused", quote: ticket.quote, stamp: action.stamp, message: action.message });
+              }
+              break;
+            case "error":
+              setFlowError(action.message);
           }
         },
       },
