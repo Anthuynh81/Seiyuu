@@ -81,9 +81,15 @@ export function TransportBar() {
     );
   }
   const canceling = job.cancel_requested && job.state === "running";
+  // a running render can lend the GPU to a voice audition between segments — it stays RUNNING
+  // the whole time, so nothing here should read as if the render paused or stopped
+  const borrowable = job.kind === "render" && job.state === "running" && !canceling;
   return (
     <div className="transport">
-      <span className="state">
+      <span
+        className="state"
+        title={borrowable ? "still running — a voice audition may borrow the GPU between segments without stopping this render" : undefined}
+      >
         <i className={`led ${ledFor(job)}`} />
         {canceling ? "canceling" : job.state}
       </span>

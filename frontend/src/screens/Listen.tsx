@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { useBook, useBooks, useRenderSummary, useSegments } from "../api/hooks";
+import { useBook, useBooks, useRenderSummary, useSegments, useSegmentWords } from "../api/hooks";
+import type { SegmentWordsClip } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
-import { usePlayer, type PlayClip } from "../app/usePlayer";
-import { buildClipWords, groupPlayableRows } from "../lib/words";
+import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
+import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
 
@@ -83,10 +84,33 @@ export function Listen() {
   // starts inside its clip so clicking a segment seeks to ITS words, not the block top
   const rowSeek = useRef(new Map<string, { clip: number; offset: number }>());
 
+  // one clip per rendered wav; fetch whisper word-timings for each, busted by audio_key
+  const wordClips = useMemo<SegmentWordsClip[]>(
+    () =>
+      groupPlayableRows(playableRows).map((g) => {
+        const sep = g.key.lastIndexOf(":");
+        return {
+          key: g.key,
+          blockId: g.key.slice(0, sep),
+          segment: Number(g.key.slice(sep + 1)),
+          audioKey: g.rows[0].audio_key,
+        };
+      }),
+    [playableRows],
+  );
+  const words = useSegmentWords(bookId, wordClips);
+
+  // built clip structure (span elements + per-row token counts) so whisper timings can be
+  // applied onto the EXISTING spans without a player.load() that would interrupt playback
+  const builtRef = useRef<
+    { ci: number; key: string; clipWords: PlayWord[]; rows: { rowKey: string; count: number }[]; duration: number }[]
+  >([]);
+
   useEffect(() => {
     if (!player || !bookId || !pageRef.current || playableRows.length === 0) return;
     const groups = groupPlayableRows(playableRows);
     rowSeek.current.clear();
+    builtRef.current = [];
     const clips: PlayClip[] = groups.map((g, ci) => {
       const pairs = g.rows
         .map((row) => ({
@@ -94,23 +118,27 @@ export function Listen() {
           el: pageRef.current!.querySelector<HTMLElement>(`[data-seg="${row.block_id}:${row.segment_index}"] .segtext`),
         }))
         .filter((p): p is { row: SegmentRow; el: HTMLElement } => p.el !== null);
-      const words = buildClipWords(pairs.map((p) => ({ text: p.row.text, el: p.el })), g.duration);
-      // first word of each row = that row's seek point
+      const clipWords = buildClipWords(pairs.map((p) => ({ text: p.row.text, el: p.el })), g.duration);
+      // first word of each row = that row's seek point; also record token counts so a later
+      // whisper-timing pass can recompute these seek points against the real word offsets
+      const rows: { rowKey: string; count: number }[] = [];
       let w = 0;
       for (const p of pairs) {
-        rowSeek.current.set(`${p.row.block_id}:${p.row.segment_index}`, {
-          clip: ci,
-          offset: words[w]?.offset ?? 0,
-        });
-        w += p.row.text.split(/\s+/).filter(Boolean).length;
+        const rowKey = `${p.row.block_id}:${p.row.segment_index}`;
+        rowSeek.current.set(rowKey, { clip: ci, offset: clipWords[w]?.offset ?? 0 });
+        const count = p.row.text.split(/\s+/).filter(Boolean).length;
+        rows.push({ rowKey, count });
+        w += count;
       }
-      words.forEach((word) => {
+      clipWords.forEach((word) => {
         word.el.style.cursor = "pointer";
+        // reads word.offset LIVE at click time, so it picks up whisper-refined offsets
         word.el.onclick = (e) => {
           e.stopPropagation();
           player.seekClip(ci, word.offset);
         };
       });
+      builtRef.current.push({ ci, key: g.key, clipWords, rows, duration: g.duration });
       const [blockId, audioSegment] = g.key.split(":");
       // v= is the wav's SegmentKey hash: a re-render changes it, so the browser can
       // never serve a stale clip from before the re-render
@@ -120,7 +148,7 @@ export function Listen() {
         duration: g.duration,
         key: g.key,
         speaker: g.speaker,
-        words,
+        words: clipWords,
       };
     });
     const chapterDone = () => {
@@ -142,6 +170,32 @@ export function Listen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId, effectiveChapter, playableRows]);
 
+  // When a clip's whisper words arrive, drive its highlight from the real (start,end) times
+  // instead of length interpolation — mutating the existing spans in place (no player.load,
+  // so playback never hitches) and refreshing that clip's per-row seek points. Clips still
+  // loading or 404'd keep their interpolated fallback. Keyed on `words.sig`, which only
+  // changes when the SET of resolved clips changes.
+  useEffect(() => {
+    for (const clip of builtRef.current) {
+      const sw = words.byKey.get(clip.key);
+      if (!sw || sw.words.length === 0) continue;
+      const displayTokens = clip.clipWords.map((cw) => cw.el.textContent ?? "");
+      const timings = alignWordTimings(displayTokens, sw.words, sw.audio_duration || clip.duration);
+      clip.clipWords.forEach((cw, k) => {
+        if (timings[k]) {
+          cw.offset = timings[k].offset;
+          cw.end = timings[k].end;
+        }
+      });
+      let idx = 0;
+      for (const r of clip.rows) {
+        rowSeek.current.set(r.rowKey, { clip: clip.ci, offset: clip.clipWords[idx]?.offset ?? 0 });
+        idx += r.count;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [words.sig, effectiveChapter]);
+
   // Highlight loop: rAF reading the audio element's clock directly — smooth and never
   // behind the 250ms timeupdate events.
   const hlRef = useRef<{ clips: PlayClip[]; index: number }>({ clips: [], index: 0 });
@@ -155,7 +209,8 @@ export function Listen() {
       const clip = clips[index];
       if (audio && clip && clip.words.length) {
         const t = audio.currentTime;
-        let i = clip.words.findIndex((_, k) => t < (clip.words[k + 1]?.offset ?? clip.duration));
+        // exact active word: the first whose end is still ahead of the playhead
+        let i = clip.words.findIndex((word) => t < word.end);
         if (i < 0) i = clip.words.length - 1;
         const el = clip.words[i]?.el ?? null;
         if (el !== last) {

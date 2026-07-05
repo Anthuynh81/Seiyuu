@@ -50,6 +50,26 @@ export interface BooksOut {
   books: BookCard[];
 }
 
+// -- delete a book (F3) ----------------------------------------------------------------------
+
+/** DELETE /api/books/{id} success — what was actually torn down. */
+export interface BookDeletedOut {
+  book_id: string;
+  output_removed: boolean;
+  books_removed: boolean;
+  jobs_rows_deleted: number;
+  paid_segments_discarded: number;
+}
+
+/** 402 payment_confirmation_required detail: the paid cloud renders a delete would
+    discard. Re-send the DELETE with confirm_paid=true to proceed. */
+export interface PaidArtifacts {
+  paid_segment_count: number;
+  engines: string[];
+  paid_voice_ids: string[];
+  estimated_usd: number | null;
+}
+
 export interface IngestResponse {
   book: Omit<BookCard, "active_job">;
   chapters: number;
@@ -200,6 +220,24 @@ export interface SegmentBrowserOut {
   title: string;
   segments: SegmentRow[];
   edit_warnings: string[];
+}
+
+// -- word-exact read-along (F2) --------------------------------------------------------------
+
+/** One whisper-timed spoken token, seconds within the clip's wav. */
+export interface WordTiming {
+  start: number;
+  end: number;
+  word: string;
+}
+
+/** GET /api/books/{id}/segments/{block_id}/words?segment=N — whisper word timings for one
+    rendered wav. 404 (scene break / not-yet-rendered / missing wav) degrades to the
+    length-interpolated fallback. */
+export interface SegmentWords {
+  words: WordTiming[];
+  audio_duration: number;
+  source: string;
 }
 
 export type EditRequest =
