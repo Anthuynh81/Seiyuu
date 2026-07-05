@@ -14,6 +14,7 @@ so avoid calling ``list_books`` in a hot loop over huge books.
 """
 
 import json
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -142,3 +143,79 @@ def resolve_book_id(
         known = ", ".join(sorted(ids)) or "(none)"
         raise RepositoryError(f"book {book_id!r} not found; known: {known}")
     raise RepositoryError(f"book {book_id!r} is ambiguous; candidates: {', '.join(matches)}")
+
+
+class BookPurgeResult(BaseModel):
+    """Outcome of a two-root on-disk purge. ``*_removed`` reports a root that EXISTED and is
+    now gone; ``survivors`` lists any paths ``rmtree`` could not delete (on Windows a file a
+    concurrent process holds open raises a sharing violation) so the caller can fail loudly
+    and keep the delete retryable."""
+
+    book_id: str
+    output_removed: bool
+    books_removed: bool
+    survivors: list[str] = []
+
+
+def _delete_target(root: Path, book_id: str) -> Path:
+    """The book's directory under ``root``, refusing anything that could escape it. A
+    traversal here would ``rmtree`` an arbitrary directory, so this is a hard safety gate:
+    the id must be a single path component (no separator, no ``..``) whose resolved parent
+    IS the root. Never trusts an already-validated id — deletion is irreversible."""
+    if not book_id or book_id in (".", ".."):
+        raise RepositoryError(f"refusing to delete book with empty/reserved id {book_id!r}")
+    if "/" in book_id or "\\" in book_id or "\x00" in book_id:
+        raise RepositoryError(f"refusing to delete book {book_id!r}: id contains a path separator")
+    if ".." in Path(book_id).parts:
+        raise RepositoryError(f"refusing to delete book {book_id!r}: id contains '..'")
+    target = root / book_id
+    resolved = target.resolve()
+    if resolved.name != book_id or resolved.parent != root.resolve():
+        raise RepositoryError(f"refusing to delete {target}: not a direct child of {root}")
+    return target
+
+
+def delete_book_trees(
+    book_id: str,
+    *,
+    books_dir: Path | None = None,
+    output_dir: Path | None = None,
+) -> BookPurgeResult:
+    """Purge a book's on-disk state across BOTH roots. A book has no DB row — its identity
+    is inferred from marker files under ``output/{id}/`` AND ``books/{id}/`` (see
+    ``_known_book_ids``), so a one-root delete leaves a ghost that reappears in the library;
+    both must go. Output (render/assemble/master) is removed first, then books (ingest +
+    attribution); if the output root cannot be FULLY removed the books root is left
+    UNTOUCHED so the book still resolves (via ``books/{id}/normalized.json``) and the delete
+    stays retryable — deleting books after a partial output failure would strand the output
+    survivors as an unresolvable ghost the library can't surface. A missing root is not an
+    error (nothing to remove). Partial failures are COLLECTED (Python 3.11
+    ``rmtree(onerror=...)``; ``onexc`` is 3.12+), never raised, so the caller can report
+    survivors and retry — this function never touches the voice library or the global jobs DB."""
+    books_dir, output_dir = _default_roots(books_dir, output_dir)
+    odir = _delete_target(output_dir, book_id)
+    bdir = _delete_target(books_dir, book_id)
+
+    survivors: list[str] = []
+
+    def _collect(_func, path, _exc_info) -> None:
+        survivors.append(str(path))
+
+    output_existed = odir.is_dir()
+    books_existed = bdir.is_dir()
+    if output_existed:
+        shutil.rmtree(odir, onerror=_collect)
+        if survivors:
+            # Output could not be fully removed. Stop BEFORE touching the books root so the
+            # book still resolves and the caller can retry both roots once the lock clears.
+            return BookPurgeResult(
+                book_id=book_id, output_removed=False, books_removed=False, survivors=survivors
+            )
+    if books_existed:
+        shutil.rmtree(bdir, onerror=_collect)
+    return BookPurgeResult(
+        book_id=book_id,
+        output_removed=output_existed and not odir.exists(),
+        books_removed=books_existed and not bdir.exists(),
+        survivors=survivors,
+    )

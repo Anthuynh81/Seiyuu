@@ -31,6 +31,7 @@ from seiyuu.api.schemas import (
     AttributeParams,
     AttributionOut,
     BookCard,
+    BookDeletedOut,
     BookDetail,
     BooksOut,
     ChapterDownload,
@@ -47,9 +48,10 @@ from seiyuu.api.schemas import (
 from seiyuu.duration import estimate_runtime_seconds, format_hms
 from seiyuu.ingest import IngestError, parse_epub, write_normalized
 from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_books
-from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME
+from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME, delete_book_trees
 from seiyuu.services import ServiceError, characters_overview
 from seiyuu.services.characters import CharactersOverview
+from seiyuu.services.deletion import detect_paid_artifacts
 
 router = APIRouter(tags=["books"])
 
@@ -215,6 +217,74 @@ def book_detail(book_id: str, cfg: SettingsDep, store: StoreDep) -> BookDetail:
         recent_jobs=[JobOut.from_job(j) for j in store.list_jobs(book_id=book_id, limit=10)],
         downloads=downloads,
         cover=cover,
+    )
+
+
+def _guard_any_active(store, book_id: str) -> None:
+    """Kind-agnostic live-job guard (sign-off D7): refuse deletion while ANY job for the
+    book is queued or running. Attribute/render/assemble all read or write the book's trees
+    and a queued job starts imminently, so 'no deletion while any work is pending or active'
+    is the simplest correct rule. WARMUP jobs never match — their ``book_id`` is the
+    ``engine:{id}`` overload — so an engine pre-load never blocks a book deletion."""
+    live = store.list_jobs(book_id=book_id, states=[JobState.QUEUED, JobState.RUNNING])
+    if live:
+        raise ApiError(
+            409,
+            "conflicting_job",
+            f"a {live[0].kind.value} job for {book_id!r} is {live[0].state.value}; cancel "
+            "or wait for it before deleting the book",
+            detail=JobOut.from_job(live[0]).model_dump(mode="json"),
+        )
+
+
+@router.delete("/books/{book_id}", response_model=BookDeletedOut)
+def delete_book(
+    book_id: str,
+    request: Request,
+    cfg: SettingsDep,
+    store: StoreDep,
+    confirm_paid: Annotated[bool, Query()] = False,
+) -> BookDeletedOut:
+    """Purge a book from BOTH on-disk roots (``output/{id}`` then ``books/{id}``) and reap
+    its terminal job rows. Refused **409 conflicting_job** while any job for the book is
+    live. PAID cloud renders (ElevenLabs/Fish) are NEVER discarded automatically: when any
+    exist the call answers **402 payment_confirmation_required** and only purges them on a
+    re-send with ``?confirm_paid=true`` — free/local artifacts still delete on the first
+    call. The shared voice library, the global jobs.db file, and every OTHER book are left
+    untouched. Guard + purge run under the enqueue mutex so a job cannot be created for the
+    book between the live-job check and the purge."""
+    status_or_404(cfg, book_id)
+    with request.app.state.enqueue_mutex:
+        _guard_any_active(store, book_id)
+        paid = detect_paid_artifacts(cfg, book_id)
+        if paid.paid_segment_count > 0 and not confirm_paid:
+            raise ApiError(
+                402,
+                "payment_confirmation_required",
+                f"deleting {book_id!r} discards {paid.paid_segment_count} paid cloud "
+                "segment(s) that cost real money to reproduce; re-send with "
+                "confirm_paid=true to approve discarding them",
+                detail=paid.model_dump(mode="json"),
+            )
+        result = delete_book_trees(book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
+        if result.survivors:
+            # Jobs rows are NOT deleted yet, so a retry is idempotent: the book still
+            # resolves, the guard passes, and the leftover files are rmtree'd again.
+            raise ApiError(
+                500,
+                "partial_delete",
+                f"book {book_id!r} was only partially deleted; {len(result.survivors)} "
+                "path(s) could not be removed (a file may be open) — close any process "
+                "holding them and retry",
+                detail={"survivors": result.survivors},
+            )
+        jobs_deleted = store.delete_jobs_for_book(book_id)
+    return BookDeletedOut(
+        book_id=book_id,
+        output_removed=result.output_removed,
+        books_removed=result.books_removed,
+        jobs_rows_deleted=jobs_deleted,
+        paid_segments_discarded=paid.paid_segment_count,
     )
 
 

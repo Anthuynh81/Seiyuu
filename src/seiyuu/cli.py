@@ -1695,5 +1695,95 @@ def convert(
         )
 
 
+@main.command()
+@click.argument("book_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--confirm-paid",
+    is_flag=True,
+    help="Approve discarding paid cloud (ElevenLabs/Fish) renders that cost real money to "
+    "reproduce; REQUIRED to delete a book that has any.",
+)
+@click.option(
+    "--books-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Normalized books root (default: settings.books_dir).",
+)  # fmt: skip
+@click.option(
+    "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Render output root (default: settings.output_dir).",
+)  # fmt: skip
+def delete(
+    book_id: str, yes: bool, confirm_paid: bool, books_dir: Path | None, output_dir: Path | None
+) -> None:
+    """Delete a book: purge output/{id} and books/{id} on disk and reap its terminal job
+    rows. Refused while any job for the book is queued or running. Paid cloud renders are
+    never discarded without --confirm-paid. The shared voice library and the global jobs.db
+    file are left untouched."""
+    from seiyuu.repository import JobState, JobStore, resolve_book_id
+    from seiyuu.repository.books import RepositoryError, delete_book_trees
+    from seiyuu.repository.jobs import JOBS_DB_NAME
+    from seiyuu.services.deletion import compute_purge_manifest
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    if books_dir is not None or output_dir is not None:
+        cfg = cfg.model_copy(
+            update={
+                "books_dir": books_dir or cfg.books_dir,
+                "output_dir": output_dir or cfg.output_dir,
+            }
+        )
+    try:
+        resolved = resolve_book_id(book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
+    except RepositoryError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    store = JobStore(cfg.data_dir / JOBS_DB_NAME)
+    live = store.list_jobs(book_id=resolved, states=[JobState.QUEUED, JobState.RUNNING])
+    if live:
+        raise click.ClickException(
+            f"a {live[0].kind.value} job for {resolved!r} is {live[0].state.value}; cancel "
+            "or wait for it before deleting the book"
+        )
+
+    summary = compute_purge_manifest(cfg, resolved)
+    roots = [
+        f"{name}/{resolved}"
+        for name, exists in (("output", summary.output_exists), ("books", summary.books_exists))
+        if exists
+    ]
+    click.echo(f"book:  {resolved}")
+    click.echo(f"purge: {', '.join(roots) or '(no on-disk trees)'}")
+    paid = summary.paid
+    if paid.paid_segment_count > 0:
+        click.echo(
+            f"PAID:  {paid.paid_segment_count} cloud segment(s) via {', '.join(paid.engines)} "
+            f"(voices: {', '.join(paid.paid_voice_ids)}) will be discarded and re-bill if "
+            "re-rendered"
+        )
+        if not confirm_paid:
+            raise click.ClickException(
+                "this book has paid cloud renders; re-run with --confirm-paid to approve "
+                "discarding them"
+            )
+
+    if not yes:
+        click.confirm(f"Permanently delete book {resolved!r} and all its artifacts?", abort=True)
+
+    result = delete_book_trees(resolved, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
+    if result.survivors:
+        raise click.ClickException(
+            f"book {resolved!r} was only partially deleted; could not remove "
+            f"{', '.join(result.survivors)} (a file may be open) — retry after closing them"
+        )
+    jobs_deleted = store.delete_jobs_for_book(resolved)
+    click.echo(
+        f"deleted {resolved}: "
+        f"output={'removed' if result.output_removed else 'absent'}, "
+        f"books={'removed' if result.books_removed else 'absent'}, "
+        f"job rows removed={jobs_deleted}, paid segments discarded={paid.paid_segment_count}"
+    )
+
+
 if __name__ == "__main__":
     main()

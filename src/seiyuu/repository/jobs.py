@@ -331,6 +331,20 @@ class JobStore:
                 (text, job_id, JobState.RUNNING.value),
             )
 
+    def delete_jobs_for_book(self, book_id: str) -> int:
+        """Delete this book's TERMINAL job rows (succeeded/failed/canceled) and return the
+        rowcount. Terminal-only by guard, so it can never race-delete a live (queued or
+        running) row the caller's deletion guard is meant to catch. A book carries no DB
+        record of its own — once its on-disk trees are gone, its finished job rows are pure
+        noise in the ledger, so book deletion (F3) reaps them here."""
+        states = [s.value for s in TERMINAL_STATES]
+        placeholders = ",".join("?" * len(states))
+        with self._connect() as conn:
+            return conn.execute(
+                f"DELETE FROM jobs WHERE book_id=? AND state IN ({placeholders})",
+                (book_id, *states),
+            ).rowcount
+
     def reconcile_startup(self) -> int:
         """Terminate every job a dead process left behind; call once at server startup,
         before the runner accepts work. A ``running`` row with a pending cancel request

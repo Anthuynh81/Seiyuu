@@ -192,6 +192,30 @@ class BookDetail(BaseModel):
     cover: CoverOut | None
 
 
+class PaidArtifacts(BaseModel):
+    """The PAID cloud work (ElevenLabs/Fish) a book deletion would discard. Per sign-off
+    D8 the segment count and voice ids are AUTHORITATIVE (read from the cache's SegmentKey
+    sidecars); ``estimated_usd`` is best-effort and may be None — no per-segment cost is
+    stored, so it is never reconstructed from a fragile text-join."""
+
+    paid_segment_count: int
+    engines: list[str]
+    paid_voice_ids: list[str]
+    estimated_usd: float | None = None
+
+
+class BookDeletedOut(BaseModel):
+    """Result of a successful ``DELETE /books/{id}``: which on-disk roots were purged, how
+    many terminal job rows were reaped, and how many paid segments were discarded (0 unless
+    the caller confirmed a paid deletion)."""
+
+    book_id: str
+    output_removed: bool
+    books_removed: bool
+    jobs_rows_deleted: int
+    paid_segments_discarded: int
+
+
 class RuntimeEstimateOut(BaseModel):
     seconds: float
     formatted: str
