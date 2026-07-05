@@ -12,7 +12,7 @@ consume-at-job-start verify (sign-off Q5).
 from collections.abc import Mapping
 from pathlib import Path
 
-from seiyuu.api.concurrency import HeavyWorkGate
+from seiyuu.api.concurrency import BorrowBroker, HeavyWorkGate
 from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.schemas import (
     AssembleParams,
@@ -86,7 +86,10 @@ def _find_cover(book_output_dir: Path) -> Path | None:
 
 
 def build_handlers(
-    cfg: Settings, registry: EngineRegistry, gate: HeavyWorkGate
+    cfg: Settings,
+    registry: EngineRegistry,
+    gate: HeavyWorkGate,
+    broker: BorrowBroker | None = None,
 ) -> Mapping[JobKind, JobHandler]:
     def warmup(ctx: JobContext) -> None:
         params = WarmupParams.model_validate(ctx.job.params or {})
@@ -202,6 +205,7 @@ def build_handlers(
                     max_paid_usd=approved_usd,
                     cloud_max_slots=cfg.elevenlabs_max_voice_slots,
                     check_cancel=ctx.check_cancel,
+                    broker=broker,  # lend the resident engine to auditions between segments
                 )
             else:
                 render_book(
@@ -219,6 +223,7 @@ def build_handlers(
                     allow_paid=approved_usd is not None,
                     max_paid_usd=approved_usd,
                     check_cancel=ctx.check_cancel,
+                    broker=broker,  # lend the resident engine to auditions between segments
                 )
 
     # assemble/master deliberately do NOT hold the heavy-work gate: they are pure

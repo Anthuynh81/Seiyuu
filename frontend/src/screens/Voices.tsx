@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api/client";
 import {
@@ -17,17 +17,52 @@ import type { VoiceCreate, VoiceOut } from "../api/types";
 
 /* -------------------------------------------------- audition control */
 
+const linkBtnStyle = { background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 } as const;
+const BORROW_RETRY_MAX = 3; // bounded auto-retries while a render lends the GPU between segments
+
 function AuditionControl({ voice }: { voice: VoiceOut }) {
   const audition = useAudition(voice.voice_id);
   const warmup = useWarmup();
   const [playerOpen, setPlayerOpen] = useState(false);
   const err = audition.error instanceof ApiError ? audition.error : null;
 
+  // gpu_busy_retry is a SOFT refusal: a render is lending the GPU between segments, so the
+  // right move is to wait and retry — not to give up. Auto-retry with a short backoff, up to
+  // BORROW_RETRY_MAX, preserving the same confirm_paid the user chose.
+  const borrowRetries = useRef(0);
+  useEffect(() => {
+    if (audition.isSuccess) borrowRetries.current = 0;
+  }, [audition.isSuccess]);
+  useEffect(() => {
+    if (err?.code !== "gpu_busy_retry" || borrowRetries.current >= BORROW_RETRY_MAX) return;
+    borrowRetries.current += 1;
+    const confirmPaid = audition.variables ?? false;
+    const timer = setTimeout(() => audition.mutate(confirmPaid), 500 * borrowRetries.current);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [err]);
+  const startAudition = (confirmPaid: boolean) => {
+    borrowRetries.current = 0; // a fresh user-initiated attempt resets the borrow budget
+    audition.mutate(confirmPaid);
+  };
+
   if (audition.isPending) {
     return (
       <div className="audit">
         <span className="stop" />
         <span className="lbl">auditioning…</span>
+        <span className="live" />
+      </div>
+    );
+  }
+
+  // soft borrow-retry: while attempts remain, show a "queued behind a render" spinner rather
+  // than a refusal — the render keeps running and the audition slips in between its segments
+  if (err?.code === "gpu_busy_retry" && borrowRetries.current < BORROW_RETRY_MAX) {
+    return (
+      <div className="audit" title="a render is lending the GPU between segments — it keeps running">
+        <span className="stop" />
+        <span className="lbl">queued behind a render segment — retrying…</span>
         <span className="live" />
       </div>
     );
@@ -41,7 +76,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           return (
             <button
               className="link"
-              style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
+              style={linkBtnStyle}
               disabled={warmup.isPending}
               onClick={() => warmup.mutate(voice.engine, { onSuccess: () => audition.reset() })}
             >
@@ -50,20 +85,26 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           );
         case "payment_confirmation_required":
           return (
-            <button
-              className="link"
-              style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
-              onClick={() => audition.mutate(true)}
-            >
+            <button className="link" style={linkBtnStyle} onClick={() => startAudition(true)}>
               confirm ~${Number(detail.estimated_usd ?? 0).toFixed(4)} &amp; play
             </button>
           );
+        case "gpu_busy_retry":
+          // auto-retries exhausted — the render is still holding the GPU; let the user retry
+          return (
+            <span>
+              the render keeps running — it hasn't yielded the GPU yet;{" "}
+              <button className="link" style={linkBtnStyle} onClick={() => startAudition(audition.variables ?? false)}>
+                retry
+              </button>
+            </span>
+          );
         case "gpu_busy":
         case "cloud_busy":
-          return <span>wait for the job in the transport bar, or cancel it — <button className="link" style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }} onClick={() => audition.reset()}>retry</button></span>;
+          return <span>wait for the job in the transport bar, or cancel it — <button className="link" style={linkBtnStyle} onClick={() => audition.reset()}>retry</button></span>;
         default:
           return (
-            <button className="link" style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }} onClick={() => audition.reset()}>
+            <button className="link" style={linkBtnStyle} onClick={() => audition.reset()}>
               dismiss
             </button>
           );
@@ -81,7 +122,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
 
   return (
     <div>
-      <div className="audit" role="button" tabIndex={0} onClick={() => audition.mutate(false)} style={{ cursor: "pointer" }}>
+      <div className="audit" role="button" tabIndex={0} onClick={() => startAudition(false)} style={{ cursor: "pointer" }}>
         <span className="play" />
         <span className="lbl">audition</span>
         {voice.has_audition && (
@@ -229,26 +270,35 @@ function useDemoPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const play = async (url: string) => {
+  const [retrying, setRetrying] = useState(false); // waiting out a render's GPU borrow
+  const play = async (url: string, attempt = 0) => {
     setError(null);
     audioRef.current?.pause();
     setBusy(url);
     try {
       const res = await fetch(url);
       if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+        const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
+        // gpu_busy_retry is soft: a render is lending the GPU between segments — wait & retry
+        if (body?.error?.code === "gpu_busy_retry" && attempt < BORROW_RETRY_MAX) {
+          setRetrying(true);
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+          return play(url, attempt + 1);
+        }
         throw new Error(body?.error?.message ?? `preview failed (${res.status})`);
       }
+      setRetrying(false);
       const el = new Audio(URL.createObjectURL(await res.blob()));
       audioRef.current = el;
       el.onended = () => setBusy(null);
       await el.play();
     } catch (e) {
       setBusy(null);
+      setRetrying(false);
       setError(e instanceof Error ? e.message : String(e));
     }
   };
-  return { play, busy, error };
+  return { play, busy, error, retrying };
 }
 
 const presetPreviewUrl = (id: string) => `/api/engines/kokoro/preview?preset=${id}`;
@@ -294,7 +344,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
       title="hear this on the standard audition line"
       onClick={() => demo.play(url)}
     >
-      {demo.busy === url ? "playing…" : label}
+      {demo.busy === url ? (demo.retrying ? "queued behind render…" : "playing…") : label}
     </button>
   );
   const totalWeight = layers.reduce((a, l) => a + l.weight, 0) || 1;

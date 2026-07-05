@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # UI via /api/system limits so the client can refuse early instead of eating a 413.
     max_upload_bytes: int = Field(100 * 1024 * 1024, gt=0)
 
+    # Engine borrowing (F1). Max seconds an audition waits for a running render to lend its
+    # resident engine between segments before falling back to a soft gpu_busy_retry; also
+    # the safety timeout the parked render waits for the borrower's done signal. ~30s
+    # absorbs a Chatterbox segment + its CPU whisper validation without spurious refusals.
+    borrow_grant_timeout_s: float = Field(30.0, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:

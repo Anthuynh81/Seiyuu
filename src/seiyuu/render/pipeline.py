@@ -10,9 +10,12 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import soundfile as sf
+
+if TYPE_CHECKING:
+    from seiyuu.api.concurrency import BorrowBroker
 
 from seiyuu.attribute.models import AttributionReport
 from seiyuu.engines import TTSEngine, get_engine
@@ -22,7 +25,7 @@ from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
 from seiyuu.repository import atomic_write_text
-from seiyuu.validate import ValidationResult, Validator
+from seiyuu.validate import SegmentWords, ValidationResult, Validator, WordTiming
 from seiyuu.voices import (
     VoiceAssignment,
     VoiceLibrary,
@@ -104,6 +107,19 @@ class RenderResult:
         return sum(s.duration_seconds for c in self.manifest.chapters for s in c.segments)
 
 
+def _validate_capturing_words(
+    validator: Validator, wav_path: Path, text: str
+) -> tuple[ValidationResult, list[WordTiming] | None]:
+    """One transcription pass that yields BOTH the verdict and the word timings when the
+    validator supports it (the real ``Validator``); otherwise the verdict alone. This is the
+    F2 piggyback — a `requires_validation` engine already transcribes every attempt, so its
+    word alignment costs no extra whisper pass. Scripted test validators exposing only
+    ``validate`` transparently fall back to no words."""
+    if hasattr(validator, "validate_with_words"):
+        return validator.validate_with_words(wav_path, text)
+    return validator.validate(wav_path, text), None
+
+
 def _synthesize_validated(
     engine: TTSEngine,
     text: str,
@@ -114,23 +130,26 @@ def _synthesize_validated(
     validator: Validator | None,
     max_retries: int,
     cache_dir: Path,
-) -> tuple[Any, ValidationResult | None, int]:
-    """Synthesize one segment, returning (audio, validation, attempts).
+) -> tuple[Any, ValidationResult | None, int, list[WordTiming] | None]:
+    """Synthesize one segment, returning (audio, validation, attempts, words).
 
     Deterministic engines (or when no validator is supplied) synthesize once and skip
-    validation. LLM-style engines (`requires_validation`) transcribe each attempt and, on a
-    failure, retry with a fresh seed up to `max_retries` more times, keeping the best-scoring
-    attempt. A persistent failure is returned (not raised) so the caller can flag it for review
-    rather than silently ship — or drop — the segment.
+    validation (and produce no words — those engines align lazily on first Listen). LLM-style
+    engines (`requires_validation`) transcribe each attempt and, on a failure, retry with a
+    fresh seed up to `max_retries` more times, keeping the best-scoring attempt. The kept
+    attempt's word timings (F2) ride out of the SAME transcription used for its score, so the
+    seek points target exactly the audio that ships. A persistent failure is returned (not
+    raised) so the caller can flag it for review rather than silently ship — or drop — it.
     """
     base = dict(settings)
     if not engine.requires_validation or validator is None:
         synth = {**base, **({"seed": seed} if seed is not None else {})}
-        return engine.synthesize(text, voice_arg, synth), None, 1
+        return engine.synthesize(text, voice_arg, synth), None, 1, None
 
     tmp = Path(cache_dir) / "_validate.tmp.wav"
     best_audio: Any = None
     best_result: ValidationResult | None = None
+    best_words: list[WordTiming] | None = None
     attempts = 0
     try:
         for i in range(max_retries + 1):
@@ -139,14 +158,14 @@ def _synthesize_validated(
             synth = {**base, **({"seed": attempt_seed} if attempt_seed is not None else {})}
             audio = engine.synthesize(text, voice_arg, synth)
             audio.save(tmp)
-            result = validator.validate(tmp, text)
+            result, words = _validate_capturing_words(validator, tmp, text)
             if best_result is None or result.score > best_result.score:
-                best_audio, best_result = audio, result
+                best_audio, best_result, best_words = audio, result, words
             if result.ok:
                 break
     finally:
         tmp.unlink(missing_ok=True)
-    return best_audio, best_result, attempts
+    return best_audio, best_result, attempts, best_words
 
 
 def render_book(
@@ -166,6 +185,7 @@ def render_book(
     allow_paid: bool = False,
     max_paid_usd: float | None = None,
     check_cancel: Callable[[], None] | None = None,
+    broker: "BorrowBroker | None" = None,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
@@ -177,6 +197,11 @@ def render_book(
     at the end. ``check_cancel`` (when given) is called between chapters and between
     blocks and may raise to abort cooperatively; synthesized segments are already cached
     and no manifest is written, so a re-run resumes from the cache.
+
+    ``broker`` (F1, server only) lets a waiting audition borrow this render's resident
+    engine between synthesis units: the engine is published once and offered at each
+    ``check`` yield point (after cancel), and closed before the GPU is freed. Default None
+    keeps the CLI/tests unchanged.
     """
     settings = settings or {}
     book_output_dir = Path(book_output_dir)
@@ -184,6 +209,15 @@ def render_book(
     say = progress or (lambda _msg: None)
     check = check_cancel or (lambda: None)
     gpu = gpu or get_gpu_manager()
+
+    def lend() -> None:
+        # Offer this render's own resident instance to a waiting audition; parks here until
+        # the audition finishes one segment (never while synthesizing, always after cancel).
+        if broker is not None and engine.uses_gpu:
+            broker.serve(engine.engine_id, engine)
+
+    if broker is not None and engine.uses_gpu:
+        broker.publish(engine.engine_id, engine)
 
     if library is not None and (
         library.meta_path(voice_id).is_file() or library.reference_path(voice_id).is_file()
@@ -211,10 +245,12 @@ def render_book(
             if wanted and ci not in wanted:
                 continue
             check()
+            lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
             segments: list[RenderedSegment] = []
             for block in chapter.blocks:
                 check()
+                lend()
                 if block.type is BlockType.SCENE_BREAK:
                     segments.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
@@ -245,7 +281,7 @@ def render_book(
                             else nullcontext()
                         )
                         with ctx:
-                            audio, validation, attempts = _synthesize_validated(
+                            audio, validation, attempts, words = _synthesize_validated(
                                 engine, text, voice_id, settings, seed,
                                 validator=validator, max_retries=validation_max_retries,
                                 cache_dir=cache.cache_dir,
@@ -261,8 +297,10 @@ def render_book(
                     wav_path = cache.put(key, audio)
                     if validation is not None:
                         cache.put_validation(key, validation)
-                    synthesized += 1
                     duration = audio.duration_seconds
+                    if words is not None:  # F2 piggyback: validated engines cache words inline
+                        cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
+                    synthesized += 1
                 if validation is not None and not validation.ok:
                     validation_failures += 1
                     say(
@@ -286,6 +324,10 @@ def render_book(
                 RenderedChapter(index=ci, title=chapter.title, segments=segments)
             )
     finally:
+        # Stop lending BEFORE the engine is unloaded: an in-flight request gets an
+        # immediate None (soft retry), never an about-to-be-freed instance.
+        if broker is not None:
+            broker.close()
         if engine.uses_gpu:
             # free only what this render could have loaded: a cloud-only render must not
             # evict another consumer's resident model from the shared manager
@@ -329,6 +371,7 @@ def render_book_multivoice(
     max_paid_usd: float | None = None,
     cloud_max_slots: int = 10,
     check_cancel: Callable[[], None] | None = None,
+    broker: "BorrowBroker | None" = None,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -342,6 +385,11 @@ def render_book_multivoice(
     ``check_cancel`` (when given) is called between chapters and between segments and may
     raise to abort cooperatively; synthesized segments are already cached and no manifest
     is written, so a re-run resumes from the cache. The GPU is freed either way.
+
+    ``broker`` (F1, server only) lends the render's OWN resident engine to a waiting
+    audition between segments. The lendable engine varies segment to segment (this is a
+    multi-engine loop), so it is (re)published right after each engine is chosen and the
+    currently-resident one is offered at every ``check`` yield point (after cancel).
     """
     book_output_dir = Path(book_output_dir)
     cache = SegmentCache(book_output_dir / "cache")
@@ -354,6 +402,14 @@ def render_book_multivoice(
     engines: dict[str, TTSEngine] = {}
     metas: dict[str, VoiceMeta] = {}
     voices_used: dict[str, VoiceUse] = {}
+    # The engine currently resident and free to lend between segments (F1). Updated after
+    # each engine is chosen; None until the first GPU segment establishes residency.
+    lent_id: str | None = None
+    lent_engine: TTSEngine | None = None
+
+    def lend() -> None:
+        if broker is not None and lent_engine is not None:
+            broker.serve(lent_id, lent_engine)
 
     def engine_for(engine_id: str) -> TTSEngine:
         if engine_id not in engines:
@@ -382,6 +438,7 @@ def render_book_multivoice(
             if (wanted and ci not in wanted) or ci not in attributed:
                 continue
             check()
+            lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
             by_block: dict[str, list] = {}
             for seg in attributed[ci].segments:
@@ -394,9 +451,15 @@ def render_book_multivoice(
                     continue
                 for seg in by_block.get(block.id, []):
                     check()
+                    lend()
                     voice_id = resolve_voice(seg, assignment)
                     meta = meta_for(voice_id)  # verifies consent on first sight
                     engine = engine_for(meta.engine)
+                    if broker is not None and engine.uses_gpu:
+                        # this segment's engine is what will be resident; offer it at the
+                        # next yield point (lend() reads these via closure)
+                        broker.publish(meta.engine, engine)
+                        lent_id, lent_engine = meta.engine, engine
                     text = normalize_text(seg.text, profile=profile_for(meta.engine))
                     engine_voice, settings = render_voice_args(meta)
                     key = SegmentKey.build(
@@ -431,7 +494,7 @@ def render_book_multivoice(
                                 else nullcontext()
                             )
                             with ctx:
-                                audio, validation, attempts = _synthesize_validated(
+                                audio, validation, attempts, words = _synthesize_validated(
                                     engine, text, synth_voice, settings, meta.seed,
                                     validator=validator, max_retries=validation_max_retries,
                                     cache_dir=cache.cache_dir,
@@ -446,8 +509,10 @@ def render_book_multivoice(
                         wav_path = cache.put(key, audio)
                         if validation is not None:
                             cache.put_validation(key, validation)
-                        synthesized += 1
                         duration = audio.duration_seconds
+                        if words is not None:  # F2 piggyback: validated engines cache words inline
+                            cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
+                        synthesized += 1
                     if validation is not None and not validation.ok:
                         validation_failures += 1
                         say(
@@ -479,6 +544,10 @@ def render_book_multivoice(
                 RenderedChapter(index=ci, title=chapter.title, segments=rendered)
             )
     finally:
+        # Stop lending BEFORE the engine is unloaded: an in-flight request gets an
+        # immediate None (soft retry), never an about-to-be-freed instance.
+        if broker is not None:
+            broker.close()
         # free the GPU for the next stage/process — but only if this render acquired it;
         # a cloud-only render must not evict another consumer's resident model
         if used_gpu:

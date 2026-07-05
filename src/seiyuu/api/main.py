@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from seiyuu import __version__
-from seiyuu.api.concurrency import AuditionSlot, HeavyWorkGate
+from seiyuu.api.concurrency import AuditionSlot, BorrowBroker, HeavyWorkGate
 from seiyuu.api.errors import register_error_handlers
 from seiyuu.api.handlers import build_handlers
 from seiyuu.api.registry import EngineRegistry
@@ -32,6 +32,7 @@ from seiyuu.jobs import JobRunner
 from seiyuu.repository import JobStore
 from seiyuu.repository.jobs import JOBS_DB_NAME
 from seiyuu.settings import Settings, get_settings
+from seiyuu.validate import Validator
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,10 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         store = JobStore(cfg.data_dir / JOBS_DB_NAME)
         registry = EngineRegistry(cfg)
         gate = HeavyWorkGate()
-        runner = JobRunner(store, build_handlers(cfg, registry, gate))
+        # F1 engine-borrowing rendezvous: a running render lends its resident engine to a
+        # waiting audition between its segments. Process-local singleton, like the gate.
+        broker = BorrowBroker(grant_timeout_s=cfg.borrow_grant_timeout_s)
+        runner = JobRunner(store, build_handlers(cfg, registry, gate, broker))
         reconciled = runner.start()  # reconcile FIRST — before any request is served
         if reconciled:
             logger.info("startup reconcile settled %d orphaned job row(s)", reconciled)
@@ -56,6 +60,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         app.state.store = store
         app.state.registry = registry
         app.state.gate = gate
+        app.state.borrow_broker = broker
         app.state.runner = runner
         app.state.reconciled_at_startup = reconciled
         # Shared by every job-creating route (and the M6b-6 audition busy-check) so the
@@ -65,6 +70,18 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         # vanish between an assignment's validation and its durable write.
         app.state.voices_mutex = threading.Lock()
         app.state.audition_slot = AuditionSlot()
+        # F2 forced alignment: ONE process-shared whisper aligner (lazy model load) + one lock
+        # so read-along requests serialize. Pinned to CPU/int8 REGARDLESS of whisper_device: this
+        # runs on request threads CONCURRENTLY with renders (Listen-while-rendering), so honoring
+        # a cuda opt-in would load whisper onto the GPU behind the resource manager's back and
+        # contend with the resident TTS model — breaking the one-heavy-model rule (sign-off D3).
+        app.state.aligner = Validator(
+            model_size=cfg.validation_model_size,
+            device="cpu",
+            compute_type="int8",
+            min_ratio=cfg.validation_min_ratio,
+        )
+        app.state.align_lock = threading.Lock()
         try:
             yield
         finally:

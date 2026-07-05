@@ -16,11 +16,13 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from seiyuu.api.deps import GateDep, RegistryDep, RunnerDep, SettingsDep, StoreDep
+from seiyuu.api.deps import BrokerDep, GateDep, RegistryDep, RunnerDep, SettingsDep, StoreDep
 from seiyuu.api.enqueue import enqueue_job
 from seiyuu.api.errors import ApiError
 from seiyuu.api.registry import ENGINE_FACTS, catalog_ids, weights_cached
-from seiyuu.api.routes.voices import _refuse_conflicts  # shared audition-refusal predicate
+
+# shared audition-refusal predicate + BORROW branch so voices.py and engines.py can't drift
+from seiyuu.api.routes.voices import Verdict, _refuse_conflicts, borrow_and_synthesize
 from seiyuu.api.schemas import (
     AUDITION_DEFAULT_TEXT,
     EngineInfo,
@@ -160,6 +162,7 @@ def preview_voice(
     registry: RegistryDep,
     store: StoreDep,
     gate: GateDep,
+    broker: BrokerDep,
     preset: str | None = None,
     components: str | None = None,
 ) -> FileResponse:
@@ -203,14 +206,15 @@ def preview_voice(
     with ExitStack() as stack:
         with request.app.state.enqueue_mutex:
             # same predicate as auditions (gpu_busy incl. queued GPU jobs, engine_cold
-            # with the warmup recourse), evaluated under the same mutex
+            # with the warmup recourse, and the F1 BORROW verdict), under the same mutex
             live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
-            _refuse_conflicts(meta, get_engine_class("kokoro"), live, registry)
+            verdict = _refuse_conflicts(meta, get_engine_class("kokoro"), live, registry, broker)
             if not stack.enter_context(request.app.state.audition_slot.try_hold()):
                 raise ApiError(
                     409, "audition_in_flight", "another audition is already synthesizing"
                 )
-            if not stack.enter_context(gate.try_hold("audition")):
+            # BORROW rides a running kokoro render's resident engine and SKIPS the gate.
+            if verdict is Verdict.EXCLUSIVE and not stack.enter_context(gate.try_hold("audition")):
                 running = next((j for j in live if j.state is JobState.RUNNING), None)
                 raise ApiError(
                     409,
@@ -221,10 +225,18 @@ def preview_voice(
         engine = registry.get("kokoro")
         engine_voice, settings = render_voice_args(meta)
         normalized = normalize_text(AUDITION_DEFAULT_TEXT, profile=profile_for("kokoro"))
+        synth = lambda eng: eng.synthesize(  # noqa: E731
+            normalized, engine_voice, {**settings, "seed": meta.seed}
+        )
         try:
-            with get_gpu_manager().acquire(engine, "engine:kokoro"):
-                audio = engine.synthesize(normalized, engine_voice, {**settings, "seed": meta.seed})
-            # stays lazily resident, same as auditions — the next preview is warm
+            if verdict is Verdict.BORROW:
+                audio = borrow_and_synthesize(
+                    broker, "kokoro", cfg.borrow_grant_timeout_s, live, synth
+                )
+            else:
+                with get_gpu_manager().acquire(engine, "engine:kokoro"):
+                    audio = synth(engine)
+                # stays lazily resident, same as auditions — the next preview is warm
         except SynthesisError as exc:
             raise ApiError(502, "upstream", str(exc)) from exc
         out_path.parent.mkdir(parents=True, exist_ok=True)

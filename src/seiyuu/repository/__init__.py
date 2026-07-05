@@ -9,8 +9,10 @@ runs the queued/running/failed/canceled states marker files cannot express.
 
 from seiyuu.repository.atomic import atomic_write_bytes, atomic_write_text
 from seiyuu.repository.books import (
+    BookPurgeResult,
     BookStatus,
     RepositoryError,
+    delete_book_trees,
     get_book_status,
     list_books,
     resolve_book_id,
@@ -27,6 +29,7 @@ from seiyuu.repository.jobs import (
 from seiyuu.repository.lock import file_lock
 
 __all__ = [
+    "BookPurgeResult",
     "BookStatus",
     "IllegalTransitionError",
     "Job",
@@ -38,6 +41,7 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_text",
     "default_jobs_db_path",
+    "delete_book_trees",
     "file_lock",
     "get_book_status",
     "list_books",

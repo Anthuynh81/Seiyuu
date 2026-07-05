@@ -2,8 +2,8 @@ import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ApiError } from "../api/client";
-import { useBooks, useIngest } from "../api/hooks";
-import type { BookCard as BookCardT } from "../api/types";
+import { useBooks, useDeleteBook, useIngest } from "../api/hooks";
+import type { BookCard as BookCardT, JobOut, PaidArtifacts } from "../api/types";
 import { KIND_STAGE, STAGES } from "../api/types";
 
 function SignalPath({ book }: { book: BookCardT }) {
@@ -36,9 +36,97 @@ function JobLine({ book }: { book: BookCardT }) {
   );
 }
 
+const dangerStyle = { borderColor: "var(--clip)", color: "var(--clip)" } as const;
+
+/** Two-step book delete. Step 1 is a plain confirm; a 402 escalates to a second, blunt
+    confirm that re-sends confirm_paid=true and spells out the paid segments it discards.
+    409 (a live job) and 500 (partial delete) render their own dead-ends. */
+function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => void }) {
+  const del = useDeleteBook();
+  const err = del.error instanceof ApiError ? del.error : null;
+  const run = (confirmPaid: boolean) => del.mutate({ bookId: book.book_id, confirmPaid }, { onSuccess: onClose });
+
+  const paid = err?.code === "payment_confirmation_required" ? (err.detail as PaidArtifacts) : null;
+  const conflict = err?.code === "conflicting_job" ? (err.detail as JobOut) : null;
+  const partial = err?.code === "partial_delete" ? (err.detail as { survivors: string[] }) : null;
+  const otherErr = err && !paid && !conflict && !partial ? err : null;
+  const title = book.title ?? book.book_id;
+
+  return (
+    <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="dialog">
+        <div className="dh">
+          <b>{paid ? "Discard paid renders?" : "Delete book"}</b>
+          <button className="key quiet" onClick={onClose}>esc</button>
+        </div>
+        <div className="db">
+          {conflict ? (
+            <div className="refusal">
+              <span className="tag">conflicting_job</span>
+              <p>
+                a {conflict.kind} job is {conflict.state} for this book — cancel it in the transport bar below, then
+                delete.
+              </p>
+            </div>
+          ) : partial ? (
+            <div className="refusal">
+              <span className="tag">partial_delete</span>
+              <p>
+                the delete only partly completed — these paths survived and may need a retry or a manual sweep:
+                <br />
+                {partial.survivors.map((s) => (
+                  <span key={s} className="mono" style={{ display: "block", color: "var(--caution)" }}>{s}</span>
+                ))}
+              </p>
+            </div>
+          ) : paid ? (
+            <>
+              <p style={{ margin: "0 0 10px", color: "var(--ink-2)" }}>
+                <b style={{ color: "var(--clip)" }}>{paid.paid_segment_count}</b> paid cloud segment(s) were rendered
+                for <b>{title}</b> — deleting the book discards them, and reproducing them costs real money
+                {paid.estimated_usd !== null && ` (~$${paid.estimated_usd.toFixed(2)})`}.
+              </p>
+              <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                engines: {paid.engines.join(", ") || "—"}
+                {paid.paid_voice_ids.length > 0 && ` · voices: ${paid.paid_voice_ids.join(", ")}`}
+              </div>
+            </>
+          ) : (
+            <p style={{ margin: 0, color: "var(--ink-2)" }}>
+              Permanently delete <b>{title}</b> — its ingest, attribution, casting, and any rendered/assembled audio.
+              This cannot be undone.
+            </p>
+          )}
+          {otherErr && <div className="errline" style={{ marginTop: 12 }}>{otherErr.message}</div>}
+        </div>
+        <div className="df">
+          <button className="key quiet" onClick={onClose}>
+            {conflict ? "close" : "cancel"}
+          </button>
+          {conflict ? null : partial ? (
+            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(true)}>
+              {del.isPending ? "retrying…" : "retry delete"}
+            </button>
+          ) : paid ? (
+            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(true)}>
+              {del.isPending ? "deleting…" : `discard ${paid.paid_segment_count} paid segment(s) & delete`}
+            </button>
+          ) : (
+            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(false)}>
+              {del.isPending ? "deleting…" : "delete book"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Card({ book }: { book: BookCardT }) {
   const nav = useNavigate();
   const go = (screen: string) => nav(`/${screen}?book=${encodeURIComponent(book.book_id)}`);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const blocked = book.active_job !== null;
   return (
     <div className="bookcard">
       <h3>{book.title ?? book.book_id}</h3>
@@ -59,7 +147,18 @@ function Card({ book }: { book: BookCardT }) {
         <button className="key quiet" onClick={() => go("render")}>
           render &amp; jobs
         </button>
+        <span style={{ flex: 1 }} />
+        <button
+          className="key quiet"
+          style={blocked ? undefined : dangerStyle}
+          disabled={blocked}
+          title={blocked ? "a job is live — cancel it in the transport bar before deleting" : "delete this book"}
+          onClick={() => setConfirmDelete(true)}
+        >
+          delete
+        </button>
       </div>
+      {confirmDelete && <DeleteBookDialog book={book} onClose={() => setConfirmDelete(false)} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildClipWords, groupPlayableRows, wordWeight } from "./words";
+import { alignWordTimings, buildClipWords, foldToken, groupPlayableRows, wordWeight, type WhisperWord } from "./words";
 
 const row = (block: string, segIdx: number, audioSeg: number, dur: number, speaker: string | null, text: string) => ({
   block_id: block,
@@ -95,5 +95,93 @@ describe("buildClipWords — interpolated offsets", () => {
 
   it("whitespace-only text yields no words and no crash", () => {
     expect(buildClipWords([{ text: "   ", el: el() }], 3)).toEqual([]);
+  });
+
+  it("each word's end meets the next word's offset; the last ends at the clip duration", () => {
+    const words = buildClipWords([{ text: "one two three", el: el() }], 6.0);
+    expect(words).toHaveLength(3);
+    for (let i = 0; i < words.length - 1; i++) expect(words[i].end).toBe(words[i + 1].offset);
+    expect(words[words.length - 1].end).toBe(6.0);
+    for (const w of words) expect(w.end).toBeGreaterThan(w.offset);
+  });
+});
+
+describe("alignWordTimings — whisper words drive real timing over source tokens", () => {
+  const ww = (word: string, start: number, end: number): WhisperWord => ({ word, start, end });
+
+  it("1:1 — every display token takes its whisper (start,end) verbatim", () => {
+    const spans = alignWordTimings(
+      ["The", "cat", "sat"],
+      [ww("the", 0, 0.5), ww("cat", 0.5, 1.0), ww("sat", 1.0, 1.8)],
+      1.8,
+    );
+    expect(spans).toEqual([
+      { offset: 0, end: 0.5 },
+      { offset: 0.5, end: 1.0 },
+      { offset: 1.0, end: 1.8 },
+    ]);
+  });
+
+  it("whisper-shorter — an unmatched display token is interpolated between its anchors", () => {
+    // "dear" has no spoken counterpart; it fills the gap between hello.end and world.start
+    const spans = alignWordTimings(
+      ["hello", "dear", "world"],
+      [ww("hello", 0, 1), ww("world", 2, 3)],
+      3,
+    );
+    expect(spans[0]).toEqual({ offset: 0, end: 1 });
+    expect(spans[1]).toEqual({ offset: 1, end: 2 }); // interpolated across the [1,2] gap
+    expect(spans[2]).toEqual({ offset: 2, end: 3 });
+  });
+
+  it("whisper-longer — an extra spoken token is ignored, anchors still land exactly", () => {
+    const spans = alignWordTimings(
+      ["hello", "world"],
+      [ww("hello", 0, 1), ww("cruel", 1, 1.5), ww("world", 1.5, 2.5)],
+      2.5,
+    );
+    expect(spans[0]).toEqual({ offset: 0, end: 1 });
+    expect(spans[1]).toEqual({ offset: 1.5, end: 2.5 });
+  });
+
+  it("folds punctuation, digits, and curly quotes so display and spoken forms still anchor", () => {
+    expect(foldToken("“Hello,”")).toBe("hello");
+    expect(foldToken("1,000")).toBe("1000");
+    expect(foldToken("don’t")).toBe("dont");
+    const spans = alignWordTimings(
+      ["“Hello,”", "world.", "1,000"],
+      [ww("hello", 0, 1), ww("world", 1, 2), ww("1000", 2, 3)],
+      3,
+    );
+    expect(spans).toEqual([
+      { offset: 0, end: 1 },
+      { offset: 1, end: 2 },
+      { offset: 2, end: 3 },
+    ]);
+  });
+
+  it("no whisper words -> even spread fallback of the right length", () => {
+    const spans = alignWordTimings(["a", "b", "c", "d"], [], 4);
+    expect(spans).toHaveLength(4);
+    expect(spans[0].offset).toBe(0);
+    expect(spans[3].end).toBe(4);
+  });
+
+  it("times are monotonic non-decreasing and clamped inside the clip", () => {
+    // leading + trailing unmatched tokens, one interior anchor
+    const spans = alignWordTimings(
+      ["intro", "here", "cat", "then", "outro"],
+      [ww("cat", 2, 2.5)],
+      5,
+    );
+    expect(spans).toHaveLength(5);
+    for (let i = 1; i < spans.length; i++) expect(spans[i].offset).toBeGreaterThanOrEqual(spans[i - 1].offset);
+    for (const s of spans) {
+      expect(s.end).toBeGreaterThanOrEqual(s.offset);
+      expect(s.offset).toBeGreaterThanOrEqual(0);
+      expect(s.end).toBeLessThanOrEqual(5);
+    }
+    // the anchored token keeps its exact whisper time
+    expect(spans[2]).toEqual({ offset: 2, end: 2.5 });
   });
 });

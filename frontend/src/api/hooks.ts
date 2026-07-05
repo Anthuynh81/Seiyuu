@@ -1,10 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError, postForm, postJson } from "./client";
 import type {
   AssignmentDraftResponse,
   AssignmentWrite,
   AuditionOut,
+  BookDeletedOut,
   BookDetail,
   BooksOut,
   CharactersOverview,
@@ -21,6 +22,7 @@ import type {
   RenderRequest,
   RenderSummaryOut,
   SegmentBrowserOut,
+  SegmentWords,
   SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
@@ -66,6 +68,24 @@ export function useIngest() {
       return postForm<IngestResponse>("/api/books", form);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["books"] }),
+  });
+}
+
+/** Delete a whole book. `confirm_paid` gates the discard of paid cloud renders: the first
+    call sends false; a 402 (payment_confirmation_required, detail = PaidArtifacts) lets the
+    UI escalate by re-sending true. 409 (conflicting_job) and 500 (partial_delete) propagate
+    to the caller as ApiError. */
+export function useDeleteBook() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ bookId, confirmPaid }: { bookId: string; confirmPaid: boolean }) =>
+      api<BookDeletedOut>(`/api/books/${encodeURIComponent(bookId)}?confirm_paid=${confirmPaid}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["books"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
   });
 }
 
@@ -172,6 +192,58 @@ export function useSegments(bookId: string | null, chapter: number, attributed: 
     queryKey: ["segments", bookId, chapter],
     queryFn: () => api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`),
     enabled: bookId !== null && attributed,
+  });
+}
+
+/** One clip = one rendered wav we want whisper word-timings for. `audioKey` is the wav's
+    SegmentKey hash: it changes iff the audio content changes, so it doubles as the
+    react-query cache key AND the cache-buster (a re-render re-fetches, never serves stale). */
+export interface SegmentWordsClip {
+  key: string; // `${block_id}:${audio_segment}` — matches the player clip key
+  blockId: string;
+  segment: number;
+  audioKey: string | null;
+}
+
+export interface SegmentWordsResult {
+  /** Only clips whose words resolved (200) land here; a 404 or still-loading clip is absent,
+      and the read-along keeps its length-interpolated fallback for it. */
+  byKey: Map<string, SegmentWords>;
+  /** Stable signature of which clips have resolved — cheap dependency for the apply effect. */
+  sig: string;
+}
+
+/** Fetch whisper word-timings for every clip in a chapter at once (react-query `useQueries`,
+    one entry per wav, keyed by audio_key). 404 degrades to null (no timing) rather than
+    throwing, so a scene-break / not-yet-rendered clip simply stays on interpolation. */
+export function useSegmentWords(bookId: string | null, clips: SegmentWordsClip[]): SegmentWordsResult {
+  return useQueries({
+    queries: clips.map((c) => ({
+      queryKey: ["segment-words", bookId, c.key, c.audioKey],
+      queryFn: async (): Promise<SegmentWords | null> => {
+        try {
+          return await api<SegmentWords>(
+            `/api/books/${bookId}/segments/${c.blockId}/words?segment=${c.segment}`,
+          );
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 404) return null; // no timing — interpolate
+          throw e;
+        }
+      },
+      enabled: bookId !== null,
+      staleTime: Infinity, // content-addressed by audio_key; only a re-render (new key) refetches
+    })),
+    combine: (results): SegmentWordsResult => {
+      const byKey = new Map<string, SegmentWords>();
+      const loaded: string[] = [];
+      results.forEach((r, i) => {
+        if (r.data) {
+          byKey.set(clips[i].key, r.data);
+          loaded.push(clips[i].key);
+        }
+      });
+      return { byKey, sig: loaded.sort().join("|") };
+    },
   });
 }
 

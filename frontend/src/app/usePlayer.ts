@@ -4,7 +4,8 @@ import { createContext, useContext } from "react";
     start offsets WITHIN the clip so the read-along can highlight and seek by word. */
 export interface PlayWord {
   el: HTMLElement;
-  offset: number; // seconds from the clip start
+  offset: number; // seconds from the clip start (when this word begins)
+  end: number; // seconds from the clip start (when this word ends) — makes the active-word test exact
 }
 export interface PlayClip {
   src: string;
