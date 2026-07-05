@@ -147,6 +147,66 @@ class CharacterRegistry(BaseModel):
         return next((c for c in self.characters if c.matches_name(name)), None)
 
 
+class CharacterEvidence(BaseModel):
+    """One character's identifying evidence shown to the LLM adjudicator (read-only view).
+
+    A bounded projection of a :class:`Character`: the adjudicator sees only these fields for
+    the two members of a candidate pair, never the free registry, so it can never introduce
+    a merge the deterministic generator did not surface.
+    """
+
+    id: str
+    canonical_name: str
+    aliases: list[str] = []
+    gender: str | None = None
+    age_hint: str | None = None
+    description: str | None = None
+
+    @classmethod
+    def from_character(cls, char: "Character") -> "CharacterEvidence":
+        return cls(
+            id=char.id,
+            canonical_name=char.canonical_name,
+            aliases=list(char.aliases),
+            gender=char.gender,
+            age_hint=char.age_hint,
+            description=char.description,
+        )
+
+
+class CandidatePair(BaseModel):
+    """A deterministically-generated merge candidate the LLM only APPROVES/REJECTS.
+
+    ``pair_id`` is derived from the two (sorted) character ids so it is stable across reruns;
+    ``generator`` records which rule proposed it (``G1``/``G2``/``G3``). The LLM keys its
+    verdict by ``pair_id`` and can never emit an id or name of its own.
+    """
+
+    pair_id: str
+    generator: str
+    a: CharacterEvidence
+    b: CharacterEvidence
+
+
+class PairVerdict(BaseModel):
+    """The LLM's approve/reject decision for one :class:`CandidatePair`, keyed by ``pair_id``.
+
+    Verdicts whose ``pair_id`` is not in the generated set are ignored by the adjudicator, so
+    a stray or hallucinated id can never cause a merge.
+    """
+
+    pair_id: str
+    same_person: bool
+    confidence: float = 0.0
+    justification: str = ""
+
+
+class AdjudicationResult(BaseModel):
+    """Schema-enforced LLM output: one verdict per presented candidate pair."""
+
+    verdicts: list[PairVerdict] = []
+
+
 class FlaggedBlock(BaseModel):
     """A block whose attribution failed the reconstruction invariant after all retries."""
 

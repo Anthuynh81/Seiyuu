@@ -11,9 +11,9 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
-from seiyuu.attribute.models import ChunkAttribution
+from seiyuu.attribute.models import ChunkAttribution, PairVerdict
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS attribution_chunks (
@@ -26,8 +26,22 @@ CREATE TABLE IF NOT EXISTS attribution_chunks (
     payload        TEXT NOT NULL,
     created_at     TEXT NOT NULL,
     PRIMARY KEY (book_id, chapter_index, chunk_hash, provider_id, model_id, prompt_version)
+);
+CREATE TABLE IF NOT EXISTS alias_adjudications (
+    book_id                    TEXT NOT NULL,
+    provider_id                TEXT NOT NULL,
+    model_id                   TEXT NOT NULL,
+    adjudication_prompt_version TEXT NOT NULL,
+    candidates_digest          TEXT NOT NULL,
+    payload                    TEXT NOT NULL,
+    created_at                 TEXT NOT NULL,
+    PRIMARY KEY (book_id, provider_id, model_id, adjudication_prompt_version, candidates_digest)
 )
 """
+
+# The list[PairVerdict] payload is (de)serialized through this adapter so a cache hit
+# replays the exact verdicts the LLM returned — no re-billing on an unchanged candidate set.
+_VERDICTS = TypeAdapter(list[PairVerdict])
 
 
 class ChunkCacheKey(BaseModel, frozen=True):
@@ -49,6 +63,31 @@ class ChunkCacheKey(BaseModel, frozen=True):
         )
 
 
+class AdjudicationCacheKey(BaseModel, frozen=True):
+    """Per-book alias-adjudication cache key (mirrors :class:`ChunkCacheKey`).
+
+    ``candidates_digest`` is a deterministic hash over the sorted candidate pairs (see
+    ``adjudicate.candidates_digest``); because the registry is rebuilt deterministically from
+    the cached chunks, the digest is stable across reruns, so the LLM fires ONLY when the
+    candidate set genuinely changes and ``attribution.json`` never churns on a no-op rerun.
+    """
+
+    book_id: str
+    provider_id: str
+    model_id: str
+    adjudication_prompt_version: str
+    candidates_digest: str
+
+    def _columns(self) -> tuple:
+        return (
+            self.book_id,
+            self.provider_id,
+            self.model_id,
+            self.adjudication_prompt_version,
+            self.candidates_digest,
+        )
+
+
 class AttributionCache:
     """Repository over the per-book SQLite attribution DB. Use as a context manager."""
 
@@ -57,7 +96,7 @@ class AttributionCache:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(_SCHEMA)
+        self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
     def get(self, key: ChunkCacheKey) -> ChunkAttribution | None:
@@ -75,6 +114,28 @@ class AttributionCache:
             "(book_id, chapter_index, chunk_hash, provider_id, model_id, prompt_version, "
             "payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (*key._columns(), attribution.model_dump_json(), datetime.now(UTC).isoformat()),
+        )
+        self._conn.commit()
+
+    def get_adjudication(self, key: AdjudicationCacheKey) -> list[PairVerdict] | None:
+        row = self._conn.execute(
+            "SELECT payload FROM alias_adjudications WHERE "
+            "book_id=? AND provider_id=? AND model_id=? AND "
+            "adjudication_prompt_version=? AND candidates_digest=?",
+            key._columns(),
+        ).fetchone()
+        return _VERDICTS.validate_json(row[0]) if row else None
+
+    def put_adjudication(self, key: AdjudicationCacheKey, verdicts: list[PairVerdict]) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO alias_adjudications "
+            "(book_id, provider_id, model_id, adjudication_prompt_version, candidates_digest, "
+            "payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                *key._columns(),
+                _VERDICTS.dump_json(verdicts).decode(),
+                datetime.now(UTC).isoformat(),
+            ),
         )
         self._conn.commit()
 

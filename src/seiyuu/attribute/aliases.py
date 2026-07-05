@@ -13,15 +13,30 @@ precision-over-recall rule (over-merging two distinct characters is the worst fa
   attributed lines — possible hallucinations). First names and nicknames are never
   auto-merged: a bare given name simply doesn't match a full name here, so it stays put.
 
-`resolve_chunk` (the incremental, per-chunk, cache-reproducible path) is untouched. The
-``resolver`` seam is reserved for a future opt-in LLM adjudication pass; it is not built or
-called here.
+`resolve_chunk` (the incremental, per-chunk, cache-reproducible path) is untouched.
+
+The ``resolver`` seam is the opt-in LLM adjudication pass (default OFF: ``resolver=None`` is
+byte-identical to the deterministic-only behavior). When present, it resolves ONLY the gray
+zone the two auto-rules skip — first-name<->full-name, title<->given, curated nicknames —
+over a small, deterministically-generated, ``_conflict``-clean candidate set it can only
+APPROVE/REJECT. The cardinal failure (over-merging two distinct characters) is guarded at
+GENERATION (the sibling-trap and ambiguous-leader cases never become candidates) and again
+by a hard ``_conflict`` veto re-applied AFTER the resolver returns, so a buggy or adversarial
+resolver can never bypass it.
 """
 
 from collections import Counter, defaultdict
 from typing import Protocol
 
-from seiyuu.attribute.models import AttributedChapter, Character, CharacterRegistry
+from seiyuu.attribute.models import (
+    AttributedChapter,
+    CandidatePair,
+    Character,
+    CharacterEvidence,
+    CharacterRegistry,
+    PairVerdict,
+)
+from seiyuu.attribute.nicknames import is_nickname_pair
 
 _TITLES = frozenset(
     {
@@ -39,11 +54,17 @@ _CHILD = {"master", "young"}
 
 
 class AliasResolver(Protocol):
-    """Seam for a future opt-in LLM adjudication of flagged candidates (not built yet)."""
+    """Opt-in LLM adjudication seam: approve/reject deterministically-generated candidates.
+
+    The typed contract is the precision lever — the resolver is handed pre-generated,
+    ``_conflict``-clean :class:`CandidatePair`s and returns a :class:`PairVerdict` per pair.
+    It can NEVER emit a character id/name or introduce a pair the generator did not surface;
+    the merge itself (survivor selection, the hard veto) stays in ``resolve_registry_aliases``.
+    """
 
     def resolve(
-        self, candidates: list[str], registry: CharacterRegistry
-    ) -> list[tuple[str, str]]: ...
+        self, candidates: list[CandidatePair], registry: CharacterRegistry
+    ) -> list[PairVerdict]: ...
 
 
 def _strip_title(name: str) -> str:
@@ -112,11 +133,175 @@ def _flatten(remap: dict[str, str]) -> dict[str, str]:
     return {loser: root(loser) for loser in remap}
 
 
+def _tokens(name: str) -> list[str]:
+    return name.casefold().split()
+
+
+def _is_bare_given(c: Character) -> bool:
+    """True if the record's entire name-set is a single, title-free token (e.g. `Elizabeth`)."""
+    names = _names(c)
+    if len(names) != 1:
+        return False
+    tok = next(iter(names))
+    return " " not in tok and tok not in _TITLES
+
+
+def _given_token(c: Character) -> str | None:
+    """The leading given-name token of the canonical name (None if it leads with a title)."""
+    toks = _tokens(c.canonical_name)
+    if toks and toks[0] not in _TITLES:
+        return toks[0]
+    return None
+
+
+def _title_surname(c: Character) -> str | None:
+    """Surname if the canonical name is exactly Title + Surname with no given name."""
+    toks = _tokens(c.canonical_name)
+    if len(toks) == 2 and toks[0] in _TITLES:
+        return toks[1]
+    return None
+
+
+def _given_surname(c: Character) -> str | None:
+    """Surname if the canonical name is Given (+ ...) + Surname led by a non-title token."""
+    toks = _tokens(c.canonical_name)
+    if len(toks) >= 2 and toks[0] not in _TITLES:
+        return toks[-1]
+    return None
+
+
+def _surname_or_none(c: Character) -> str | None:
+    """Trailing surname of a given-led multi-token name (used to guard nickname pairs)."""
+    return _given_surname(c)
+
+
+def _pair_id(a: Character, b: Character) -> str:
+    lo, hi = sorted((a.id, b.id))
+    return f"{lo}::{hi}"
+
+
+def _make_pair(a: Character, b: Character, generator: str) -> CandidatePair:
+    # Canonical a/b order (by id) so pair_id and the candidates_digest are rerun-stable.
+    lo, hi = (a, b) if a.id <= b.id else (b, a)
+    return CandidatePair(
+        pair_id=_pair_id(a, b),
+        generator=generator,
+        a=CharacterEvidence.from_character(lo),
+        b=CharacterEvidence.from_character(hi),
+    )
+
+
+def _generate_candidates(
+    registry: CharacterRegistry,
+    seg_count: Counter[str],
+    *,
+    cap: int,
+    use_nicknames: bool,
+) -> tuple[list[CandidatePair], list[str]]:
+    """Deterministically surface the gray-zone merge candidates the auto-rules skip.
+
+    Runs AFTER Rule 1/Rule 2 merged and ``_apply_merges`` mutated ``registry`` (so no already
+    -merged record is proposed). Three generators (G1 given-name containment, G2 restricted
+    title+surname, G3 curated nicknames) each emit ``_conflict``-clean pairs; ambiguous cases
+    (a bare given name leading 2+ full names; a title matching 2+ given names) are FLAGGED,
+    never turned into a merge candidate — the sibling-trap is closed here, not delegated to
+    the LLM. Returns ``(candidates, flag_notes)``; ``candidates`` is deduped, ``_conflict``-
+    clean, ordered G1<G2<G3, and capped at ``cap`` (overflow flagged, not paid for).
+    """
+    chars = registry.characters
+    flags: list[str] = []
+    ordered: list[CandidatePair] = []
+    seen: set[frozenset[str]] = set()
+
+    def emit(a: Character, b: Character, generator: str) -> None:
+        key = frozenset({a.id, b.id})
+        if a.id == b.id or key in seen:
+            return
+        if _conflict(a, b):  # honorific/gender clash — those stay flag-only, never adjudicated
+            return
+        seen.add(key)
+        ordered.append(_make_pair(a, b, generator))
+
+    # G1 — bare given name <-> full name it uniquely leads.
+    for c in chars:
+        if not _is_bare_given(c):
+            continue
+        token = next(iter(_names(c)))
+        leaders = [
+            other
+            for other in chars
+            if other.id != c.id
+            and any(len(toks) >= 2 and toks[0] == token for toks in map(_tokens, _names(other)))
+        ]
+        if len(leaders) == 1:
+            emit(c, leaders[0], "G1")
+        elif len(leaders) >= 2:
+            names = ", ".join(repr(x.canonical_name) for x in leaders)
+            flags.append(
+                f"alias: ambiguous given name '{token}' leads [{names}] — not merged, review"
+            )
+
+    # G2 — Title+Surname <-> Given+Surname (RESTRICTED: never two given-name records that
+    # share a surname — that sibling case is exactly what _conflict cannot catch).
+    given_by_surname: dict[str, list[Character]] = defaultdict(list)
+    for c in chars:
+        surname = _given_surname(c)
+        if surname is not None:
+            given_by_surname[surname].append(c)
+    for c in chars:
+        surname = _title_surname(c)
+        if surname is None:
+            continue
+        matches = given_by_surname.get(surname, [])
+        if len(matches) == 1:
+            emit(c, matches[0], "G2")
+        elif len(matches) >= 2:
+            names = ", ".join(repr(x.canonical_name) for x in matches)
+            flags.append(
+                f"alias: ambiguous title '{c.canonical_name}' matches [{names}] "
+                f"— not merged, review"
+            )
+
+    # G3 — curated nickname/diminutive table (fuzzy/edit-distance stays OFF).
+    if use_nicknames:
+        for i, a in enumerate(chars):
+            ga = _given_token(a)
+            if ga is None:
+                continue
+            for b in chars[i + 1 :]:
+                gb = _given_token(b)
+                if gb is None or not is_nickname_pair(ga, gb):
+                    continue
+                sa, sb = _surname_or_none(a), _surname_or_none(b)
+                if sa is not None and sb is not None and sa != sb:
+                    continue  # distinct surnames -> not the same person, don't even propose
+                emit(a, b, "G3")
+
+    # Priority + evidence ordering for the cap: G1 first, then more-attested pairs.
+    rank = {"G1": 0, "G2": 1, "G3": 2}
+
+    def evidence(pair: CandidatePair) -> int:
+        return seg_count.get(pair.a.id, 0) + seg_count.get(pair.b.id, 0)
+
+    ordered.sort(key=lambda p: (rank[p.generator], -evidence(p), p.pair_id))
+    if len(ordered) > cap:
+        dropped = ordered[cap:]
+        ordered = ordered[:cap]
+        flags.append(
+            f"alias: {len(dropped)} adjudication candidate(s) over the cap of {cap} "
+            f"were not sent for review this run"
+        )
+    return ordered, flags
+
+
 def resolve_registry_aliases(
     registry: CharacterRegistry,
     chapters: list[AttributedChapter],
     *,
     resolver: AliasResolver | None = None,
+    confidence_threshold: float = 0.85,
+    candidate_cap: int = 40,
+    use_nicknames: bool = True,
 ) -> tuple[dict[str, str], list[str]]:
     """Merge provably-same characters, flag the ambiguous. Mutates ``registry`` in place.
 
@@ -163,7 +348,24 @@ def resolve_registry_aliases(
     remap = _flatten(remap)
     _apply_merges(registry, remap)
 
+    # Opt-in LLM adjudication of the gray zone the auto-rules skip (default OFF: resolver=None
+    # leaves everything below untouched, so the output is byte-identical to today).
+    if resolver is not None:
+        adj_remap, adj_notes = _adjudicate(
+            registry,
+            seg_count,
+            resolver=resolver,
+            confidence_threshold=confidence_threshold,
+            candidate_cap=candidate_cap,
+            use_nicknames=use_nicknames,
+        )
+        notes.extend(adj_notes)
+        if adj_remap:
+            remap = _flatten({**remap, **adj_remap})
+            _apply_merges(registry, adj_remap)
+
     # Flag low-evidence records (no metadata, no attributed lines) — possible hallucinations.
+    # Computed on the FINAL registry so an adjudication-merged record leaves no stale flag.
     for char in registry.characters:
         if (
             seg_count.get(char.id, 0) == 0
@@ -176,8 +378,63 @@ def resolve_registry_aliases(
                 f"no metadata, no attributed lines, possible hallucination, review"
             )
 
-    # `resolver` (future LLM adjudication of the flagged candidates) is a deferred seam.
     return remap, notes
+
+
+def _adjudicate(
+    registry: CharacterRegistry,
+    seg_count: Counter[str],
+    *,
+    resolver: AliasResolver,
+    confidence_threshold: float,
+    candidate_cap: int,
+    use_nicknames: bool,
+) -> tuple[dict[str, str], list[str]]:
+    """Generate candidates, ask the resolver, and turn approvals into a merge remap.
+
+    Precision is layered: only ``_conflict``-clean generated pairs are shown; a verdict must
+    be ``same_person`` AND clear the confidence threshold; ``_conflict`` is re-applied as a
+    HARD VETO here (never inside the resolver), so a buggy/adversarial resolver cannot bypass
+    it. Approved pairs pick a deterministic survivor via ``_winner`` and feed the same remap
+    machinery as the auto-rules, keeping ``attribution.json`` stable across reruns.
+    """
+    candidates, notes = _generate_candidates(
+        registry, seg_count, cap=candidate_cap, use_nicknames=use_nicknames
+    )
+    if not candidates:
+        return {}, notes
+
+    verdicts = resolver.resolve(candidates, registry)
+    verdict_by_id: dict[str, PairVerdict] = {v.pair_id: v for v in verdicts}
+    by_id = {c.id: c for c in registry.characters}
+
+    adj_remap: dict[str, str] = {}
+    for cand in candidates:
+        a, b = by_id.get(cand.a.id), by_id.get(cand.b.id)
+        if a is None or b is None or a.id in adj_remap or b.id in adj_remap:
+            continue  # a member was already absorbed by an earlier approval this pass
+        pair_desc = f"{a.canonical_name!r} <-> {b.canonical_name!r}"
+        verdict = verdict_by_id.get(cand.pair_id)
+        if verdict is None or not verdict.same_person:
+            notes.append(f"alias: adjudicator rejected {pair_desc} ({cand.generator}) — not merged")
+            continue
+        if verdict.confidence < confidence_threshold:
+            notes.append(
+                f"alias: adjudicator approved {pair_desc} at confidence {verdict.confidence:.2f} "
+                f"< {confidence_threshold:.2f} — flagged, not merged"
+            )
+            continue
+        if _conflict(a, b):  # HARD VETO, re-applied after the resolver — never bypassable
+            notes.append(f"alias: vetoed {pair_desc} despite approval — gender/generation clash")
+            continue
+        winner = _winner([a, b])
+        loser = b if winner is a else a
+        adj_remap[loser.id] = winner.id
+        notes.append(
+            f"alias: merged {loser.canonical_name!r} -> {winner.canonical_name!r} "
+            f"(LLM {cand.generator}, conf {verdict.confidence:.2f})"
+        )
+    return adj_remap, notes
 
 
 def _apply_merges(registry: CharacterRegistry, remap: dict[str, str]) -> None:

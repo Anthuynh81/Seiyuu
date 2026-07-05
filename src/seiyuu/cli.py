@@ -434,6 +434,11 @@ def _convert_multivoice(
     help="Escalate chunks that fail local retries to the anthropic provider (paid).",
 )
 @click.option(
+    "--adjudicate/--no-adjudicate",
+    default=None,
+    help="Run the opt-in LLM alias adjudication after attribution (full-book runs only).",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -446,6 +451,7 @@ def attribute(
     prompt_version: str | None,
     chapter_indices: tuple[int, ...],
     hybrid: bool | None,
+    adjudicate: bool | None,
     books_dir: Path | None,
 ) -> None:
     """Attribute speakers with the local LLM: writes attribution.json + a cache DB."""
@@ -461,6 +467,12 @@ def attribute(
         (book_dir / "normalized.json").read_text(encoding="utf-8")
     )
 
+    if chapter_indices and adjudicate:
+        raise click.ClickException(
+            "--adjudicate needs the full-book registry; drop --chapter or run "
+            "`seiyuu adjudicate` after attributing all chapters."
+        )
+
     from seiyuu.services import run_attribution
 
     try:
@@ -472,6 +484,7 @@ def attribute(
             model=model,
             prompt_version=prompt_version,
             use_hybrid=hybrid,
+            use_adjudicate=adjudicate,
             chapters=chapter_indices,
             progress=click.echo,
         )
@@ -485,6 +498,40 @@ def attribute(
     )
     if report.flagged:
         click.echo(f"  {len(report.flagged)} blocks flagged for review — see `seiyuu characters`")
+    click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
+
+
+@main.command()
+@click.argument("book_id")
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+def adjudicate(book_id: str, books_dir: Path | None) -> None:
+    """Opt-in LLM alias adjudication over an attributed book: merges first-name/nickname aliases.
+
+    Operates on the full attribution.json and rewrites it in place; cached per candidate set
+    so re-runs are free and deterministic. Paid only if the adjudication provider is anthropic
+    (needs ANTHROPIC_API_KEY); local is free and reuses the GPU.
+    """
+    from seiyuu.attribute import ATTRIBUTION_NAME, AttributionError
+    from seiyuu.services import ServiceError, run_adjudication
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    try:
+        report = run_adjudication(book_dir, cfg=cfg, progress=click.echo)
+    except (ServiceError, AttributionError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"done: {len(report.registry.characters)} characters "
+        f"({report.provider_id}/{report.model_id})"
+    )
     click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
 
 
