@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
-from seiyuu.api.concurrency import HeavyWorkGate
+from seiyuu.api.concurrency import BorrowBroker, HeavyWorkGate
 from seiyuu.api.registry import EngineRegistry
 from seiyuu.jobs import JobRunner
 from seiyuu.repository import JobStore
@@ -33,6 +33,10 @@ def _gate(request: Request) -> HeavyWorkGate:
     return request.app.state.gate
 
 
+def _broker(request: Request) -> BorrowBroker:
+    return request.app.state.borrow_broker
+
+
 def _reconciled(request: Request) -> int:
     return request.app.state.reconciled_at_startup
 
@@ -50,5 +54,6 @@ StoreDep = Annotated[JobStore, Depends(_store)]
 RunnerDep = Annotated[JobRunner, Depends(_runner)]
 RegistryDep = Annotated[EngineRegistry, Depends(_registry)]
 GateDep = Annotated[HeavyWorkGate, Depends(_gate)]
+BrokerDep = Annotated[BorrowBroker, Depends(_broker)]
 ReconciledDep = Annotated[int, Depends(_reconciled)]
 AlignerDep = Annotated[tuple[Validator, threading.Lock], Depends(_aligner)]

@@ -10,9 +10,12 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import soundfile as sf
+
+if TYPE_CHECKING:
+    from seiyuu.api.concurrency import BorrowBroker
 
 from seiyuu.attribute.models import AttributionReport
 from seiyuu.engines import TTSEngine, get_engine
@@ -182,6 +185,7 @@ def render_book(
     allow_paid: bool = False,
     max_paid_usd: float | None = None,
     check_cancel: Callable[[], None] | None = None,
+    broker: "BorrowBroker | None" = None,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
@@ -193,6 +197,11 @@ def render_book(
     at the end. ``check_cancel`` (when given) is called between chapters and between
     blocks and may raise to abort cooperatively; synthesized segments are already cached
     and no manifest is written, so a re-run resumes from the cache.
+
+    ``broker`` (F1, server only) lets a waiting audition borrow this render's resident
+    engine between synthesis units: the engine is published once and offered at each
+    ``check`` yield point (after cancel), and closed before the GPU is freed. Default None
+    keeps the CLI/tests unchanged.
     """
     settings = settings or {}
     book_output_dir = Path(book_output_dir)
@@ -200,6 +209,15 @@ def render_book(
     say = progress or (lambda _msg: None)
     check = check_cancel or (lambda: None)
     gpu = gpu or get_gpu_manager()
+
+    def lend() -> None:
+        # Offer this render's own resident instance to a waiting audition; parks here until
+        # the audition finishes one segment (never while synthesizing, always after cancel).
+        if broker is not None and engine.uses_gpu:
+            broker.serve(engine.engine_id, engine)
+
+    if broker is not None and engine.uses_gpu:
+        broker.publish(engine.engine_id, engine)
 
     if library is not None and (
         library.meta_path(voice_id).is_file() or library.reference_path(voice_id).is_file()
@@ -227,10 +245,12 @@ def render_book(
             if wanted and ci not in wanted:
                 continue
             check()
+            lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
             segments: list[RenderedSegment] = []
             for block in chapter.blocks:
                 check()
+                lend()
                 if block.type is BlockType.SCENE_BREAK:
                     segments.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
@@ -304,6 +324,10 @@ def render_book(
                 RenderedChapter(index=ci, title=chapter.title, segments=segments)
             )
     finally:
+        # Stop lending BEFORE the engine is unloaded: an in-flight request gets an
+        # immediate None (soft retry), never an about-to-be-freed instance.
+        if broker is not None:
+            broker.close()
         if engine.uses_gpu:
             # free only what this render could have loaded: a cloud-only render must not
             # evict another consumer's resident model from the shared manager
@@ -347,6 +371,7 @@ def render_book_multivoice(
     max_paid_usd: float | None = None,
     cloud_max_slots: int = 10,
     check_cancel: Callable[[], None] | None = None,
+    broker: "BorrowBroker | None" = None,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -360,6 +385,11 @@ def render_book_multivoice(
     ``check_cancel`` (when given) is called between chapters and between segments and may
     raise to abort cooperatively; synthesized segments are already cached and no manifest
     is written, so a re-run resumes from the cache. The GPU is freed either way.
+
+    ``broker`` (F1, server only) lends the render's OWN resident engine to a waiting
+    audition between segments. The lendable engine varies segment to segment (this is a
+    multi-engine loop), so it is (re)published right after each engine is chosen and the
+    currently-resident one is offered at every ``check`` yield point (after cancel).
     """
     book_output_dir = Path(book_output_dir)
     cache = SegmentCache(book_output_dir / "cache")
@@ -372,6 +402,14 @@ def render_book_multivoice(
     engines: dict[str, TTSEngine] = {}
     metas: dict[str, VoiceMeta] = {}
     voices_used: dict[str, VoiceUse] = {}
+    # The engine currently resident and free to lend between segments (F1). Updated after
+    # each engine is chosen; None until the first GPU segment establishes residency.
+    lent_id: str | None = None
+    lent_engine: TTSEngine | None = None
+
+    def lend() -> None:
+        if broker is not None and lent_engine is not None:
+            broker.serve(lent_id, lent_engine)
 
     def engine_for(engine_id: str) -> TTSEngine:
         if engine_id not in engines:
@@ -400,6 +438,7 @@ def render_book_multivoice(
             if (wanted and ci not in wanted) or ci not in attributed:
                 continue
             check()
+            lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
             by_block: dict[str, list] = {}
             for seg in attributed[ci].segments:
@@ -412,9 +451,15 @@ def render_book_multivoice(
                     continue
                 for seg in by_block.get(block.id, []):
                     check()
+                    lend()
                     voice_id = resolve_voice(seg, assignment)
                     meta = meta_for(voice_id)  # verifies consent on first sight
                     engine = engine_for(meta.engine)
+                    if broker is not None and engine.uses_gpu:
+                        # this segment's engine is what will be resident; offer it at the
+                        # next yield point (lend() reads these via closure)
+                        broker.publish(meta.engine, engine)
+                        lent_id, lent_engine = meta.engine, engine
                     text = normalize_text(seg.text, profile=profile_for(meta.engine))
                     engine_voice, settings = render_voice_args(meta)
                     key = SegmentKey.build(
@@ -499,6 +544,10 @@ def render_book_multivoice(
                 RenderedChapter(index=ci, title=chapter.title, segments=rendered)
             )
     finally:
+        # Stop lending BEFORE the engine is unloaded: an in-flight request gets an
+        # immediate None (soft retry), never an about-to-be-freed instance.
+        if broker is not None:
+            broker.close()
         # free the GPU for the next stage/process — but only if this render acquired it;
         # a cloud-only render must not evict another consumer's resident model
         if used_gpu:

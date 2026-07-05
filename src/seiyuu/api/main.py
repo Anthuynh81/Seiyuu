@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from seiyuu import __version__
-from seiyuu.api.concurrency import AuditionSlot, HeavyWorkGate
+from seiyuu.api.concurrency import AuditionSlot, BorrowBroker, HeavyWorkGate
 from seiyuu.api.errors import register_error_handlers
 from seiyuu.api.handlers import build_handlers
 from seiyuu.api.registry import EngineRegistry
@@ -49,7 +49,10 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         store = JobStore(cfg.data_dir / JOBS_DB_NAME)
         registry = EngineRegistry(cfg)
         gate = HeavyWorkGate()
-        runner = JobRunner(store, build_handlers(cfg, registry, gate))
+        # F1 engine-borrowing rendezvous: a running render lends its resident engine to a
+        # waiting audition between its segments. Process-local singleton, like the gate.
+        broker = BorrowBroker(grant_timeout_s=cfg.borrow_grant_timeout_s)
+        runner = JobRunner(store, build_handlers(cfg, registry, gate, broker))
         reconciled = runner.start()  # reconcile FIRST — before any request is served
         if reconciled:
             logger.info("startup reconcile settled %d orphaned job row(s)", reconciled)
@@ -57,6 +60,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         app.state.store = store
         app.state.registry = registry
         app.state.gate = gate
+        app.state.borrow_broker = broker
         app.state.runner = runner
         app.state.reconciled_at_startup = reconciled
         # Shared by every job-creating route (and the M6b-6 audition busy-check) so the

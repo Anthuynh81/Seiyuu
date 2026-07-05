@@ -14,15 +14,18 @@ import os
 import re
 import secrets
 import shutil
+from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
+from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from seiyuu.api.deps import GateDep, RegistryDep, SettingsDep, StoreDep
+from seiyuu.api.concurrency import BorrowBroker
+from seiyuu.api.deps import BrokerDep, GateDep, RegistryDep, SettingsDep, StoreDep
 from seiyuu.api.errors import ApiError
 from seiyuu.api.registry import weights_cached
 from seiyuu.api.schemas import (
@@ -421,17 +424,46 @@ def remove_voice(
 # -- audition -----------------------------------------------------------------------------
 
 
-def _refuse_conflicts(meta: VoiceMeta, engine_cls, live: list[Job], registry) -> None:
+class Verdict(Enum):
+    """Three-outcome admission decision for a synchronous GPU audition (F1)."""
+
+    EXCLUSIVE = "exclusive"  # no live GPU job — take the heavy-work gate as before
+    BORROW = "borrow"  # a live RENDER is lending this exact engine — ride between segments
+
+
+def _refuse_conflicts(
+    meta: VoiceMeta,
+    engine_cls,
+    live: list[Job],
+    registry,
+    broker: BorrowBroker | None = None,
+) -> Verdict:
     """The scoping-doc refusal predicate, evaluated under the enqueue mutex so the
-    check-and-refuse is atomic against job creation."""
+    check-and-refuse is atomic against job creation.
+
+    Returns a :class:`Verdict`: EXCLUSIVE (proceed via the heavy-work gate) or BORROW (a
+    live RENDER is lending this exact engine, so ride its resident instance between
+    segments). Any hard conflict still raises: a non-lending GPU job (ATTRIBUTE/WARMUP, or
+    a RENDER on a different engine) → ``gpu_busy``; a render holding cloud slots →
+    ``cloud_busy``; a never-loaded local engine → ``engine_cold``."""
     if engine_cls.uses_gpu:
         gpu_job = next((j for j in live if j.kind in GPU_JOB_KINDS), None)
         if gpu_job is not None:
+            # A live RENDER already has this exact engine resident and can lend it between its
+            # segments — borrow instead of refusing for the whole multi-hour job (F1). Require an
+            # actual live RENDER *and* broker.eligible: a coincidental queued ATTRIBUTE/WARMUP that
+            # sorts ahead of the render in `live` must not defeat a valid borrow, and a non-render
+            # GPU job must never authorize one.
+            render_live = any(j.kind is JobKind.RENDER for j in live)
+            if render_live and broker is not None and broker.eligible(meta.engine):
+                return Verdict.BORROW
+            resident = get_gpu_manager().resident
+            resident_note = f" ({resident} is resident)" if resident else ""
             raise ApiError(
                 409,
                 "gpu_busy",
                 f"a {gpu_job.kind.value} job is {gpu_job.state.value}; the single GPU "
-                "cannot also host an audition — wait or cancel it",
+                f"cannot also host an audition{resident_note} — wait or cancel it",
                 detail=JobOut.from_job(gpu_job).model_dump(mode="json"),
             )
     if meta.engine == "elevenlabs":
@@ -459,6 +491,39 @@ def _refuse_conflicts(meta: VoiceMeta, engine_cls, live: list[Job], registry) ->
             "run the warmup job first",
             detail={"warmup": f"/api/engines/{meta.engine}/warmup"},
         )
+    return Verdict.EXCLUSIVE
+
+
+def borrow_and_synthesize(
+    broker: BorrowBroker,
+    engine_id: str,
+    timeout: float,
+    live: list[Job],
+    synth: Callable[[Any], Any],
+) -> Any:
+    """Shared BORROW branch for auditions and mixer previews (F1). Requests the running
+    render's resident engine, waits for a grant between its segments, synthesizes on THAT
+    instance inside ``gpu.acquire`` (an identity no-op that is also the manager-lock
+    backstop), and always signals done so the parked render resumes. A grant timeout (or a
+    render tearing down) surfaces as a soft 409 ``gpu_busy_retry`` — never an evict+reload.
+
+    ``synth`` receives the lent engine and returns its ``AudioFile``."""
+    ticket = broker.request(engine_id)
+    engine = broker.wait_grant(ticket, timeout)
+    if engine is None:
+        render = next((j for j in live if j.kind is JobKind.RENDER), None)
+        raise ApiError(
+            409,
+            "gpu_busy_retry",
+            "a render is holding the GPU between segments; it will lend it momentarily — "
+            "retry shortly (the render keeps running)",
+            detail=(JobOut.from_job(render).model_dump(mode="json") if render else None),
+        )
+    try:
+        with get_gpu_manager().acquire(engine, f"engine:{engine_id}"):
+            return synth(engine)
+    finally:
+        broker.signal_done(ticket)  # release the parked render even on synthesis failure
 
 
 @router.post("/voices/{voice_id}/audition", response_model=AuditionOut)
@@ -470,6 +535,7 @@ def audition(
     registry: RegistryDep,
     store: StoreDep,
     gate: GateDep,
+    broker: BrokerDep,
 ) -> AuditionOut:
     _check_voice_id(voice_id)
     library = VoiceLibrary(cfg.voices_dir)
@@ -487,15 +553,20 @@ def audition(
     with ExitStack() as stack:
         with request.app.state.enqueue_mutex:
             live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
-            _refuse_conflicts(meta, engine_cls, live, registry)
+            verdict = _refuse_conflicts(meta, engine_cls, live, registry, broker)
             if not stack.enter_context(request.app.state.audition_slot.try_hold()):
                 raise ApiError(
                     409, "audition_in_flight", "another audition is already synthesizing"
                 )
-            # only GPU engines claim the heavy-work gate: a cloud audition must not be
-            # refused (least of all as a phantom audition) because an attribute or
-            # ffmpeg-stage handler is running
-            if engine_cls.uses_gpu and not stack.enter_context(gate.try_hold("audition")):
+            # only GPU engines claim the heavy-work gate; BORROW deliberately SKIPS it and
+            # rides the render's own resident engine instead (the gate stays with the job).
+            # A cloud audition must not be refused (least of all as a phantom audition)
+            # because an attribute or ffmpeg-stage handler is running.
+            if (
+                verdict is Verdict.EXCLUSIVE
+                and engine_cls.uses_gpu
+                and not stack.enter_context(gate.try_hold("audition"))
+            ):
                 running = next((j for j in live if j.state is JobState.RUNNING), None)
                 raise ApiError(
                     409,
@@ -503,8 +574,8 @@ def audition(
                     "a job currently holds the GPU; wait for it or cancel it",
                     detail=(JobOut.from_job(running).model_dump(mode="json") if running else None),
                 )
-        # mutex released; slot (+gate for GPU engines) stays held for the synthesis. A
-        # job enqueued from here on waits at most one warm-engine synthesis (accepted).
+        # mutex released; slot (+gate for EXCLUSIVE GPU engines) stays held for the
+        # synthesis. A job enqueued from here on waits at most one warm-engine synthesis.
         engine = registry.get(meta.engine)
         engine_voice, settings = render_voice_args(meta)
         normalized = normalize_text(body.text, profile=profile_for(meta.engine))
@@ -527,12 +598,25 @@ def audition(
                 engine_voice = ensure_cloud_voice(
                     meta, engine.client, library, max_slots=cfg.elevenlabs_max_voice_slots
                 )
-            gpu = get_gpu_manager()
-            ctx = gpu.acquire(engine, f"engine:{meta.engine}") if engine.uses_gpu else nullcontext()
-            with ctx:
-                audio = engine.synthesize(normalized, engine_voice, {**settings, "seed": meta.seed})
-            # NO free_all(): the model stays lazily resident by design — the next
-            # audition (or single-voice render) re-acquires as an identity no-op.
+            synth = lambda eng: eng.synthesize(  # noqa: E731
+                normalized, engine_voice, {**settings, "seed": meta.seed}
+            )
+            if verdict is Verdict.BORROW:
+                # ride the running render's resident engine between its segments (F1)
+                audio = borrow_and_synthesize(
+                    broker, meta.engine, cfg.borrow_grant_timeout_s, live, synth
+                )
+            else:
+                gpu = get_gpu_manager()
+                ctx = (
+                    gpu.acquire(engine, f"engine:{meta.engine}")
+                    if engine.uses_gpu
+                    else nullcontext()
+                )
+                with ctx:
+                    audio = synth(engine)
+                # NO free_all(): the model stays lazily resident by design — the next
+                # audition (or single-voice render) re-acquires as an identity no-op.
         except (SynthesisError, CloudVoiceError) as exc:
             raise ApiError(502, "upstream", str(exc)) from exc
         out_path = _audition_path(library, voice_id)
