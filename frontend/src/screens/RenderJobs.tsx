@@ -261,7 +261,7 @@ function EstimateCard({
             {minting ? "minting…" : `step 2 · approve — mint quote for $${est.total_usd.toFixed(2)}`}
           </button>
         ) : (
-          <button className="key" onClick={onFreeRender}>render — free, nothing to approve</button>
+          <button className="key" onClick={onFreeRender}>render {mode} — free, nothing to approve</button>
         )}
       </div>
       {error && <div className="errline" style={{ margin: "0 14px 12px" }}>{error}</div>}
@@ -286,6 +286,11 @@ function JobRow({ job }: { job: JobOut }) {
         </span>
         <span className="what">
           {job.kind}
+          {typeof job.params?.mode === "string" && (
+            <span className="mono" style={{ color: "var(--ink-3)", fontSize: 10.5, marginLeft: 6 }}>
+              {job.params.mode}
+            </span>
+          )}
           {detail && <span className="more">why? ▸</span>}
         </span>
         <span className="id">{job.job_id}</span>
@@ -364,6 +369,7 @@ export function RenderJobs() {
   const status = book.data?.status;
   const defaultMode: RenderMode = status?.assigned ? "multivoice" : "single";
   const [modeChoice, setModeChoice] = useState<RenderMode | null>(null);
+  useEffect(() => setModeChoice(null), [bookId]); // a mode picked for one book must not stick to another
   const mode = modeChoice ?? defaultMode;
 
   const [scope, setScope] = useState<Scope>({ kind: "whole" });
@@ -484,6 +490,21 @@ export function RenderJobs() {
                 {!status.ingested
                   ? "this book has no normalized text yet — re-ingest it"
                   : "multivoice needs attribution + a voice assignment first — or switch to single voice"}
+              </p>
+            </div>
+          )}
+          {status?.assigned && mode === "single" && (
+            <div className="refusal" style={{ marginBottom: 14 }}>
+              <span className="tag">casting ignored</span>
+              <p>
+                this book HAS a casting, but single-voice renders everything with one voice —{" "}
+                <button
+                  className="link"
+                  style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
+                  onClick={() => setModeChoice("multivoice")}
+                >
+                  switch to multivoice
+                </button>
               </p>
             </div>
           )}

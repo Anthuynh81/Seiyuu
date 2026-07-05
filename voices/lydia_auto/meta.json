@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "voice_id": "lydia_auto",
+  "name": "Lydia",
+  "kind": "blend",
+  "engine": "kokoro",
+  "preset_id": null,
+  "blend": [
+    {
+      "preset_id": "af_nicole",
+      "weight": 0.7
+    },
+    {
+      "preset_id": "af_sarah",
+      "weight": 0.3
+    }
+  ],
+  "reference_audio": null,
+  "settings": {},
+  "seed": 41172,
+  "language": null,
+  "consent_attested": false,
+  "consent": null,
+  "source": "auto_blend",
+  "created_at": "2026-07-05"
+}
