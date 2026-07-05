@@ -159,35 +159,40 @@ def create_voice(
     with request.app.state.voices_mutex:
         if library.meta_path(voice_id).is_file():
             raise ApiError(409, "voice_exists", f"voice {voice_id!r} already exists")
-        if isinstance(body, PresetVoiceCreate):
-            meta = VoiceMeta(
-                voice_id=voice_id,
-                name=body.name,
-                kind=VoiceKind.PRESET,
-                engine=body.engine,
-                preset_id=body.preset_id,
-                seed=body.seed,
-                source="preset",
-            )
-        else:
-            assert isinstance(body, BlendVoiceCreate)
-            if body.components is not None:
-                recipe = canonical_recipe([(c.preset_id, c.weight) for c in body.components])
-                source = "manual_blend"
-            else:
-                recipe = auto_blend_recipe(body.name, body.gender, accent=body.accent)
-                source = "auto_blend"
-            meta = VoiceMeta(
-                voice_id=voice_id,
-                name=body.name,
-                kind=VoiceKind.BLEND,
-                engine="kokoro",
-                blend=[BlendComponent(preset_id=p, weight=w) for p, w in recipe],
-                seed=body.seed,
-                source=source,
-            )
+        # VoiceMeta construction enforces domain rules (e.g. a kokoro blend can't mix
+        # language families) — those must surface as 422s, not unhandled 500s.
         try:
+            if isinstance(body, PresetVoiceCreate):
+                meta = VoiceMeta(
+                    voice_id=voice_id,
+                    name=body.name,
+                    kind=VoiceKind.PRESET,
+                    engine=body.engine,
+                    preset_id=body.preset_id,
+                    seed=body.seed,
+                    source="preset",
+                )
+            else:
+                assert isinstance(body, BlendVoiceCreate)
+                if body.components is not None:
+                    recipe = canonical_recipe([(c.preset_id, c.weight) for c in body.components])
+                    source = "manual_blend"
+                else:
+                    recipe = auto_blend_recipe(body.name, body.gender, accent=body.accent)
+                    source = "auto_blend"
+                meta = VoiceMeta(
+                    voice_id=voice_id,
+                    name=body.name,
+                    kind=VoiceKind.BLEND,
+                    engine="kokoro",
+                    blend=[BlendComponent(preset_id=p, weight=w) for p, w in recipe],
+                    seed=body.seed,
+                    source=source,
+                )
             library.save(meta)
+        except ValidationError as exc:
+            first = str(exc.errors()[0]["msg"]).removeprefix("Value error, ")
+            raise ApiError(422, "invalid", first) from exc
         except (VoiceLibraryError, ValueError) as exc:
             raise ApiError(422, "invalid", str(exc)) from exc
     response.headers["Location"] = f"/api/voices/{voice_id}"

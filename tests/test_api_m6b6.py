@@ -147,6 +147,23 @@ def test_create_preset_blend_and_duplicate(client) -> None:
     )
     assert short.status_code == 422  # >= 2 components
 
+    # domain rules raised by VoiceMeta construction (not just library.save) must be
+    # clean 422s — this cross-family mix was an unhandled 500 once
+    mixed = client.post(
+        "/api/voices",
+        json={
+            "kind": "blend",
+            "name": "Transatlantic",
+            "components": [
+                {"preset_id": "af_bella", "weight": 7},
+                {"preset_id": "bf_emma", "weight": 3},
+            ],
+        },
+    )
+    assert mixed.status_code == 422, mixed.text
+    assert mixed.json()["error"]["code"] == "invalid"
+    assert "language families" in mixed.json()["error"]["message"]
+
 
 # -- clone --------------------------------------------------------------------------------
 

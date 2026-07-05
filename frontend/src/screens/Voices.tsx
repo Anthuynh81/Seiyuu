@@ -11,7 +11,7 @@ import {
   useVoices,
   useWarmup,
 } from "../api/hooks";
-import type { VoiceOut } from "../api/types";
+import type { VoiceCreate, VoiceOut } from "../api/types";
 
 /* -------------------------------------------------- audition control */
 
@@ -176,15 +176,40 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
   const [cloudId, setCloudId] = useState("");
   const [gender, setGender] = useState("");
   const [accent, setAccent] = useState<"a" | "b">("a");
+  // manual mix: layers of (preset, weight) — the server normalizes weights, so only
+  // the ratios matter; the mixer shows the resulting percentages live
+  const [manual, setManual] = useState(false);
+  const [layers, setLayers] = useState<{ preset_id: string; weight: number }[]>([
+    { preset_id: "af_heart", weight: 60 },
+    { preset_id: "af_nicole", weight: 40 },
+  ]);
   const error = create.error instanceof ApiError ? create.error.message : create.error?.message;
 
+  const catalog = presets.data?.voices ?? [{ id: "af_heart", name: "Heart", language: "en-US", gender: "female" }];
+  const presetOptions = catalog.map((p) => (
+    <option key={p.id} value={p.id}>
+      {p.id} — {p.gender ?? "?"} {p.language ?? ""}
+    </option>
+  ));
+  const totalWeight = layers.reduce((a, l) => a + l.weight, 0) || 1;
+  const setLayer = (i: number, patch: Partial<{ preset_id: string; weight: number }>) =>
+    setLayers(layers.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+
   const submit = () => {
-    const body =
+    const body: VoiceCreate =
       kind === "preset"
-        ? ({ kind, name, engine, preset_id: engine === "kokoro" ? presetId : cloudId } as const)
-        : ({ kind, name, gender: gender || null, accent } as const);
+        ? { kind, name, engine, preset_id: engine === "kokoro" ? presetId : cloudId }
+        : manual
+          ? { kind, name, components: layers.filter((l) => l.weight > 0) }
+          : { kind, name, gender: gender || null, accent };
     create.mutate(body, { onSuccess: onClose });
   };
+
+  const active = layers.filter((l) => l.weight > 0);
+  // kokoro can't blend across language families (the id's first letter: af_/am_ = American,
+  // bf_/bm_ = British) — catch it at the fader instead of a server refusal
+  const familyMix = new Set(active.map((l) => l.preset_id[0])).size > 1;
+  const blendInvalid = kind === "blend" && manual && (active.length < 2 || familyMix);
 
   return (
     <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -196,7 +221,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
         <div className="db">
           <div className="modewrap" style={{ marginBottom: 4 }}>
             <button className={`chap ${kind === "preset" ? "on" : ""}`} onClick={() => setKind("preset")}>preset</button>
-            <button className={`chap ${kind === "blend" ? "on" : ""}`} onClick={() => setKind("blend")}>blend (auto recipe)</button>
+            <button className={`chap ${kind === "blend" ? "on" : ""}`} onClick={() => setKind("blend")}>blend</button>
           </div>
           <label>voice name</label>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Narrator" />
@@ -211,11 +236,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
                 <>
                   <label>preset</label>
                   <select value={presetId} onChange={(e) => setPresetId(e.target.value)}>
-                    {(presets.data?.voices ?? [{ id: "af_heart", name: "Heart", language: "en-US", gender: "female" }]).map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.id} — {p.gender ?? "?"} {p.language ?? ""}
-                      </option>
-                    ))}
+                    {presetOptions}
                   </select>
                 </>
               ) : (
@@ -227,24 +248,89 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
             </>
           ) : (
             <>
-              <label>gender hint for the recipe (optional)</label>
-              <select value={gender} onChange={(e) => setGender(e.target.value)}>
-                <option value="">unknown</option>
-                <option value="female">female</option>
-                <option value="male">male</option>
-              </select>
-              <label>accent</label>
-              <select value={accent} onChange={(e) => setAccent(e.target.value as "a" | "b")}>
-                <option value="a">American</option>
-                <option value="b">British</option>
-              </select>
+              <label>recipe</label>
+              <div className="modewrap" style={{ marginBottom: 6 }}>
+                <button className={`chap ${!manual ? "on" : ""}`} onClick={() => setManual(false)}>auto — from name</button>
+                <button className={`chap ${manual ? "on" : ""}`} onClick={() => setManual(true)}>manual mix</button>
+              </div>
+              {!manual ? (
+                <>
+                  <label>gender hint for the recipe (optional)</label>
+                  <select value={gender} onChange={(e) => setGender(e.target.value)}>
+                    <option value="">unknown</option>
+                    <option value="female">female</option>
+                    <option value="male">male</option>
+                  </select>
+                  <label>accent</label>
+                  <select value={accent} onChange={(e) => setAccent(e.target.value as "a" | "b")}>
+                    <option value="a">American</option>
+                    <option value="b">British</option>
+                  </select>
+                </>
+              ) : (
+                <>
+                  {layers.map((l, i) => (
+                    <div className="mixrow" key={i}>
+                      <select value={l.preset_id} onChange={(e) => setLayer(i, { preset_id: e.target.value })}>
+                        {presetOptions}
+                      </select>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={l.weight}
+                        aria-label={`weight of ${l.preset_id}`}
+                        onChange={(e) => setLayer(i, { weight: Number(e.target.value) })}
+                      />
+                      <span className="pct">{Math.round((100 * l.weight) / totalWeight)}%</span>
+                      <button
+                        className="rowedit"
+                        style={{ visibility: "visible" }}
+                        title="remove layer"
+                        disabled={layers.length <= 2}
+                        onClick={() => setLayers(layers.filter((_, k) => k !== i))}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                    <button
+                      className="key quiet"
+                      style={{ padding: "3px 9px" }}
+                      onClick={() => setLayers([...layers, { preset_id: catalog[0].id, weight: 30 }])}
+                    >
+                      + add layer
+                    </button>
+                    <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-3)" }}>
+                      faders are ratios — the mix normalizes itself
+                    </span>
+                  </div>
+                  {blendInvalid && (
+                    <div className="mono" style={{ fontSize: 11, color: "var(--caution)", marginTop: 6 }}>
+                      {familyMix
+                        ? "kokoro can't blend across accents — keep every layer American (a…) or every layer British (b…)"
+                        : "a blend needs at least two layers with weight"}
+                    </div>
+                  )}
+                </>
+              )}
             </>
           )}
           {error && <div className="errline" style={{ marginTop: 12 }}>{error}</div>}
         </div>
         <div className="df">
           <button className="key quiet" onClick={onClose}>cancel</button>
-          <button className="key" disabled={create.isPending || !name.trim() || (kind === "preset" && engine === "elevenlabs" && !cloudId.trim())} onClick={submit}>
+          <button
+            className="key"
+            disabled={
+              create.isPending ||
+              !name.trim() ||
+              blendInvalid ||
+              (kind === "preset" && engine === "elevenlabs" && !cloudId.trim())
+            }
+            onClick={submit}
+          >
             add voice
           </button>
         </div>

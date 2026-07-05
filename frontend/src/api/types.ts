@@ -260,7 +260,15 @@ export interface VoiceListOut {
 
 export type VoiceCreate =
   | { kind: "preset"; name: string; engine: string; preset_id: string; voice_id?: string }
-  | { kind: "blend"; name: string; gender?: string | null; accent?: "a" | "b"; voice_id?: string };
+  | {
+      kind: "blend";
+      name: string;
+      /** Manual mix: ≥2 layers, weights are ratios (server-normalized). Omit for the auto recipe. */
+      components?: { preset_id: string; weight: number }[];
+      gender?: string | null;
+      accent?: "a" | "b";
+      voice_id?: string;
+    };
 
 export interface AuditionOut {
   voice_id: string;
