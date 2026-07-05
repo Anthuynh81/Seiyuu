@@ -226,6 +226,7 @@ def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
             stem = sidecar.stem
             (cache_dir / f"{stem}.wav").unlink(missing_ok=True)
             (cache_dir / f"{stem}.validation.json").unlink(missing_ok=True)
+            (cache_dir / f"{stem}.words.json").unlink(missing_ok=True)  # F2 alignment sidecar
             sidecar.unlink(missing_ok=True)
             removed += 1
     return removed

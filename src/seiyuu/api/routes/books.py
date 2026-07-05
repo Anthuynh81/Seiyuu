@@ -247,12 +247,12 @@ def delete_book(
 ) -> BookDeletedOut:
     """Purge a book from BOTH on-disk roots (``output/{id}`` then ``books/{id}``) and reap
     its terminal job rows. Refused **409 conflicting_job** while any job for the book is
-    live. PAID cloud renders (ElevenLabs/Fish) are NEVER discarded automatically: when any
-    exist the call answers **402 payment_confirmation_required** and only purges them on a
-    re-send with ``?confirm_paid=true`` — free/local artifacts still delete on the first
-    call. The shared voice library, the global jobs.db file, and every OTHER book are left
-    untouched. Guard + purge run under the enqueue mutex so a job cannot be created for the
-    book between the live-job check and the purge."""
+    live. PAID cloud renders (ElevenLabs/Fish) are NEVER discarded automatically: a book that
+    owns any answers **402 payment_confirmation_required** and NOTHING is removed until a
+    re-send with ``?confirm_paid=true``; a book with only free/local renders deletes in that
+    single call. The shared voice library, the global jobs.db file, and every OTHER book are
+    left untouched. Guard + purge run under the enqueue mutex so a job cannot be created for
+    the book between the live-job check and the purge."""
     status_or_404(cfg, book_id)
     with request.app.state.enqueue_mutex:
         _guard_any_active(store, book_id)

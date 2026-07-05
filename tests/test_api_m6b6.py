@@ -228,6 +228,7 @@ def test_reclone_blocked_then_replace_purges(client) -> None:
     (cache / "aaa.json").write_text(json.dumps({"voice_id": "clone1"}), encoding="utf-8")
     (cache / "aaa.wav").write_bytes(b"old-audio")
     (cache / "aaa.validation.json").write_text("{}", encoding="utf-8")
+    (cache / "aaa.words.json").write_text("{}", encoding="utf-8")  # F2 alignment sidecar
     (cache / "bbb.json").write_text(json.dumps({"voice_id": "other"}), encoding="utf-8")
     (cache / "bbb.wav").write_bytes(b"other-audio")
     (cfg.voices_dir / "clone1" / "audition.wav").write_bytes(b"old-audition")
@@ -240,6 +241,7 @@ def test_reclone_blocked_then_replace_purges(client) -> None:
     assert not (cache / "aaa.wav").exists()  # Q1: stale audio can never replay
     assert not (cache / "aaa.json").exists()
     assert not (cache / "aaa.validation.json").exists()
+    assert not (cache / "aaa.words.json").exists()  # F2 sidecar purged too, not orphaned
     assert (cache / "bbb.wav").exists()  # other voices untouched
     assert not (cfg.voices_dir / "clone1" / "audition.wav").exists()
     assert not (cfg.voices_dir / "clone1" / "conds_v1_deadbeef.pt").exists()
