@@ -1,6 +1,7 @@
 """Render stage: normalized JSON + TTS engine → cached segments + manifest."""
 
-from seiyuu.render.cache import SegmentCache, SegmentKey
+from seiyuu.render.align import ensure_words
+from seiyuu.render.cache import SegmentCache, SegmentKey, words_sidecar_for_wav
 from seiyuu.render.gate import (
     CostGateError,
     CostQuote,
@@ -35,6 +36,7 @@ __all__ = [
     "SegmentKey",
     "VoiceUse",
     "check_ceiling",
+    "ensure_words",
     "estimate_render_cost",
     "estimate_render_cost_single",
     "hash_assignment",
@@ -42,4 +44,5 @@ __all__ = [
     "render_book",
     "render_book_multivoice",
     "verify_quote",
+    "words_sidecar_for_wav",
 ]

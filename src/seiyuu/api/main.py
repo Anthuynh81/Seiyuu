@@ -32,6 +32,7 @@ from seiyuu.jobs import JobRunner
 from seiyuu.repository import JobStore
 from seiyuu.repository.jobs import JOBS_DB_NAME
 from seiyuu.settings import Settings, get_settings
+from seiyuu.validate import Validator
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,18 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         # vanish between an assignment's validation and its durable write.
         app.state.voices_mutex = threading.Lock()
         app.state.audition_slot = AuditionSlot()
+        # F2 forced alignment: ONE process-shared whisper aligner (lazy model load) + one lock
+        # so read-along requests serialize. Pinned to CPU/int8 REGARDLESS of whisper_device: this
+        # runs on request threads CONCURRENTLY with renders (Listen-while-rendering), so honoring
+        # a cuda opt-in would load whisper onto the GPU behind the resource manager's back and
+        # contend with the resident TTS model — breaking the one-heavy-model rule (sign-off D3).
+        app.state.aligner = Validator(
+            model_size=cfg.validation_model_size,
+            device="cpu",
+            compute_type="int8",
+            min_ratio=cfg.validation_min_ratio,
+        )
+        app.state.align_lock = threading.Lock()
         try:
             yield
         finally:

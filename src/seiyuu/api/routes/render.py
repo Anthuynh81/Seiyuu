@@ -7,13 +7,14 @@ token (enqueue does a NON-consuming dry-run so refusals are immediate 402s and n
 burn the token; the authoritative consume happens at job start, in the handler).
 """
 
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from seiyuu.api.deps import RegistryDep, RunnerDep, SettingsDep, StoreDep
+from seiyuu.api.deps import AlignerDep, RegistryDep, RunnerDep, SettingsDep, StoreDep
 from seiyuu.api.enqueue import enqueue_job
 from seiyuu.api.errors import ApiError
 from seiyuu.api.money import compute_estimate, gate_code, resolve_single
@@ -35,6 +36,7 @@ from seiyuu.api.schemas import (
 )
 from seiyuu.duration import estimate_runtime_seconds
 from seiyuu.ingest.models import NormalizedBook
+from seiyuu.render.align import ensure_words
 from seiyuu.render.gate import (
     FULL_RENDER_CONFIRM_BLOCKS,
     CostGateError,
@@ -47,6 +49,8 @@ from seiyuu.repository import BookStatus, JobKind, JobState
 from seiyuu.repository.books import MANIFEST_NAME
 from seiyuu.services import ServiceError
 from seiyuu.settings import Settings
+from seiyuu.validate import SegmentWords
+from seiyuu.validate import ValidationError as ValidationErrorType
 from seiyuu.voices import VoiceLibraryError
 
 router = APIRouter(tags=["render"])
@@ -522,19 +526,14 @@ def validation_report(
     )
 
 
-@router.get("/books/{book_id}/segments/{block_id}/audio")
-def segment_audio(
-    book_id: str,
-    block_id: str,
-    cfg: SettingsDep,
-    segment: Annotated[int, Query(ge=0)] = 0,
-) -> FileResponse:
-    """Per-segment WAV playback (Character Review plays flagged blocks; Validation plays
-    failures). A multivoice block renders SEVERAL segments (narration + each quoted
-    span, possibly different voices) — ``?segment=`` addresses the Nth one, in the same
-    order the segment browser and validation report count them, so a failing dialogue
-    span is reachable even when the block's narration passed. Resolved via manifest
-    lookup ONLY — never a client-supplied path."""
+def _resolve_segment_wav(cfg: Settings, book_id: str, block_id: str, segment: int) -> Path:
+    """Resolve the on-disk WAV for ``block_id``[``segment``] via the render manifest ONLY —
+    never a client-supplied path. A multivoice block renders SEVERAL segments (narration + each
+    quoted span, possibly different voices); ``segment`` addresses the Nth one in the same order
+    the segment browser and validation report count them. 404s on an unknown/scene-break/
+    out-of-range segment or a wav missing on disk, and enforces that the resolved path stays
+    within the book's output dir. Shared by the audio and words endpoints so they stay in
+    lockstep (the words sidecar is derived from this exact wav path)."""
     status = status_or_404(cfg, book_id)
     manifest = _manifest_or_http(cfg, book_id, status)
     in_block = [seg for ch in manifest.chapters for seg in ch.segments if seg.block_id == block_id]
@@ -562,4 +561,45 @@ def segment_audio(
             "not_found",
             f"audio for {block_id!r}[{segment}] is missing on disk; re-run render",
         )
+    return wav
+
+
+@router.get("/books/{book_id}/segments/{block_id}/audio")
+def segment_audio(
+    book_id: str,
+    block_id: str,
+    cfg: SettingsDep,
+    segment: Annotated[int, Query(ge=0)] = 0,
+) -> FileResponse:
+    """Per-segment WAV playback (Character Review plays flagged blocks; Validation plays
+    failures). Resolved via manifest lookup ONLY — never a client-supplied path."""
+    wav = _resolve_segment_wav(cfg, book_id, block_id, segment)
     return FileResponse(wav, media_type="audio/wav", filename=f"{block_id}_{segment}.wav")
+
+
+@router.get("/books/{book_id}/segments/{block_id}/words", response_model=SegmentWords)
+def segment_words(
+    book_id: str,
+    block_id: str,
+    cfg: SettingsDep,
+    aligner: AlignerDep,
+    segment: Annotated[int, Query(ge=0)] = 0,
+) -> SegmentWords:
+    """Word-exact forced alignment for read-along (F2). Resolves the same wav as
+    ``/audio`` (manifest-only, path-safe, identical 404s), then returns the cached
+    ``{key_hash}.words.json`` — computing + caching it on the first request for engines that
+    didn't transcribe during render (Kokoro/ElevenLabs). Validated engines (Chatterbox/Fish)
+    have already piggybacked their words at render time, so this is a pure cache hit for them.
+
+    Alignment is CPU-only and serialized on the process-shared align lock; it runs on the
+    request threadpool, never the GPU manager / gate / JobRunner, so it cannot become a second
+    resident GPU model or queue behind a multi-hour render. A re-render mints a new key_hash, so
+    the served timings always match the current audio."""
+    wav = _resolve_segment_wav(cfg, book_id, block_id, segment)
+    validator, lock = aligner
+    try:
+        return ensure_words(wav, validator, lock)
+    except ValidationErrorType as exc:
+        raise ApiError(
+            500, "alignment_failed", f"forced alignment failed for {block_id!r}[{segment}]: {exc}"
+        ) from exc

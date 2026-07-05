@@ -22,7 +22,7 @@ from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
 from seiyuu.repository import atomic_write_text
-from seiyuu.validate import ValidationResult, Validator
+from seiyuu.validate import SegmentWords, ValidationResult, Validator, WordTiming
 from seiyuu.voices import (
     VoiceAssignment,
     VoiceLibrary,
@@ -104,6 +104,19 @@ class RenderResult:
         return sum(s.duration_seconds for c in self.manifest.chapters for s in c.segments)
 
 
+def _validate_capturing_words(
+    validator: Validator, wav_path: Path, text: str
+) -> tuple[ValidationResult, list[WordTiming] | None]:
+    """One transcription pass that yields BOTH the verdict and the word timings when the
+    validator supports it (the real ``Validator``); otherwise the verdict alone. This is the
+    F2 piggyback — a `requires_validation` engine already transcribes every attempt, so its
+    word alignment costs no extra whisper pass. Scripted test validators exposing only
+    ``validate`` transparently fall back to no words."""
+    if hasattr(validator, "validate_with_words"):
+        return validator.validate_with_words(wav_path, text)
+    return validator.validate(wav_path, text), None
+
+
 def _synthesize_validated(
     engine: TTSEngine,
     text: str,
@@ -114,23 +127,26 @@ def _synthesize_validated(
     validator: Validator | None,
     max_retries: int,
     cache_dir: Path,
-) -> tuple[Any, ValidationResult | None, int]:
-    """Synthesize one segment, returning (audio, validation, attempts).
+) -> tuple[Any, ValidationResult | None, int, list[WordTiming] | None]:
+    """Synthesize one segment, returning (audio, validation, attempts, words).
 
     Deterministic engines (or when no validator is supplied) synthesize once and skip
-    validation. LLM-style engines (`requires_validation`) transcribe each attempt and, on a
-    failure, retry with a fresh seed up to `max_retries` more times, keeping the best-scoring
-    attempt. A persistent failure is returned (not raised) so the caller can flag it for review
-    rather than silently ship — or drop — the segment.
+    validation (and produce no words — those engines align lazily on first Listen). LLM-style
+    engines (`requires_validation`) transcribe each attempt and, on a failure, retry with a
+    fresh seed up to `max_retries` more times, keeping the best-scoring attempt. The kept
+    attempt's word timings (F2) ride out of the SAME transcription used for its score, so the
+    seek points target exactly the audio that ships. A persistent failure is returned (not
+    raised) so the caller can flag it for review rather than silently ship — or drop — it.
     """
     base = dict(settings)
     if not engine.requires_validation or validator is None:
         synth = {**base, **({"seed": seed} if seed is not None else {})}
-        return engine.synthesize(text, voice_arg, synth), None, 1
+        return engine.synthesize(text, voice_arg, synth), None, 1, None
 
     tmp = Path(cache_dir) / "_validate.tmp.wav"
     best_audio: Any = None
     best_result: ValidationResult | None = None
+    best_words: list[WordTiming] | None = None
     attempts = 0
     try:
         for i in range(max_retries + 1):
@@ -139,14 +155,14 @@ def _synthesize_validated(
             synth = {**base, **({"seed": attempt_seed} if attempt_seed is not None else {})}
             audio = engine.synthesize(text, voice_arg, synth)
             audio.save(tmp)
-            result = validator.validate(tmp, text)
+            result, words = _validate_capturing_words(validator, tmp, text)
             if best_result is None or result.score > best_result.score:
-                best_audio, best_result = audio, result
+                best_audio, best_result, best_words = audio, result, words
             if result.ok:
                 break
     finally:
         tmp.unlink(missing_ok=True)
-    return best_audio, best_result, attempts
+    return best_audio, best_result, attempts, best_words
 
 
 def render_book(
@@ -245,7 +261,7 @@ def render_book(
                             else nullcontext()
                         )
                         with ctx:
-                            audio, validation, attempts = _synthesize_validated(
+                            audio, validation, attempts, words = _synthesize_validated(
                                 engine, text, voice_id, settings, seed,
                                 validator=validator, max_retries=validation_max_retries,
                                 cache_dir=cache.cache_dir,
@@ -261,8 +277,10 @@ def render_book(
                     wav_path = cache.put(key, audio)
                     if validation is not None:
                         cache.put_validation(key, validation)
-                    synthesized += 1
                     duration = audio.duration_seconds
+                    if words is not None:  # F2 piggyback: validated engines cache words inline
+                        cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
+                    synthesized += 1
                 if validation is not None and not validation.ok:
                     validation_failures += 1
                     say(
@@ -431,7 +449,7 @@ def render_book_multivoice(
                                 else nullcontext()
                             )
                             with ctx:
-                                audio, validation, attempts = _synthesize_validated(
+                                audio, validation, attempts, words = _synthesize_validated(
                                     engine, text, synth_voice, settings, meta.seed,
                                     validator=validator, max_retries=validation_max_retries,
                                     cache_dir=cache.cache_dir,
@@ -446,8 +464,10 @@ def render_book_multivoice(
                         wav_path = cache.put(key, audio)
                         if validation is not None:
                             cache.put_validation(key, validation)
-                        synthesized += 1
                         duration = audio.duration_seconds
+                        if words is not None:  # F2 piggyback: validated engines cache words inline
+                            cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
+                        synthesized += 1
                     if validation is not None and not validation.ok:
                         validation_failures += 1
                         say(

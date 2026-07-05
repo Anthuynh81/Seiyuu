@@ -2,12 +2,14 @@
 against normalized text. Mandatory for LLM-style TTS (Chatterbox/Fish) before assembly.
 """
 
-from seiyuu.validate.models import ValidationResult
+from seiyuu.validate.models import SegmentWords, ValidationResult, WordTiming
 from seiyuu.validate.validator import ValidationError, Validator, match_ratio
 
 __all__ = [
+    "SegmentWords",
     "ValidationError",
     "ValidationResult",
     "Validator",
+    "WordTiming",
     "match_ratio",
 ]

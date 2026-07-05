@@ -583,9 +583,11 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/engines/{engine_id}/preview", "GET") in paths
     assert ("/api/voices/{voice_id}", "PATCH") in paths
     assert ("/api/books/{book_id}", "DELETE") in paths  # F3 guarded book deletion
+    assert ("/api/books/{book_id}/segments/{block_id}/words", "GET") in paths  # F2 read-along
     # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer
-    # demos) + PATCH voice tags (library organization) + DELETE book (F3)
-    assert len(paths) == 48
+    # demos) + PATCH voice tags (library organization) + DELETE book (F3) + GET
+    # segment words (F2 forced alignment)
+    assert len(paths) == 49
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
