@@ -24,6 +24,38 @@ _PRESETS = [
     "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
 ]  # fmt: skip
 
+# Editorial character notes for pickers/mixers — subjective by nature, tuned by ear.
+_DESCRIPTIONS = {
+    "af_alloy": "even, matter-of-fact",
+    "af_aoede": "light, youthful lilt",
+    "af_bella": "bright and expressive — big range",
+    "af_heart": "warm, rounded — the default narrator",
+    "af_jessica": "soft and gentle",
+    "af_kore": "clear, poised",
+    "af_nicole": "breathy, close-mic whisper",
+    "af_nova": "crisp, energetic",
+    "af_river": "relaxed, airy",
+    "af_sarah": "steady, clean read",
+    "af_sky": "light with a bright edge",
+    "am_adam": "deep and forceful",
+    "am_echo": "mellow, low-key",
+    "am_eric": "plain mid-range",
+    "am_fenrir": "gravelly intensity",
+    "am_liam": "smooth, younger",
+    "am_michael": "warm, avuncular",
+    "am_onyx": "very deep, resonant",
+    "am_puck": "wry, energetic",
+    "am_santa": "jolly theatrical bass",
+    "bf_alice": "bright RP, precise",
+    "bf_emma": "warm British, rounded",
+    "bf_isabella": "soft-spoken RP",
+    "bf_lily": "light, youthful British",
+    "bm_daniel": "measured RP baritone",
+    "bm_fable": "storyteller's RP — crisp consonants",
+    "bm_george": "deep, formal RP",
+    "bm_lewis": "relaxed British mid-depth",
+}
+
 
 def _voice_meta(preset: str) -> EngineVoice:
     return EngineVoice(
@@ -31,6 +63,7 @@ def _voice_meta(preset: str) -> EngineVoice:
         name=preset.split("_", 1)[1].title(),
         language={"a": "en-US", "b": "en-GB"}[preset[0]],
         gender={"f": "female", "m": "male"}[preset[1]],
+        description=_DESCRIPTIONS.get(preset),
     )
 
 

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from fake_engine import FakeEngine
 from seiyuu.api.main import create_app
+from seiyuu.engines.base import EngineVoice
 from seiyuu.repository import JobStore
 from test_api_m6b1 import make_settings
 from test_api_m6b3 import _write_attribution
@@ -433,6 +434,67 @@ def test_cloud_slots_read_only_view(client) -> None:
     assert client.get("/api/cloud-slots").status_code == 500
 
 
+# -- kokoro preview (preset / mix demo) -----------------------------------------------------
+
+
+class KokoroFake(FakeEngine):
+    engine_id = "kokoro"
+
+    def list_voices(self):
+        return [
+            EngineVoice(id=i, name=i, description="d") for i in ("af_heart", "af_nicole", "bf_emma")
+        ]
+
+
+def _patch_preview(monkeypatch, engine=None) -> FakeEngine:
+    engine = engine or KokoroFake()
+    monkeypatch.setattr("seiyuu.api.registry.get_engine", lambda eid, **kw: engine)
+    monkeypatch.setattr("seiyuu.api.routes.voices.weights_cached", lambda eid: True)
+    return engine
+
+
+def test_preview_preset_synthesizes_then_caches(client, monkeypatch) -> None:
+    engine = _patch_preview(monkeypatch)
+    first = client.get("/api/engines/kokoro/preview?preset=af_heart")
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"].startswith("audio/wav")
+    assert len(engine.calls) == 1
+    again = client.get("/api/engines/kokoro/preview?preset=af_heart")
+    assert again.status_code == 200
+    assert len(engine.calls) == 1  # served from the preview cache, no GPU touch
+
+
+def test_preview_adhoc_mix_and_validation(client, monkeypatch) -> None:
+    engine = _patch_preview(monkeypatch)
+    mix = client.get("/api/engines/kokoro/preview?components=af_heart:70,af_nicole:30")
+    assert mix.status_code == 200, mix.text
+    assert len(engine.calls) == 1
+
+    crossed = client.get("/api/engines/kokoro/preview?components=af_heart:1,bf_emma:1")
+    assert crossed.status_code == 422
+    assert "language families" in _error(crossed)["message"]
+
+    assert client.get("/api/engines/kokoro/preview?preset=nope").status_code == 422
+    assert client.get("/api/engines/kokoro/preview").status_code == 422  # neither param
+    both = client.get("/api/engines/kokoro/preview?preset=af_heart&components=af_heart:1")
+    assert both.status_code == 422
+    assert client.get("/api/engines/chatterbox/preview?preset=x").status_code == 422
+    assert client.get("/api/engines/nope/preview?preset=x").status_code == 404
+
+
+def test_preview_refused_while_gpu_job_live(client, monkeypatch) -> None:
+    _patch_preview(monkeypatch)
+    store: JobStore = client.app.state.store
+    job = store.create("bk", "attribute")
+    resp = client.get("/api/engines/kokoro/preview?preset=af_heart")
+    assert resp.status_code == 409
+    err = _error(resp)
+    assert err["code"] == "gpu_busy"
+    assert err["detail"]["job_id"] == job.job_id
+    store.request_cancel(job.job_id)
+    assert client.get("/api/engines/kokoro/preview?preset=af_heart").status_code == 200
+
+
 # -- cover art ----------------------------------------------------------------------------
 
 
@@ -499,8 +561,9 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/books/{book_id}/assemble", "POST") in paths
     assert ("/api/books/{book_id}/master", "POST") in paths
     assert ("/api/books/{book_id}/cover", "GET") in paths
-    # the scoping doc's 44 rows + GET cover (M6c-5b: the shelf shows books by cover art)
-    assert len(paths) == 45
+    assert ("/api/engines/{engine_id}/preview", "GET") in paths
+    # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer demos)
+    assert len(paths) == 46
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

@@ -12,6 +12,7 @@ from seiyuu.api.deps import GateDep, ReconciledDep, RegistryDep, SettingsDep, St
 from seiyuu.api.registry import catalog_ids
 from seiyuu.api.schemas import (
     ApiLimits,
+    AttributionDefaults,
     HealthOut,
     JobOut,
     KeyStatus,
@@ -78,6 +79,17 @@ def system_status(
             attribution_confidence_threshold=cfg.attribution_confidence_threshold,
             full_render_confirm_blocks=FULL_RENDER_CONFIRM_BLOCKS,
             max_upload_bytes=cfg.max_upload_bytes,
+        ),
+        attribution=AttributionDefaults(
+            provider=cfg.attribution_provider,
+            model=(
+                cfg.attribution_model
+                if cfg.attribution_provider == "local"
+                else cfg.anthropic_model
+            ),
+            anthropic_model=cfg.anthropic_model,
+            prompt_version=cfg.attribution_prompt_version,
+            hybrid=cfg.attribution_hybrid,
         ),
         engines=catalog_ids(),
         version=__version__,

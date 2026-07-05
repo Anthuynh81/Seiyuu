@@ -21,6 +21,7 @@ import type {
   RenderRequest,
   RenderSummaryOut,
   SegmentBrowserOut,
+  SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
   VoiceCreate,
@@ -130,16 +131,29 @@ export function useMintQuote(bookId: string) {
   });
 }
 
+export interface AttributeInput {
+  chapters: number[]; // [] = whole book; a subset merges into the existing report
+  provider?: "local" | "anthropic";
+  model?: string;
+  confirm_paid?: boolean; // anthropic runs are paid — the enqueue 402s without this
+}
+
 export function useAttribute(bookId: string) {
   const qc = useQueryClient();
   return useMutation({
-    // chapters: [] = whole book; a subset merges into the existing report, so a big
-    // book can be attributed in installments just like it's rendered
-    mutationFn: (chapters: number[]) => postJson<JobOut>(`/api/books/${bookId}/attribute`, { chapters }),
+    mutationFn: (input: AttributeInput) => postJson<JobOut>(`/api/books/${bookId}/attribute`, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["jobs"] });
       qc.invalidateQueries({ queryKey: ["book", bookId] });
     },
+  });
+}
+
+export function useSystem() {
+  return useQuery({
+    queryKey: ["system"],
+    queryFn: () => api<SystemStatusOut>("/api/system"),
+    staleTime: 60_000, // config facts; no need to poll
   });
 }
 

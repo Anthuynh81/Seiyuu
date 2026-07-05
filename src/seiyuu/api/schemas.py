@@ -539,6 +539,17 @@ class ApiLimits(BaseModel):
     max_upload_bytes: int
 
 
+class AttributionDefaults(BaseModel):
+    """What an attribute job runs with when the request doesn't override — surfaced so
+    the UI can SHOW which LLM will read the book (and offer the picker)."""
+
+    provider: str  # "local" | "anthropic"
+    model: str  # the provider-appropriate default model id
+    anthropic_model: str  # what switching to the paid provider would use
+    prompt_version: str
+    hybrid: bool
+
+
 class SystemStatus(BaseModel):
     gpu_resident: str | None
     active_job: JobOut | None  # durable truth: the store's running row, not the runner snapshot
@@ -549,6 +560,7 @@ class SystemStatus(BaseModel):
     ollama: OllamaStatus
     keys: KeyStatus
     limits: ApiLimits
+    attribution: AttributionDefaults
     engines: list[str]
     version: str
 
@@ -596,6 +608,7 @@ class EngineVoiceOut(BaseModel):
     name: str
     language: str | None = None
     gender: str | None = None
+    description: str | None = None  # editorial character note (what am I blending?)
 
 
 class EngineVoicesOut(BaseModel):

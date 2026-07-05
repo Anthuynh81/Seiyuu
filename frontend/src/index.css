@@ -302,7 +302,8 @@ details.fine summary:hover { color: var(--tungsten); }
 .audit .stop { width: 11px; height: 11px; background: var(--clip); }
 .audit .lbl { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
 .audit .live { flex: 1; height: 8px; background: repeating-linear-gradient(90deg, var(--ok) 0 3px, transparent 3px 5px); animation: pulse 0.9s ease-in-out infinite; }
-.mixrow { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+.mixrow { display: flex; align-items: center; gap: 10px; margin: 7px 0 2px; }
+.voicenote { font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--ink-2); margin: 0 0 6px 2px; }
 .mixrow select { width: 190px; flex: none; }
 .mixrow input[type="range"] { flex: 1; accent-color: var(--tungsten); height: 4px; }
 .mixrow .pct { font-family: var(--mono); font-size: 11px; color: var(--ink-2); width: 38px; text-align: right; font-variant-numeric: tabular-nums; }

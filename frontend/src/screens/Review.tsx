@@ -367,6 +367,15 @@ export function Review() {
             <span className="mono" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
               {overview.data?.low_confidence_segments ?? "…"} low-confidence in the book · {lowConfInChapter.length} in this chapter
             </span>
+            {overview.data && (
+              <span
+                className="mono"
+                style={{ fontSize: 10.5, color: "var(--ink-3)" }}
+                title="the LLM that produced this attribution"
+              >
+                read by {overview.data.provider_id} · {overview.data.model_id} · {overview.data.prompt_version}
+              </span>
+            )}
             <button className="key quiet" onClick={jumpToLowConf} disabled={lowConfInChapter.length === 0}>next ▸</button>
             <span style={{ flex: 1 }} />
             <span className="tag">edits</span>

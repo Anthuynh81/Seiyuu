@@ -164,6 +164,40 @@ function VoiceCardView({ voice }: { voice: VoiceOut }) {
   );
 }
 
+/* -------------------------------------------------- preview demos (the mixer's ear) */
+
+/** Play a kokoro preview. Fetch first — refusals (gpu_busy, engine_cold…) come back as
+    JSON envelopes, which an <audio src> would swallow silently. */
+function useDemoPlayer() {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const play = async (url: string) => {
+    setError(null);
+    audioRef.current?.pause();
+    setBusy(url);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+        throw new Error(body?.error?.message ?? `preview failed (${res.status})`);
+      }
+      const el = new Audio(URL.createObjectURL(await res.blob()));
+      audioRef.current = el;
+      el.onended = () => setBusy(null);
+      await el.play();
+    } catch (e) {
+      setBusy(null);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return { play, busy, error };
+}
+
+const presetPreviewUrl = (id: string) => `/api/engines/kokoro/preview?preset=${id}`;
+const mixPreviewUrl = (layers: { preset_id: string; weight: number }[]) =>
+  `/api/engines/kokoro/preview?components=${layers.map((l) => `${l.preset_id}:${l.weight}`).join(",")}`;
+
 /* -------------------------------------------------- add / clone dialogs */
 
 function AddVoiceDialog({ onClose }: { onClose: () => void }) {
@@ -185,12 +219,27 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
   ]);
   const error = create.error instanceof ApiError ? create.error.message : create.error?.message;
 
-  const catalog = presets.data?.voices ?? [{ id: "af_heart", name: "Heart", language: "en-US", gender: "female" }];
+  const demo = useDemoPlayer();
+  const catalog =
+    presets.data?.voices ??
+    [{ id: "af_heart", name: "Heart", language: "en-US", gender: "female", description: null }];
+  const describe = (id: string) => catalog.find((p) => p.id === id)?.description;
   const presetOptions = catalog.map((p) => (
     <option key={p.id} value={p.id}>
-      {p.id} — {p.gender ?? "?"} {p.language ?? ""}
+      {p.id} — {p.gender ?? "?"} {p.language ?? ""}{p.description ? ` · ${p.description}` : ""}
     </option>
   ));
+  const demoKey = (url: string, label = "▶") => (
+    <button
+      className="key quiet"
+      style={{ padding: "3px 9px" }}
+      disabled={demo.busy !== null}
+      title="hear this on the standard audition line"
+      onClick={() => demo.play(url)}
+    >
+      {demo.busy === url ? "playing…" : label}
+    </button>
+  );
   const totalWeight = layers.reduce((a, l) => a + l.weight, 0) || 1;
   const setLayer = (i: number, patch: Partial<{ preset_id: string; weight: number }>) =>
     setLayers(layers.map((l, k) => (k === i ? { ...l, ...patch } : l)));
@@ -235,9 +284,13 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
               {engine === "kokoro" ? (
                 <>
                   <label>preset</label>
-                  <select value={presetId} onChange={(e) => setPresetId(e.target.value)}>
-                    {presetOptions}
-                  </select>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select value={presetId} onChange={(e) => setPresetId(e.target.value)} style={{ flex: 1 }}>
+                      {presetOptions}
+                    </select>
+                    {demoKey(presetPreviewUrl(presetId), "▶ demo")}
+                  </div>
+                  {describe(presetId) && <div className="voicenote">{describe(presetId)}</div>}
                 </>
               ) : (
                 <>
@@ -270,28 +323,32 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
               ) : (
                 <>
                   {layers.map((l, i) => (
-                    <div className="mixrow" key={i}>
-                      <select value={l.preset_id} onChange={(e) => setLayer(i, { preset_id: e.target.value })}>
-                        {presetOptions}
-                      </select>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={l.weight}
-                        aria-label={`weight of ${l.preset_id}`}
-                        onChange={(e) => setLayer(i, { weight: Number(e.target.value) })}
-                      />
-                      <span className="pct">{Math.round((100 * l.weight) / totalWeight)}%</span>
-                      <button
-                        className="rowedit"
-                        style={{ visibility: "visible" }}
-                        title="remove layer"
-                        disabled={layers.length <= 2}
-                        onClick={() => setLayers(layers.filter((_, k) => k !== i))}
-                      >
-                        ✕
-                      </button>
+                    <div key={i}>
+                      <div className="mixrow">
+                        {demoKey(presetPreviewUrl(l.preset_id))}
+                        <select value={l.preset_id} onChange={(e) => setLayer(i, { preset_id: e.target.value })}>
+                          {presetOptions}
+                        </select>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={l.weight}
+                          aria-label={`weight of ${l.preset_id}`}
+                          onChange={(e) => setLayer(i, { weight: Number(e.target.value) })}
+                        />
+                        <span className="pct">{Math.round((100 * l.weight) / totalWeight)}%</span>
+                        <button
+                          className="rowedit"
+                          style={{ visibility: "visible" }}
+                          title="remove layer"
+                          disabled={layers.length <= 2}
+                          onClick={() => setLayers(layers.filter((_, k) => k !== i))}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {describe(l.preset_id) && <div className="voicenote">{describe(l.preset_id)}</div>}
                     </div>
                   ))}
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
@@ -302,6 +359,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
                     >
                       + add layer
                     </button>
+                    {!blendInvalid && demoKey(mixPreviewUrl(active), "▶ demo mix")}
                     <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-3)" }}>
                       faders are ratios — the mix normalizes itself
                     </span>
@@ -317,6 +375,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
               )}
             </>
           )}
+          {demo.error && <div className="errline" style={{ marginTop: 12 }}>{demo.error}</div>}
           {error && <div className="errline" style={{ marginTop: 12 }}>{error}</div>}
         </div>
         <div className="df">

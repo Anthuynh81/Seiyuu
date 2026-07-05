@@ -11,6 +11,7 @@ import {
   useMintQuote,
   useRenderSummary,
   useStartJob,
+  useSystem,
   useValidation,
 } from "../api/hooks";
 import type {
@@ -380,6 +381,22 @@ export function RenderJobs() {
 
   const mint = useMintQuote(bookId ?? "");
   const attribute = useAttribute(bookId ?? "");
+  const system = useSystem();
+  const [llm, setLlm] = useState<{ provider: "local" | "anthropic"; model: string } | null>(null);
+  const [llmOpen, setLlmOpen] = useState(false);
+  const attrDefaults = system.data?.attribution;
+  const effLlm =
+    llm ??
+    (attrDefaults
+      ? { provider: attrDefaults.provider as "local" | "anthropic", model: attrDefaults.model }
+      : null);
+  const startAttribute = (confirmPaid = false) =>
+    attribute.mutate({
+      chapters,
+      ...(effLlm ? { provider: effLlm.provider, model: effLlm.model } : {}),
+      ...(confirmPaid ? { confirm_paid: true } : {}),
+    });
+  const attrErr = attribute.error instanceof ApiError ? attribute.error : null;
   const render = useStartJob(bookId ?? "", "render");
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
@@ -518,20 +535,68 @@ export function RenderJobs() {
                 <span className="tag">not attributed</span>
                 <p>
                   no speaker attribution yet — multivoice, Character Review, and the Listen read-along all need it
-                  (a bare single-voice render doesn't). Ollama must be running.{" "}
+                  (a bare single-voice render doesn't).{" "}
                   <button
                     className="link"
                     style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
                     disabled={attribute.isPending}
-                    onClick={() => attribute.mutate(chapters)}
+                    onClick={() => startAttribute()}
                   >
                     {attribute.isPending
                       ? "starting…"
-                      : `attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"} with the local model`}
+                      : `attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
                   </button>
                 </p>
-                {attribute.error && (
-                  <p className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>{attribute.error.message}</p>
+                <p className="mono" style={{ fontSize: 11, color: "var(--ink-2)", marginTop: 6 }}>
+                  reader: {effLlm ? `${effLlm.provider} · ${effLlm.model}` : "…"}
+                  {effLlm?.provider === "local" && " (ollama must be running)"}{" "}
+                  <button
+                    className="link"
+                    style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
+                    onClick={() => setLlmOpen(!llmOpen)}
+                  >
+                    {llmOpen ? "done" : "change"}
+                  </button>
+                </p>
+                {llmOpen && effLlm && attrDefaults && (
+                  <p style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                    <select
+                      value={effLlm.provider}
+                      onChange={(e) => {
+                        const p = e.target.value as "local" | "anthropic";
+                        setLlm({ provider: p, model: p === "local" ? attrDefaults.model : attrDefaults.anthropic_model });
+                      }}
+                    >
+                      <option value="local">local (ollama) — free</option>
+                      <option value="anthropic" disabled={!system.data?.keys.anthropic_configured}>
+                        anthropic — paid{system.data?.keys.anthropic_configured ? "" : " (no key configured)"}
+                      </option>
+                    </select>
+                    <input
+                      type="text"
+                      value={effLlm.model}
+                      aria-label="model id"
+                      onChange={(e) => setLlm({ provider: effLlm.provider, model: e.target.value })}
+                      style={{ background: "var(--booth)", border: "1px solid var(--hairline)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 11.5, padding: "5px 8px", width: 180 }}
+                    />
+                  </p>
+                )}
+                {attrErr && (
+                  <p className="mono" style={{ color: "var(--clip)", fontSize: 11, marginTop: 6 }}>
+                    {attrErr.message}
+                    {attrErr.code === "payment_confirmation_required" && (
+                      <>
+                        {" — "}
+                        <button
+                          className="link"
+                          style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
+                          onClick={() => startAttribute(true)}
+                        >
+                          confirm the paid run
+                        </button>
+                      </>
+                    )}
+                  </p>
                 )}
               </div>
             )

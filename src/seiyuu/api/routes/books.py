@@ -392,9 +392,7 @@ def segment_browser(
             continue
         if low_confidence and seg.confidence >= cfg.attribution_confidence_threshold:
             continue
-        has_audio, audio_segment, duration, voice_id, audio_key = audio_for(
-            seg.block_id, seg_index
-        )
+        has_audio, audio_segment, duration, voice_id, audio_key = audio_for(seg.block_id, seg_index)
         rows.append(
             SegmentRow(
                 block_id=seg.block_id,

@@ -22,6 +22,7 @@ class EngineVoice(BaseModel):
     name: str
     language: str | None = None
     gender: str | None = None
+    description: str | None = None  # short editorial character note for pickers/mixers
 
 
 class SynthesisError(Exception):

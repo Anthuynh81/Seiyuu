@@ -63,6 +63,11 @@ def test_system_shape_and_defaults(client) -> None:
     assert body["limits"]["full_render_confirm_blocks"] == 300
     assert body["limits"]["render_max_usd"] == 25.0
     assert body["limits"]["max_upload_bytes"] == 100 * 1024 * 1024
+    # the attribution defaults the UI shows (and lets the user override per job)
+    assert body["attribution"]["provider"] == "local"
+    assert body["attribution"]["model"] == "qwen2.5:7b"
+    assert body["attribution"]["prompt_version"]
+    assert body["attribution"]["hybrid"] is False
     assert body["engines"] == ["chatterbox", "elevenlabs", "kokoro"]
     assert body["version"] == __version__
 
@@ -148,6 +153,8 @@ def test_kokoro_voices(client) -> None:
     heart = next(v for v in body["voices"] if v["id"] == "af_heart")
     assert heart["language"] == "en-US"
     assert heart["gender"] == "female"
+    # every preset carries an editorial note — the mixer's "what am I blending?"
+    assert all(v["description"] for v in body["voices"])
 
 
 def test_chatterbox_voices_empty(client) -> None:

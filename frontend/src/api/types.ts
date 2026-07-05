@@ -290,7 +290,27 @@ export interface CloudSlotsOut {
 
 export interface EngineVoicesOut {
   engine_id: string;
-  voices: { id: string; name: string; language: string | null; gender: string | null }[];
+  voices: {
+    id: string;
+    name: string;
+    language: string | null;
+    gender: string | null;
+    description: string | null;
+  }[];
+}
+
+export interface AttributionDefaults {
+  provider: string;
+  model: string;
+  anthropic_model: string;
+  prompt_version: string;
+  hybrid: boolean;
+}
+
+/** Slim view of GET /api/system — only what screens consume. */
+export interface SystemStatusOut {
+  attribution: AttributionDefaults;
+  keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
 }
 
 /** "ch013_b0042" -> 13; null when unparsable. */
