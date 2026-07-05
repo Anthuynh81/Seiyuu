@@ -63,6 +63,9 @@ class VoiceMeta(BaseModel):
     # (bool only) stay valid and are grandfathered by VoiceLibrary.verify_consent.
     consent: ConsentAttestation | None = None
     source: str = "user_upload"  # user_upload | preset | auto_blend | manual_blend
+    # Free-form organization for the library UI (filter chips). Auto-cast stamps
+    # ["auto", book_id] so a book's generated cast groups itself; users edit freely.
+    tags: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=today_iso)
 
     @model_validator(mode="after")

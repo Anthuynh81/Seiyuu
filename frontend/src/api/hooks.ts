@@ -315,6 +315,19 @@ export function useAudition(voiceId: string) {
   });
 }
 
+export function useSetVoiceTags() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ voiceId, tags }: { voiceId: string; tags: string[] }) =>
+      api<VoiceOut>(`/api/voices/${voiceId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
 export function useDeleteVoice() {
   const qc = useQueryClient();
   return useMutation({

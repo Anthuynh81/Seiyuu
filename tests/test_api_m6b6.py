@@ -166,6 +166,25 @@ def test_create_preset_blend_and_duplicate(client) -> None:
     assert "language families" in mixed.json()["error"]["message"]
 
 
+def test_tags_roundtrip_and_validation(client) -> None:
+    _make_preset(client)
+    assert client.get("/api/voices").json()["voices"][0]["tags"] == []
+
+    set_resp = client.patch(
+        "/api/voices/v1", json={"tags": [" hero ", "Regency", "hero", "regency"]}
+    )
+    assert set_resp.status_code == 200, set_resp.text
+    # trimmed, case-insensitively deduped, order preserved
+    assert set_resp.json()["tags"] == ["hero", "Regency"]
+    assert client.get("/api/voices/v1").json()["tags"] == ["hero", "Regency"]
+
+    assert client.patch("/api/voices/v1", json={"tags": []}).json()["tags"] == []
+    assert client.patch("/api/voices/v1", json={"tags": ["x" * 41]}).status_code == 422
+    assert client.patch("/api/voices/nope", json={"tags": []}).status_code == 404
+    # tags are the ONLY mutable field — anything else is refused by the schema
+    assert client.patch("/api/voices/v1", json={"tags": [], "seed": 1}).status_code == 422
+
+
 # -- clone --------------------------------------------------------------------------------
 
 
@@ -562,8 +581,10 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/books/{book_id}/master", "POST") in paths
     assert ("/api/books/{book_id}/cover", "GET") in paths
     assert ("/api/engines/{engine_id}/preview", "GET") in paths
-    # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer demos)
-    assert len(paths) == 46
+    assert ("/api/voices/{voice_id}", "PATCH") in paths
+    # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer
+    # demos) + PATCH voice tags (library organization)
+    assert len(paths) == 47
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

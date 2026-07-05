@@ -40,6 +40,7 @@ from seiyuu.api.schemas import (
     VoiceListOut,
     VoiceOut,
     VoiceReferencesOut,
+    VoiceTagsWrite,
 )
 from seiyuu.engines import SynthesisError, get_engine_class, list_engine_ids
 from seiyuu.gpu import get_gpu_manager
@@ -347,6 +348,34 @@ def voice_detail(voice_id: str, cfg: SettingsDep) -> VoiceDetailOut:
         has_audition=has_audition,
         audition_url=f"/api/voices/{voice_id}/audition.wav" if has_audition else None,
     )
+
+
+@router.patch("/voices/{voice_id}", response_model=VoiceOut)
+def update_voice_tags(
+    voice_id: str, body: VoiceTagsWrite, request: Request, cfg: SettingsDep
+) -> VoiceOut:
+    """Replace a voice's tags — the library's only mutable organization field. Never
+    touches recipe/seed/consent, so no cache key can drift."""
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw in body.tags:
+        tag = raw.strip()
+        if not tag or len(tag) > 40:
+            raise ApiError(422, "invalid", f"bad tag {raw!r} (1-40 characters after trim)")
+        if tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        tags.append(tag)
+    with request.app.state.voices_mutex:
+        meta = _load_or_404(library, voice_id)
+        meta.tags = tags
+        try:
+            library.save(meta)
+        except (VoiceLibraryError, ValueError) as exc:
+            raise ApiError(422, "invalid", str(exc)) from exc
+    return _voice_out(library, meta)
 
 
 @router.get("/voices/{voice_id}/references", response_model=VoiceReferencesOut)

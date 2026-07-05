@@ -3,11 +3,13 @@ import { useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import {
   useAudition,
+  useBooks,
   useCloneVoice,
   useCloudSlots,
   useCreateVoice,
   useDeleteVoice,
   useKokoroPresets,
+  useSetVoiceTags,
   useVoices,
   useWarmup,
 } from "../api/hooks";
@@ -107,9 +109,63 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
   );
 }
 
+/* -------------------------------------------------- tags */
+
+function TagEditor({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: string) => string }) {
+  const setTags = useSetVoiceTags();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const save = () =>
+    setTags.mutate(
+      { voiceId: voice.voice_id, tags: draft.split(",").map((s) => s.trim()).filter(Boolean) },
+      { onSuccess: () => setEditing(false) },
+    );
+  if (!editing) {
+    return (
+      <div className="tagsrow">
+        {voice.tags.map((t) => (
+          <span key={t} className="tagchip" title={t}>{titleFor(t)}</span>
+        ))}
+        <button
+          className="rowedit"
+          style={{ visibility: "visible", marginLeft: 0 }}
+          title="edit tags"
+          onClick={() => {
+            setDraft(voice.tags.join(", "));
+            setEditing(true);
+          }}
+        >
+          {voice.tags.length ? "✎" : "+ tag"}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="tagsrow">
+      <input
+        className="taginput"
+        value={draft}
+        autoFocus
+        placeholder="comma, separated, tags"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+      <button className="key quiet" style={{ padding: "2px 8px" }} disabled={setTags.isPending} onClick={save}>
+        save
+      </button>
+      {setTags.error && (
+        <span className="mono" style={{ color: "var(--clip)", fontSize: 10 }}>{setTags.error.message}</span>
+      )}
+    </div>
+  );
+}
+
 /* -------------------------------------------------- voice card */
 
-function VoiceCardView({ voice }: { voice: VoiceOut }) {
+function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: string) => string }) {
   const del = useDeleteVoice();
   const kindLine =
     voice.kind === "preset"
@@ -151,6 +207,7 @@ function VoiceCardView({ voice }: { voice: VoiceOut }) {
           .
         </span>
       )}
+      <TagEditor voice={voice} titleFor={titleFor} />
       {delErr && (
         <div className="refusal">
           <span className="tag">{delErr.code}</span>
@@ -483,10 +540,48 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
 
 /* -------------------------------------------------- the screen */
 
+type VoiceSort = "name" | "newest" | "kind" | "engine";
+
 export function Voices() {
   const voices = useVoices();
   const slots = useCloudSlots();
+  const books = useBooks();
   const [dialog, setDialog] = useState<"none" | "add" | "clone">("none");
+  const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<"all" | "preset" | "blend" | "cloned">("all");
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [sort, setSort] = useState<VoiceSort>("name");
+
+  // auto-cast tags a voice with the book_id it was cast for — show the title instead
+  const titleFor = (tag: string) => books.data?.books.find((b) => b.book_id === tag)?.title ?? tag;
+
+  const all = voices.data?.voices ?? [];
+  const allTags = [...new Set(all.flatMap((v) => v.tags))].sort((a, b) =>
+    titleFor(a).localeCompare(titleFor(b)),
+  );
+  const q = query.trim().toLowerCase();
+  const shown = all
+    .filter((v) => kindFilter === "all" || v.kind === kindFilter)
+    .filter((v) => tagFilter === null || v.tags.includes(tagFilter))
+    .filter(
+      (v) =>
+        !q ||
+        v.name.toLowerCase().includes(q) ||
+        v.voice_id.toLowerCase().includes(q) ||
+        v.tags.some((t) => titleFor(t).toLowerCase().includes(q)),
+    )
+    .sort((a, b) => {
+      switch (sort) {
+        case "newest":
+          return b.created_at.localeCompare(a.created_at) || a.name.localeCompare(b.name);
+        case "kind":
+          return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+        case "engine":
+          return a.engine.localeCompare(b.engine) || a.name.localeCompare(b.name);
+        default:
+          return a.name.localeCompare(b.name);
+      }
+    });
 
   return (
     <section className="screen">
@@ -510,6 +605,48 @@ export function Voices() {
           <button className="key quiet" style={{ marginLeft: 14 }} onClick={() => setDialog("add")}>add voice</button>
           <button className="key" style={{ marginLeft: 8 }} onClick={() => setDialog("clone")}>new clone</button>
         </div>
+        <div className="voicetools">
+          <input
+            type="search"
+            className="taginput"
+            style={{ width: 200 }}
+            placeholder="search name, id, tag…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="search voices"
+          />
+          {(["all", "preset", "blend", "cloned"] as const).map((k) => (
+            <button key={k} className={`chap ${kindFilter === k ? "on" : ""}`} onClick={() => setKindFilter(k)}>
+              {k}
+            </button>
+          ))}
+          <span style={{ flex: 1 }} />
+          <span className="tag">sort</span>
+          <select value={sort} onChange={(e) => setSort(e.target.value as VoiceSort)}>
+            <option value="name">name</option>
+            <option value="newest">newest</option>
+            <option value="kind">kind</option>
+            <option value="engine">engine</option>
+          </select>
+        </div>
+        {allTags.length > 0 && (
+          <div className="voicetools" style={{ paddingTop: 0 }}>
+            <span className="tag">tags</span>
+            <button className={`tagbtn ${tagFilter === null ? "on" : ""}`} onClick={() => setTagFilter(null)}>
+              all
+            </button>
+            {allTags.map((t) => (
+              <button
+                key={t}
+                className={`tagbtn ${tagFilter === t ? "on" : ""}`}
+                title={t}
+                onClick={() => setTagFilter(tagFilter === t ? null : t)}
+              >
+                {titleFor(t)}
+              </button>
+            ))}
+          </div>
+        )}
         {voices.isPending && <div className="loadline" style={{ padding: 14 }}>opening the booth…</div>}
         {voices.isError && <div className="errline" style={{ margin: 14 }}>{voices.error.message}</div>}
         {voices.data?.unreadable.map((u) => (
@@ -523,8 +660,13 @@ export function Voices() {
             no voices yet — add a preset to get narrating, or clone from a reference clip
           </div>
         )}
+        {voices.data && all.length > 0 && shown.length === 0 && (
+          <div className="loadline" style={{ padding: 14 }}>
+            nothing matches those filters — {all.length} voice(s) hidden
+          </div>
+        )}
         <div className="voices" style={{ padding: 14 }}>
-          {voices.data?.voices.map((v) => <VoiceCardView key={v.voice_id} voice={v} />)}
+          {shown.map((v) => <VoiceCardView key={v.voice_id} voice={v} titleFor={titleFor} />)}
         </div>
       </div>
       {dialog === "add" && <AddVoiceDialog onClose={() => setDialog("none")} />}

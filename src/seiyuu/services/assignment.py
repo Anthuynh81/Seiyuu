@@ -51,6 +51,7 @@ def draft_assignment(
                     engine="kokoro",
                     preset_id=default_preset,
                     source="preset",
+                    tags=["auto"],  # shared across books — no book tag
                 )
             )
     elif not library.meta_path(narrator_voice_id).is_file():
@@ -72,6 +73,7 @@ def draft_assignment(
                     engine="kokoro",
                     blend=blend,
                     source="auto_blend",
+                    tags=["auto", report.book_id],  # the UI maps book_id -> title
                 )
             )
         assignments[char.id] = voice_id

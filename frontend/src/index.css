@@ -289,6 +289,13 @@ details.fine summary:hover { color: var(--tungsten); }
 .slotbank { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .slotbank i { width: 8px; height: 14px; border: 1px solid var(--hairline); }
 .slotbank i.lit { background: var(--tungsten); border-color: var(--tungsten); }
+.voicetools { display: flex; align-items: center; gap: 6px; padding: 10px 14px 8px; flex-wrap: wrap; }
+.taginput { background: var(--booth); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 4px 8px; flex: 1; min-width: 120px; }
+.tagbtn { font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; border: 1px solid var(--hairline); color: var(--ink-2); padding: 2px 9px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tagbtn:hover { border-color: var(--tungsten-dim); color: var(--ink); }
+.tagbtn.on { border-color: var(--tungsten); color: var(--tungsten); }
+.tagsrow { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.tagchip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em; border: 1px dotted var(--hairline); color: var(--ink-2); padding: 1px 7px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voices { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
 .vcard { background: var(--console); border: 1px solid var(--hairline); padding: 14px; display: flex; flex-direction: column; gap: 9px; min-height: 190px; }
 .vcard .eng { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }

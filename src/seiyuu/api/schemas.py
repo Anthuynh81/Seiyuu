@@ -479,6 +479,13 @@ class BlendVoiceCreate(BaseModel):
 VoiceCreate = Annotated[PresetVoiceCreate | BlendVoiceCreate, Field(discriminator="kind")]
 
 
+class VoiceTagsWrite(BaseModel):
+    """PATCH /voices/{id}: replace the tag list (the only mutable organization field)."""
+
+    model_config = {"extra": "forbid"}
+    tags: list[str] = Field(max_length=16)
+
+
 class VoiceReferencesOut(BaseModel):
     voice_id: str
     references: list[VoiceReference]  # empty = deletable

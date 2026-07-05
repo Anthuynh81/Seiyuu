@@ -239,6 +239,12 @@ def test_draft_creates_deterministic_voices(client) -> None:
     assert read.status_code == 200
     assert read.json()["assignments"] == {"alice": "alice_auto", "bob": "bob_auto"}
 
+    # auto-cast voices tag themselves for the library UI: character voices carry the
+    # book they were cast for; the narrator is shared across books (no book tag)
+    voices = {v["voice_id"]: v for v in client.get("/api/voices").json()["voices"]}
+    assert voices["alice_auto"]["tags"] == ["auto", BOOK]
+    assert voices["narrator_af_heart"]["tags"] == ["auto"]
+
 
 def test_draft_unknown_narrator_is_422(client) -> None:
     resp = client.post(f"/api/books/{BOOK}/assignment/draft", json={"narrator_voice_id": "ghost"})

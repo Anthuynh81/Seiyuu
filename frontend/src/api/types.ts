@@ -250,6 +250,8 @@ export interface VoiceOut {
   seed: number;
   consent_attested: boolean;
   consent: { attested_by: string; reference_sha256: string; attested_at: string } | null;
+  tags: string[]; // free-form; auto-cast stamps ["auto", book_id]
+  created_at: string;
   has_audition: boolean;
 }
 
