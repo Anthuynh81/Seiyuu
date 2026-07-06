@@ -39,11 +39,13 @@ from seiyuu.services.edits import (
 )
 
 
-def build_provider(cfg, provider_id: str, model: str, prompt_version: str):
+def build_provider(
+    cfg, provider_id: str, model: str, prompt_version: str, *, emit_thoughts: bool = False
+):
     """Construct an attribution provider, passing only the kwargs each backend needs."""
     from seiyuu.attribute.providers import get_provider
 
-    kwargs = {"prompt_version": prompt_version}
+    kwargs = {"prompt_version": prompt_version, "emit_thoughts": emit_thoughts}
     if provider_id == "local":
         kwargs["base_url"] = cfg.ollama_base_url
         kwargs["transport"] = cfg.ollama_transport
@@ -160,6 +162,7 @@ def run_attribution(
     prompt_version: str | None = None,
     use_hybrid: bool | None = None,
     use_adjudicate: bool | None = None,
+    emit_thoughts: bool | None = None,
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
@@ -178,13 +181,21 @@ def run_attribution(
     gpu = gpu or get_gpu_manager()
     provider_id = provider_id or cfg.attribution_provider
     model = model or cfg.attribution_model
-    prompt_version = prompt_version or cfg.attribution_prompt_version
+    emit_thoughts = cfg.emit_thoughts if emit_thoughts is None else emit_thoughts
+    # Thought emission requires the thought-aware v4 prompt; opting in forces it (and thus a
+    # distinct cache key) unless the caller pins an explicit --prompt-version.
+    default_prompt_version = "v4" if emit_thoughts else cfg.attribution_prompt_version
+    prompt_version = prompt_version or default_prompt_version
     use_hybrid = cfg.attribution_hybrid if use_hybrid is None else use_hybrid
     use_adjudicate = cfg.attribution_adjudicate if use_adjudicate is None else use_adjudicate
 
-    provider = provider or build_provider(cfg, provider_id, model, prompt_version)
+    provider = provider or build_provider(
+        cfg, provider_id, model, prompt_version, emit_thoughts=emit_thoughts
+    )
     if escalation_provider is None and use_hybrid and provider_id != "anthropic":
-        escalation_provider = build_provider(cfg, "anthropic", cfg.anthropic_model, prompt_version)
+        escalation_provider = build_provider(
+            cfg, "anthropic", cfg.anthropic_model, prompt_version, emit_thoughts=emit_thoughts
+        )
 
     # cloud providers (anthropic) never touch the card: acquiring would needlessly evict
     # a resident TTS model and serialize the whole M6b server behind a network-only run

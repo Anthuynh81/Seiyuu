@@ -31,11 +31,17 @@ class AnthropicProvider(AttributionLLM):
         model: str,
         prompts_dir,
         prompt_version: str = "v1",
+        emit_thoughts: bool = False,
         api_key: str | None = None,
         max_tokens: int = _MAX_TOKENS,
         client: Any | None = None,
     ) -> None:
-        super().__init__(model=model, prompts_dir=prompts_dir, prompt_version=prompt_version)
+        super().__init__(
+            model=model,
+            prompts_dir=prompts_dir,
+            prompt_version=prompt_version,
+            emit_thoughts=emit_thoughts,
+        )
         if client is None and not api_key:
             raise AttributionError(
                 "anthropic attribution is enabled but ANTHROPIC_API_KEY is not set; "

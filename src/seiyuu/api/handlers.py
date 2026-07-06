@@ -125,6 +125,7 @@ def build_handlers(
                 model=params.model,
                 prompt_version=params.prompt_version,
                 use_hybrid=params.use_hybrid,
+                emit_thoughts=params.emit_thoughts,
                 chapters=tuple(params.chapters),
                 progress=ctx.progress,
                 check_cancel=ctx.check_cancel,
