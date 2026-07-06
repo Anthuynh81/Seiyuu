@@ -24,8 +24,9 @@ from seiyuu.attribute.models import (
     ChunkLabels,
     Segment,
     SegmentType,
+    ThoughtVerdict,
 )
-from seiyuu.attribute.spans import is_quoted_span, split_block_spans
+from seiyuu.attribute.spans import Span, thought_candidate_spans
 
 
 class AttributionError(Exception):
@@ -70,7 +71,23 @@ def _render_blocks(blocks: list) -> str:
     return "\n\n".join(f"[{b.id}]\n{b.text}" for b in blocks) or "(none)"
 
 
-def render_prompt(template: str, registry: CharacterRegistry, chunk: Chunk) -> str:
+def _render_thought_candidates(spans_by_block: dict[str, list[Span]]) -> str:
+    """The deterministic thought candidates (candidate_id + its exact text) for the prompt."""
+    lines = [
+        f"- candidate_id: {span.candidate_id}\n  text: {span.text.strip()!r}"
+        for spans in spans_by_block.values()
+        for span in spans
+        if span.candidate_id
+    ]
+    return "\n".join(lines) or "(none)"
+
+
+def render_prompt(
+    template: str,
+    registry: CharacterRegistry,
+    chunk: Chunk,
+    thought_candidates: str = "(none)",
+) -> str:
     owned_ids = chunk.owned_ids
     context_blocks = [b for b in chunk.blocks if b.id not in owned_ids]
     # Render the registry in the SAME shape the model must emit (CharacterMention: a `name`
@@ -91,10 +108,13 @@ def render_prompt(template: str, registry: CharacterRegistry, chunk: Chunk) -> s
         ensure_ascii=False,
     )
     # Literal replacement, not str.format — the prompt contains JSON examples with braces.
+    # The {thought_candidates} placeholder only exists in the thought-aware (v4) prompt; on
+    # v3 the replace is a no-op, so the rendered prompt is byte-identical to today.
     return (
         template.replace("{registry_json}", registry_json)
         .replace("{context_blocks}", _render_blocks(context_blocks))
         .replace("{blocks}", _render_blocks(chunk.owned_blocks))
+        .replace("{thought_candidates}", thought_candidates)
     )
 
 
@@ -105,11 +125,25 @@ class AttributionLLM(ABC):
     # run never evicts a resident TTS model or serializes the manager. Default True: an
     # unknown future provider is presumed heavy until it says otherwise.
     uses_gpu: bool = True
+    # A confirmed thought below this confidence degrades to narration (never a low-confidence
+    # or guessed thought voice). Precision over recall, matching the alias adjudicator.
+    thought_confidence_floor: float = 0.5
 
-    def __init__(self, *, model: str, prompts_dir: Path, prompt_version: str = "v1") -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        prompts_dir: Path,
+        prompt_version: str = "v1",
+        emit_thoughts: bool = False,
+    ) -> None:
         self.model_id = model
         self.prompts_dir = Path(prompts_dir)
         self.prompt_version = prompt_version
+        # Opt-in (default OFF): when False the provider is byte-identical to the v3 path — no
+        # prose sub-split, no candidates, no thought verdicts. The caller pairs it with the v4
+        # prompt so the cache key (which includes prompt_version) keeps the two runs apart.
+        self.emit_thoughts = emit_thoughts
 
     def unload(self) -> None:  # noqa: B027 — intentional no-op default; cloud providers override nothing
         """Free GPU memory (GpuConsumer protocol). No-op default; cloud providers need nothing."""
@@ -123,9 +157,17 @@ class AttributionLLM(ABC):
         is sliced from the source, so reconstruction cannot be violated by the model.
         ``attempt`` is the 0-based retry index; a retry adds a corrective reminder.
         """
-        spans_by_block = {b.id: split_block_spans(b.text) for b in chunk.owned_blocks}
+        # Thought-off (default): pass no italic offsets, so the sub-split reproduces the
+        # quote-only split exactly and no candidates are generated — byte-identical to v3.
+        spans_by_block = {
+            b.id: thought_candidate_spans(
+                b.id, b.text, b.italic_spans if self.emit_thoughts else []
+            )
+            for b in chunk.owned_blocks
+        }
         template = _prompt_template(self.prompts_dir, self.prompt_version)
-        prompt = render_prompt(template, registry, chunk)
+        candidates = _render_thought_candidates(spans_by_block) if self.emit_thoughts else "(none)"
+        prompt = render_prompt(template, registry, chunk, candidates)
         if attempt > 0:
             prompt += (
                 "\n\n## Reminder\n\nReturn one entry per block with the `block_id` and the "
@@ -136,7 +178,9 @@ class AttributionLLM(ABC):
             raise MalformedOutputError(
                 f"{self.provider_id}/{self.model_id} returned a non-object for chunk {chunk.index}"
             )
-        segments = self._assemble_segments(raw.get("blocks") or [], spans_by_block)
+        segments = self._assemble_segments(
+            raw.get("blocks") or [], spans_by_block, raw.get("thoughts") or []
+        )
         # Character mentions are auxiliary metadata; a malformed one must not sink the whole
         # chunk. Drop entries that don't validate (e.g. the model echoed the registry shape).
         characters = []
@@ -148,11 +192,15 @@ class AttributionLLM(ABC):
         return ChunkAttribution(segments=segments, characters=characters)
 
     def _assemble_segments(
-        self, raw_blocks: list, spans_by_block: dict[str, list[str]]
+        self,
+        raw_blocks: list,
+        spans_by_block: dict[str, list[Span]],
+        raw_thoughts: list,
     ) -> list[Segment]:
         """Build segments from source spans: quoted span -> dialogue (model's per-block
-        speaker), prose -> narration. The model never counts spans or echoes text, so this
-        can't fail on alignment; an un-attributed quote degrades to narration, not an error.
+        speaker), a confirmed thought candidate -> thought (its named thinker), prose ->
+        narration. The model never counts spans or echoes text, so this can't fail on
+        alignment; an un-attributed quote or an unconfirmed candidate degrades to narration.
         """
         speakers: dict[str, tuple[str | None, float]] = {}
         for raw_block in raw_blocks:
@@ -162,26 +210,57 @@ class AttributionLLM(ABC):
                 continue  # drop a malformed entry; its block just gets no attributed speaker
             speakers[block.block_id] = (block.speaker, block.confidence)
 
+        # Only verdicts for candidate_ids we deterministically generated are honored, so a
+        # stray/hallucinated id can never mint a thought (mirrors the alias adjudicator).
+        known_ids = {
+            s.candidate_id for spans in spans_by_block.values() for s in spans if s.candidate_id
+        }
+        verdicts: dict[str, ThoughtVerdict] = {}
+        for raw_thought in raw_thoughts:
+            try:
+                verdict = ThoughtVerdict.model_validate(raw_thought)
+            except Exception:
+                continue
+            if verdict.candidate_id in known_ids:
+                verdicts[verdict.candidate_id] = verdict
+
         segments: list[Segment] = []
         for block_id, spans in spans_by_block.items():
             speaker, confidence = speakers.get(block_id, (None, 1.0))
-            for span_text in spans:
-                if not span_text.strip():
+            for span in spans:
+                if not span.text.strip():
                     continue  # whitespace-only span (e.g. a seam) carries no segment
-                if is_quoted_span(span_text) and speaker:
+                if span.quoted and speaker:
                     segments.append(
                         Segment(
                             block_id=block_id,
                             type=SegmentType.DIALOGUE,
                             speaker=speaker,
-                            text=span_text,
+                            text=span.text,
                             confidence=confidence,
                         )
                     )
-                else:
-                    # Prose, or a quote the model could not attribute: narration.
+                    continue
+                verdict = verdicts.get(span.candidate_id) if span.candidate_id else None
+                if (
+                    verdict is not None
+                    and verdict.is_thought
+                    and verdict.thinker
+                    and verdict.confidence >= self.thought_confidence_floor
+                ):
                     segments.append(
-                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span_text)
+                        Segment(
+                            block_id=block_id,
+                            type=SegmentType.THOUGHT,
+                            speaker=verdict.thinker,
+                            text=span.text,
+                            confidence=verdict.confidence,
+                        )
+                    )
+                else:
+                    # Prose, an unattributed quote, or an unconfirmed candidate: narration.
+                    segments.append(
+                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span.text)
                     )
         return segments
 

@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # task. qwen3.5:9b is higher quality but too large to stay on-GPU here (slow).
     attribution_model: str = "qwen2.5:7b"
     attribution_prompt_version: str = "v3"
+    # Emit Segment(type=thought) for interior monologue (its own voice at render). Opt-in,
+    # default OFF: when off, attribution is byte-identical to v3 (no prose sub-split, no
+    # thought candidates). When on, the run uses the thought-aware v4 prompt + candidate
+    # generation; because prompt_version becomes "v4" the cache key differs from v3, so
+    # thought-on and thought-off runs coexist without clobbering each other.
+    emit_thoughts: bool = False
     # Smaller chunks keep a local model's JSON output well within num_ctx and make it far
     # more likely to honor the schema; overlap_blocks still gives cross-block context.
     attribution_chunk_tokens: int = 800

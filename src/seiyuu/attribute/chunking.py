@@ -34,7 +34,14 @@ class Chunk:
 
     @property
     def content_hash(self) -> str:
-        """Hash of the owned blocks (id + text), in order — the cache's ``chunk_hash``."""
+        """Hash of the owned blocks (id + text), in order — the cache's ``chunk_hash``.
+
+        Intentionally EXCLUDES ``Block.italic_spans``: italics are a prompt INPUT (they drive
+        thought candidates), which is exactly what ``prompt_version`` versions, and re-ingest
+        does not change ``Block.text``. So turning thought emission on/off must flip
+        ``prompt_version`` (v3<->v4) to reach a distinct cache key — the chunk hash alone will
+        NOT self-invalidate, and relying on it would silently replay pre-italic chunks.
+        """
         payload = json.dumps([(b.id, b.text) for b in self.owned_blocks], separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

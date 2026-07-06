@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+from bs4 import BeautifulSoup
+
 from seiyuu.ingest import BlockType, NormalizedBook, parse_epub, write_normalized
+from seiyuu.ingest.epub import _collapse, _collapse_with_italics
 
 
 def all_text(book: NormalizedBook) -> str:
@@ -77,3 +80,18 @@ def test_book_meta(synthetic_epub: Path) -> None:
     assert meta.language == "en"
     assert meta.book_id.startswith("synthetic-test-book-")
     assert len(meta.source_sha256) == 64
+
+
+def test_inline_comment_excluded_matches_get_text() -> None:
+    # The italic-aware walker must reproduce ``_collapse(el.get_text())`` EXACTLY on the
+    # default thought-off path. HTML comments (and other NavigableString subclasses like
+    # <script>/<style>) are excluded by get_text(); the walker must exclude them too, or
+    # comment/script text leaks into narration and breaks thought-off byte identity.
+    el = BeautifulSoup(
+        "<p>Hello <!-- secret --> world<script>evil()</script><style>.x{}</style></p>",
+        "html.parser",
+    ).p
+    text, spans = _collapse_with_italics(el)
+    assert text == "Hello world"
+    assert text == _collapse(el.get_text())
+    assert spans == []
