@@ -317,7 +317,9 @@ def _narration_script(chunk, registry, attempt):
     )
 
 
-@pytest.mark.parametrize("emit,expected", [(True, "v4"), (False, "v3")])
+# emit_thoughts forces the thought-aware v6 prompt (v5 per-quote + emotion + candidates);
+# thought-off honors the pinned base (here v3) — the selection changed from v4/v3 at Phase 1.
+@pytest.mark.parametrize("emit,expected", [(True, "v6"), (False, "v3")])
 def test_run_attribution_selects_prompt_version_from_emit_thoughts(
     tmp_path, monkeypatch, emit, expected
 ):

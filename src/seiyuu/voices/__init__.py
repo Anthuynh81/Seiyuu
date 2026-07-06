@@ -9,6 +9,7 @@ from seiyuu.voices.assignment import (
 from seiyuu.voices.blends import auto_blend_recipe, canonical_recipe, render_voice_args
 from seiyuu.voices.casting import cast_book
 from seiyuu.voices.cloud import CloudVoiceError, CloudVoiceRegistry, ensure_cloud_voice
+from seiyuu.voices.emotion import map_emotion
 from seiyuu.voices.library import VoiceLibrary, VoiceLibraryError, sha256_file, slugify
 from seiyuu.voices.models import BlendComponent, ConsentAttestation, VoiceKind, VoiceMeta
 
@@ -28,6 +29,7 @@ __all__ = [
     "canonical_recipe",
     "cast_book",
     "ensure_cloud_voice",
+    "map_emotion",
     "render_voice_args",
     "resolve_voice",
     "sha256_file",

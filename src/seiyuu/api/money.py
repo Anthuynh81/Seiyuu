@@ -97,6 +97,9 @@ def compute_estimate(
         est = estimate_render_cost(
             report, book, library, assignment, book_output_dir,
             chapters=chapters, lexicon=lexicon,
+            # F2: same opt-in flag the render handler passes to render_book_multivoice, so the
+            # cost gate authorizes exactly the SegmentKeys render will bill.
+            apply_emotion=cfg.apply_emotion,
         )  # fmt: skip
         return EstimateContext(
             est=est, assignment_hash=hash_assignment(assignment), edit_warnings=warnings

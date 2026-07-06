@@ -43,12 +43,16 @@ class Settings(BaseSettings):
     # qwen2.5:7b: non-thinking, fits an 8GB GPU fully, reliable at the per-block speaker
     # task. qwen3.5:9b is higher quality but too large to stay on-GPU here (slow).
     attribution_model: str = "qwen2.5:7b"
-    attribution_prompt_version: str = "v3"
+    # v5 (F1+F2): per-quote (hybrid) speaker attribution + per-segment emotion, the new base.
+    # v6 = v5 + the thought-candidates section (selected when emit_thoughts is on). prompt_version
+    # is part of the ChunkCacheKey, so bumping v3->v5 re-attributes every book onto v5/v6 while
+    # old v3/v4 cached rows stay valid and never collide.
+    attribution_prompt_version: str = "v5"
     # Emit Segment(type=thought) for interior monologue (its own voice at render). Opt-in,
-    # default OFF: when off, attribution is byte-identical to v3 (no prose sub-split, no
-    # thought candidates). When on, the run uses the thought-aware v4 prompt + candidate
-    # generation; because prompt_version becomes "v4" the cache key differs from v3, so
-    # thought-on and thought-off runs coexist without clobbering each other.
+    # default OFF: when off, attribution uses v5 (per-quote + emotion). When on, the run uses
+    # the thought-aware v6 prompt (v5 + candidates) + candidate generation; because
+    # prompt_version becomes "v6" the cache key differs from v5, so thought-on and thought-off
+    # runs coexist without clobbering each other.
     emit_thoughts: bool = False
     # Smaller chunks keep a local model's JSON output well within num_ctx and make it far
     # more likely to honor the schema; overlap_blocks still gives cross-block context.
@@ -85,6 +89,13 @@ class Settings(BaseSettings):
     # TTS defaults (M1).
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"
+
+    # Per-segment emotion (F2). Opt-in, default OFF: when off, render/estimate IGNORE the
+    # attribution's segment_emotions and settings stay byte-identical to a no-emotion render
+    # (cache stable). When on, the quantized emotion folds into each dialogue segment's
+    # settings_hash for engines that support it (Chatterbox/ElevenLabs; Kokoro degrades to
+    # neutral). Attribution ALWAYS captures emotion under v5/v6 regardless of this flag.
+    apply_emotion: bool = False
 
     # Text normalization (M3). Output changes auto-invalidate the segment cache via
     # normalized_text_hash; this string is for debuggability only, NOT part of the key.

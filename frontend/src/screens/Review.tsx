@@ -6,6 +6,7 @@ import {
   useAssignment,
   useBook,
   useBooks,
+  useChapterAttribution,
   useCharacters,
   useDraftAssignment,
   useEditLog,
@@ -16,10 +17,11 @@ import {
   useUndoEdit,
   useVoices,
 } from "../api/hooks";
-import type { SuggestCastResponse } from "../api/types";
+import type { EmotionVerdict, SuggestCastResponse } from "../api/types";
 import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
+import { buildEmotionMap, emotionKey, intensityDots } from "../lib/emotion";
 
 /* -------------------------------------------------- frontier (localStorage, per book) */
 
@@ -314,6 +316,13 @@ export function Review() {
 
   const overview = useCharacters(bookId, attributed);
   const segments = useSegments(bookId, chapter, attributed);
+  // F2: the per-segment emotion tags the model captured (read-only here — override needs a
+  // backend edit op that doesn't exist yet). Keyed block_id:ordinal to line up with each row.
+  const attribution = useChapterAttribution(bookId, chapter, attributed);
+  const emotionMap = useMemo(
+    () => buildEmotionMap(attribution.data?.report.chapters.find((c) => c.index === chapter)),
+    [attribution.data, chapter],
+  );
   const editLog = useEditLog(attributed ? bookId : null);
   const undo = useUndoEdit(bookId ?? "");
 
@@ -646,6 +655,15 @@ export function Review() {
                   {segments.data && ` · ${segments.data.title}`}
                 </span>
                 <button className="chap" disabled={chapter >= chapterCount} onClick={() => setChapter(chapter + 1)}>›</button>
+                {emotionMap.size > 0 && (
+                  <span
+                    className="mono"
+                    style={{ fontSize: 10.5, color: "var(--ink-3)" }}
+                    title="the emotion the model tagged each line with — voiced at render only when emotion rendering is enabled"
+                  >
+                    {emotionMap.size} emotion tag(s) in this chapter
+                  </span>
+                )}
                 {warnings.length > 0 && (
                   <span className="mono" style={{ fontSize: 10.5, color: "var(--caution)", marginLeft: "auto" }}>
                     {warnings.length} edit warning(s)
@@ -674,6 +692,7 @@ export function Review() {
                         row={s}
                         low={low}
                         maskedName={dimmed}
+                        emotion={emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null}
                         open={popoverAt === key}
                         onChip={() => setPopoverAt(popoverAt === key ? null : key)}
                         popover={
@@ -706,6 +725,7 @@ function SegmentPair({
   row,
   low,
   maskedName,
+  emotion,
   open,
   onChip,
   popover,
@@ -713,6 +733,7 @@ function SegmentPair({
   row: SegmentRow;
   low: boolean;
   maskedName: boolean;
+  emotion: EmotionVerdict | null;
   open: boolean;
   onChip: () => void;
   popover: React.ReactNode;
@@ -729,6 +750,14 @@ function SegmentPair({
         <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={onChip} role="button" tabIndex={0}>
           {row.speaker === null ? chipLabel : chipLabel.toUpperCase()}
         </span>
+        {emotion && (
+          <span
+            className={`emochip ${emotion.label}`}
+            title={`emotion tag from attribution · intensity ${emotion.intensity}/3 — applied to the voice only when emotion rendering is enabled`}
+          >
+            {emotion.label} {intensityDots(emotion.intensity)}
+          </span>
+        )}
         <span className={`conf ${low ? "low" : ""}`}>
           conf {row.confidence.toFixed(2)}
           {low && " · in review"}

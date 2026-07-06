@@ -21,6 +21,7 @@ from seiyuu.attribute.models import (
     AttributionReport,
     CharacterRegistry,
     ChunkAttribution,
+    EmotionVerdict,
     FlaggedBlock,
     Segment,
     SegmentType,
@@ -105,6 +106,19 @@ def _fallback_segments(blocks: list[Block]) -> list[Segment]:
     ]
 
 
+def _aligned_emotions(attribution: ChunkAttribution, count: int) -> list[EmotionVerdict | None]:
+    """The chunk's per-segment emotions, normalized to ``count`` entries (F2).
+
+    A v5/v6 attribution carries one emotion per segment; a v3/v4-shaped cached row carries an
+    empty list. Either way we return exactly ``count`` entries so it stays index-aligned to the
+    resolved segments as they thread into the chapter.
+    """
+    emotions = attribution.segment_emotions
+    if len(emotions) == count:
+        return list(emotions)
+    return [None] * count
+
+
 def attribute_book(
     book: NormalizedBook,
     provider: AttributionLLM,
@@ -153,7 +167,9 @@ def attribute_book(
         chunks = chunk_blocks(
             paragraphs, budget_tokens=budget_tokens, overlap_blocks=overlap_blocks
         )
-        by_block: dict[str, list[Segment]] = {}
+        # Each entry is (segment, emotion) so the F2 emotion rides alongside its segment through
+        # resolution and block regrouping and can never desync from segment order.
+        by_block: dict[str, list[tuple[Segment, EmotionVerdict | None]]] = {}
 
         for chunk in chunks:
             check()
@@ -186,7 +202,7 @@ def attribute_book(
                             )
                         )
                     for block in chunk.owned_blocks:
-                        by_block[block.id] = _fallback_segments([block])
+                        by_block[block.id] = [(seg, None) for seg in _fallback_segments([block])]
                     continue
                 attribution = outcome.attribution
                 cache.put(key, attribution)
@@ -196,18 +212,31 @@ def attribute_book(
                 registry, attribution.segments, attribution.characters
             )
             notes.extend(chunk_notes)
-            for seg in resolved:
-                by_block.setdefault(seg.block_id, []).append(seg)
+            # resolve_chunk preserves order + count, so the aligned emotions zip 1:1.
+            chunk_emotions = _aligned_emotions(attribution, len(resolved))
+            for seg, emotion in zip(resolved, chunk_emotions, strict=True):
+                by_block.setdefault(seg.block_id, []).append((seg, emotion))
 
         segments: list[Segment] = []
+        segment_emotions: list[EmotionVerdict | None] = []
         for block in chapter.blocks:
             if block.type is BlockType.HEADING:
                 segments.append(
                     Segment(block_id=block.id, type=SegmentType.NARRATION, text=block.text)
                 )
+                segment_emotions.append(None)
             elif block.type is BlockType.PARAGRAPH:
-                segments.extend(by_block.get(block.id, []))
-        out_chapters.append(AttributedChapter(index=ci, title=chapter.title, segments=segments))
+                for seg, emotion in by_block.get(block.id, []):
+                    segments.append(seg)
+                    segment_emotions.append(emotion)
+        out_chapters.append(
+            AttributedChapter(
+                index=ci,
+                title=chapter.title,
+                segments=segments,
+                segment_emotions=segment_emotions,
+            )
+        )
 
     # Once the whole registry exists, merge provably-same characters (honorific variants,
     # subsumed aliases) and flag the ambiguous. Then remap any absorbed speaker ids on the

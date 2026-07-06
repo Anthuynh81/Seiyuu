@@ -129,6 +129,12 @@ def _voices_dir_option(fn):
     help="Authorize paid cloud (ElevenLabs) synthesis without the interactive prompt.",
 )
 @click.option(
+    "--apply-emotion/--no-apply-emotion",
+    default=None,
+    help="Apply per-segment emotion (F2) to render settings for supported engines "
+    "(multivoice only; default from settings.apply_emotion). Off keeps renders byte-identical.",
+)
+@click.option(
     "--cost-token",
     default=None,
     help="Signed cost token from `seiyuu estimate-cost --token`; refused if anything "
@@ -156,6 +162,7 @@ def render(
     seed: int,
     multivoice: bool,
     confirm_cost: bool,
+    apply_emotion: bool | None,
     cost_token: str | None,
     books_dir: Path | None,
     output_dir: Path | None,
@@ -176,7 +183,7 @@ def render(
     if multivoice:
         _render_multivoice_cli(
             cfg, book, book_dir, output_dir, voices_dir, chapter_indices,
-            confirm_cost=confirm_cost, cost_token=cost_token,
+            confirm_cost=confirm_cost, cost_token=cost_token, apply_emotion=apply_emotion,
         )  # fmt: skip
         return
 
@@ -293,7 +300,7 @@ def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cos
 
 def _render_multivoice_cli(
     cfg, book, book_dir, output_dir, voices_dir, chapter_indices, *,
-    confirm_cost=False, cost_token=None,
+    confirm_cost=False, cost_token=None, apply_emotion=None,
 ):  # fmt: skip
     """Shared multi-voice render: load inputs, cost-gate paid engines, render, echo summary."""
     from seiyuu.render import (
@@ -319,11 +326,15 @@ def _render_multivoice_cli(
     from seiyuu.normalize.lexicon import load_compiled_lexicon
 
     lexicon = load_compiled_lexicon(book_dir)  # F3: same lexicon for estimate + render
+    # F2: resolve the opt-in flag once; estimate AND render MUST use the same value or the cost
+    # gate authorizes a different bill than render runs up.
+    apply_emotion = cfg.apply_emotion if apply_emotion is None else apply_emotion
 
     # cost gate: estimate first; paid segments require the ceiling + explicit approval
     est = estimate_render_cost(
-        report, book, lib, assignment, out_book_dir, chapters=chapter_indices, lexicon=lexicon
-    )
+        report, book, lib, assignment, out_book_dir, chapters=chapter_indices, lexicon=lexicon,
+        apply_emotion=apply_emotion,
+    )  # fmt: skip
     approved_usd = _pass_cost_gate(
         cfg, est,
         book_id=book_id,
@@ -348,6 +359,7 @@ def _render_multivoice_cli(
             max_paid_usd=approved_usd,
             cloud_max_slots=cfg.elevenlabs_max_voice_slots,
             lexicon=lexicon,
+            apply_emotion=apply_emotion,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

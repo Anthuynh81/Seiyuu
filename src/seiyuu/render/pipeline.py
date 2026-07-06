@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from seiyuu.api.concurrency import BorrowBroker
     from seiyuu.normalize.lexicon import CompiledLexicon
 
-from seiyuu.attribute.models import AttributionReport
+from seiyuu.attribute.models import AttributionReport, EmotionVerdict
 from seiyuu.engines import TTSEngine, get_engine
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import BlockType, NormalizedBook
@@ -32,6 +32,7 @@ from seiyuu.voices import (
     VoiceLibrary,
     VoiceLibraryError,
     ensure_cloud_voice,
+    map_emotion,
     render_voice_args,
     resolve_voice,
 )
@@ -58,6 +59,39 @@ class CostEstimate:
 
 def _paid_fingerprint(paid_key_hashes: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(paid_key_hashes)).encode("utf-8")).hexdigest()
+
+
+def _emotion_settings(
+    settings: dict[str, Any],
+    engine_id: str,
+    emotion: "EmotionVerdict | None",
+    apply_emotion: bool,
+) -> dict[str, Any]:
+    """Merge the F2 emotion override into ``settings`` (identically at render AND estimate).
+
+    Returns ``settings`` UNCHANGED (the same dict) when ``apply_emotion`` is off, the emotion
+    is None/neutral, or the engine has no emotion knob — so the FROZEN SegmentKey is byte-
+    identical to a no-emotion render (cache-stable). When on and non-neutral, the override
+    folds into ``settings_hash``'s value. This single helper is the parity guarantee: render
+    and the cost estimate must call it with the same arguments or the gate authorizes a
+    different bill than render runs up.
+    """
+    if not apply_emotion or emotion is None:
+        return settings
+    override = map_emotion(engine_id, emotion)
+    return {**settings, **override} if override else settings
+
+
+def _emotions_by_segment(chapter) -> list["EmotionVerdict | None"]:
+    """The chapter's per-segment emotions, normalized to one entry per segment (F2).
+
+    Empty (v3/v4 report) or a length mismatch degrades to all-None, so render/estimate treat a
+    pre-emotion book exactly as today.
+    """
+    emotions = getattr(chapter, "segment_emotions", None) or []
+    if len(emotions) == len(chapter.segments):
+        return list(emotions)
+    return [None] * len(chapter.segments)
 
 
 def _effective_single_args(
@@ -413,6 +447,7 @@ def render_book_multivoice(
     check_cancel: Callable[[], None] | None = None,
     broker: "BorrowBroker | None" = None,
     lexicon: "CompiledLexicon | None" = None,
+    apply_emotion: bool = False,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -481,16 +516,18 @@ def render_book_multivoice(
             check()
             lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
+            att_chapter = attributed[ci]
+            emotions = _emotions_by_segment(att_chapter)  # F2: index-aligned to segments
             by_block: dict[str, list] = {}
-            for seg in attributed[ci].segments:
-                by_block.setdefault(seg.block_id, []).append(seg)
+            for seg, emotion in zip(att_chapter.segments, emotions, strict=True):
+                by_block.setdefault(seg.block_id, []).append((seg, emotion))
 
             rendered: list[RenderedSegment] = []
             for block in chapter.blocks:
                 if block.type is BlockType.SCENE_BREAK:
                     rendered.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
-                for seg in by_block.get(block.id, []):
+                for seg, emotion in by_block.get(block.id, []):
                     check()
                     lend()
                     voice_id = resolve_voice(seg, assignment)
@@ -505,6 +542,10 @@ def render_book_multivoice(
                         seg.text, profile=profile_for(meta.engine), lexicon=lexicon
                     )
                     engine_voice, settings = render_voice_args(meta)
+                    # F2: fold the per-segment emotion override in BEFORE the FROZEN SegmentKey
+                    # (and before synthesis), so it rides settings_hash. No-op when apply_emotion
+                    # is off / neutral / Kokoro — key stays byte-identical to today.
+                    settings = _emotion_settings(settings, meta.engine, emotion, apply_emotion)
                     key = SegmentKey.build(
                         engine=meta.engine,
                         engine_model_version=engine.model_version,
@@ -637,6 +678,7 @@ def estimate_render_cost(
     *,
     chapters: tuple[int, ...] = (),
     lexicon: "CompiledLexicon | None" = None,
+    apply_emotion: bool = False,
 ) -> CostEstimate:
     """Pre-flight cost of a multi-voice render: USD over the segments that aren't already cached.
 
@@ -668,13 +710,15 @@ def estimate_render_cost(
     for ci, chapter in enumerate(book.chapters, start=1):
         if (wanted and ci not in wanted) or ci not in attributed:
             continue
+        att_chapter = attributed[ci]
+        emotions = _emotions_by_segment(att_chapter)  # F2: index-aligned to segments
         by_block: dict[str, list] = {}
-        for seg in attributed[ci].segments:
-            by_block.setdefault(seg.block_id, []).append(seg)
+        for seg, emotion in zip(att_chapter.segments, emotions, strict=True):
+            by_block.setdefault(seg.block_id, []).append((seg, emotion))
         for block in chapter.blocks:
             if block.type is BlockType.SCENE_BREAK:
                 continue
-            for seg in by_block.get(block.id, []):
+            for seg, emotion in by_block.get(block.id, []):
                 # resolved id, NOT meta.voice_id: must build the EXACT SegmentKey the render
                 # loop will use, or the gate authorizes a different bill than render runs up
                 voice_id = resolve_voice(seg, assignment)
@@ -682,6 +726,9 @@ def estimate_render_cost(
                 engine = engine_for(meta.engine)
                 text = normalize_text(seg.text, profile=profile_for(meta.engine), lexicon=lexicon)
                 _, settings = render_voice_args(meta)
+                # F2 parity: identical emotion merge as render_book_multivoice, so the gate
+                # authorizes exactly the SegmentKeys render will bill.
+                settings = _emotion_settings(settings, meta.engine, emotion, apply_emotion)
                 key = SegmentKey.build(
                     engine=meta.engine,
                     engine_model_version=engine.model_version,

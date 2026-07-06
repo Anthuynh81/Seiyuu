@@ -212,6 +212,9 @@ def build_handlers(
                     check_cancel=ctx.check_cancel,
                     broker=broker,  # lend the resident engine to auditions between segments
                     lexicon=lexicon,
+                    # F2: MUST match compute_estimate's apply_emotion (both read cfg) or the
+                    # verified quote authorizes a different bill than render runs up.
+                    apply_emotion=cfg.apply_emotion,
                 )
             else:
                 render_book(
