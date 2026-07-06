@@ -12,9 +12,11 @@ from seiyuu.services.assignment import (
     save_assignment,
 )
 from seiyuu.services.attribution import (
+    build_adjudicator,
     build_provider,
     load_report,
     record_edit,
+    run_adjudication,
     run_attribution,
     undo_edit,
 )
@@ -51,6 +53,7 @@ __all__ = [
     "append_edit",
     "apply_edits",
     "assignment_path",
+    "build_adjudicator",
     "build_provider",
     "characters_overview",
     "delete_voice",
@@ -60,6 +63,7 @@ __all__ = [
     "load_report",
     "pop_edit",
     "record_edit",
+    "run_adjudication",
     "run_attribution",
     "save_assignment",
     "save_edits",

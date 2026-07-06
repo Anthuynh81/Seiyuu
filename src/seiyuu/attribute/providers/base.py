@@ -52,6 +52,15 @@ def _prompt_template(prompts_dir: Path, version: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+@lru_cache
+def adjudication_template(prompts_dir: Path, version: str) -> str:
+    """Load the versioned alias-adjudication prompt (mirrors :func:`_prompt_template`)."""
+    path = prompts_dir / "adjudication" / f"{version}.md"
+    if not path.is_file():
+        raise AttributionError(f"adjudication prompt not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
 def chunk_label_schema() -> dict[str, Any]:
     """JSON schema for the model's RAW output (per-block span labels + character mentions)."""
     return ChunkLabels.model_json_schema()
@@ -175,6 +184,24 @@ class AttributionLLM(ABC):
                         Segment(block_id=block_id, type=SegmentType.NARRATION, text=span_text)
                     )
         return segments
+
+    def complete_structured(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        *,
+        tool_name: str = "emit_structured",
+        tool_description: str = "Return the structured result matching the schema.",
+    ) -> dict[str, Any]:
+        """Public seam for one-off schema-enforced calls outside the attribution template.
+
+        Reuses each backend's schema-enforced JSON path (Ollama structured outputs / the
+        Anthropic forced tool) so callers such as the alias adjudicator never reach into the
+        protected ``_complete_json``. ``tool_name``/``tool_description`` only matter to the
+        Anthropic forced tool (it overrides this to honor them); backends that ignore tool
+        metadata fall through to ``_complete_json`` unchanged.
+        """
+        return self._complete_json(prompt, schema)
 
     @abstractmethod
     def _complete_json(

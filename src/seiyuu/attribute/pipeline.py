@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from seiyuu.attribute.aliases import resolve_registry_aliases
+from seiyuu.attribute.aliases import AliasResolver, resolve_registry_aliases
 from seiyuu.attribute.cache import AttributionCache, ChunkCacheKey
 from seiyuu.attribute.chunking import Chunk, chunk_blocks
 from seiyuu.attribute.models import (
@@ -80,12 +80,20 @@ def _attribute_chunk_validated(
     return _ChunkOutcome(None, attempts=max_retries + 1, failures=last_failures)
 
 
+_SUPERSEDABLE_PREFIXES = ("not merging", "alias: ambiguous", "alias: low-evidence")
+
+
 def _drop_superseded_notes(notes: list[str], merged_names: set[str]) -> list[str]:
-    """Drop incremental 'not merging X' notes the alias post-pass later resolved by merging X."""
+    """Drop review notes the alias post-pass later resolved by merging one of their names.
+
+    Covers the incremental 'not merging X' flags AND the deterministic 'alias: ambiguous'/
+    'alias: low-evidence' flags: once adjudication merges a character named X, any note that
+    named X as un-mergeable is stale and would sit misleadingly beside the merged record.
+    """
     return [
         n
         for n in notes
-        if not (n.startswith("not merging") and any(f"'{m}'" in n for m in merged_names))
+        if not (n.startswith(_SUPERSEDABLE_PREFIXES) and any(f"'{m}'" in n for m in merged_names))
     ]
 
 
@@ -109,6 +117,10 @@ def attribute_book(
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
+    resolver: AliasResolver | None = None,
+    adjudication_confidence_threshold: float = 0.85,
+    adjudication_candidate_cap: int = 40,
+    adjudication_use_nicknames: bool = True,
 ) -> AttributionReport:
     """Attribute a book (or a 1-based subset of ``chapters``) into segments + a registry.
 
@@ -201,7 +213,14 @@ def attribute_book(
     # subsumed aliases) and flag the ambiguous. Then remap any absorbed speaker ids on the
     # already-resolved segments. This touches only the in-memory report, never the cache.
     pre_names = {c.id: c.canonical_name for c in registry.characters}
-    id_remap, alias_notes = resolve_registry_aliases(registry, out_chapters)
+    id_remap, alias_notes = resolve_registry_aliases(
+        registry,
+        out_chapters,
+        resolver=resolver,
+        confidence_threshold=adjudication_confidence_threshold,
+        candidate_cap=adjudication_candidate_cap,
+        use_nicknames=adjudication_use_nicknames,
+    )
     notes = _drop_superseded_notes(notes, {pre_names[loser] for loser in id_remap})
     notes.extend(alias_notes)
     if id_remap:

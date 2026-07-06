@@ -22,7 +22,9 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from seiyuu.attribute import ATTRIBUTION_NAME, AttributionCache, attribute_book, write_attribution
+from seiyuu.attribute.aliases import resolve_registry_aliases
 from seiyuu.attribute.models import AttributionReport, CharacterRegistry
+from seiyuu.attribute.pipeline import _drop_superseded_notes
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import NormalizedBook
 from seiyuu.repository import file_lock
@@ -51,6 +53,34 @@ def build_provider(cfg, provider_id: str, model: str, prompt_version: str):
     elif provider_id == "anthropic":
         kwargs["api_key"] = cfg.anthropic_api_key
     return get_provider(provider_id, model=model, prompts_dir=cfg.prompts_dir, **kwargs)
+
+
+def _adjudication_model(cfg, provider_id: str) -> str:
+    """The adjudication model, defaulting per-provider when unset."""
+    if cfg.adjudication_model:
+        return cfg.adjudication_model
+    return cfg.anthropic_model if provider_id == "anthropic" else cfg.attribution_model
+
+
+def build_adjudicator(cfg, cache, book_id: str):
+    """Construct the cache-wrapped LLM alias adjudicator (the AliasResolver).
+
+    Reuses ``build_provider`` (and thus the anthropic missing-key ctor gate — a PAID
+    adjudicator never runs without an explicit key). Returns an ``LLMAdjudicator`` bound to
+    the per-book adjudication cache; the caller passes it as ``attribute_book``'s ``resolver``.
+    """
+    from seiyuu.attribute.adjudicate import LLMAdjudicator
+
+    provider_id = cfg.adjudication_provider
+    model = _adjudication_model(cfg, provider_id)
+    provider = build_provider(cfg, provider_id, model, cfg.adjudication_prompt_version)
+    return LLMAdjudicator(
+        provider,
+        cache=cache,
+        book_id=book_id,
+        prompt_version=cfg.adjudication_prompt_version,
+        prompts_dir=cfg.prompts_dir,
+    )
 
 
 def load_report(book_dir: Path) -> tuple[AttributionReport, list[str]]:
@@ -129,12 +159,14 @@ def run_attribution(
     model: str | None = None,
     prompt_version: str | None = None,
     use_hybrid: bool | None = None,
+    use_adjudicate: bool | None = None,
     chapters: tuple[int, ...] = (),
     progress: Callable[[str], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
     gpu=None,
     provider=None,  # injectable for tests; built from cfg otherwise
     escalation_provider=None,
+    resolver=None,  # injectable AliasResolver for tests; built from cfg otherwise
 ) -> AttributionReport:
     """Attribute ``book``: cache-aware LLM run → RAW attribution.json → effective report.
 
@@ -148,6 +180,7 @@ def run_attribution(
     model = model or cfg.attribution_model
     prompt_version = prompt_version or cfg.attribution_prompt_version
     use_hybrid = cfg.attribution_hybrid if use_hybrid is None else use_hybrid
+    use_adjudicate = cfg.attribution_adjudicate if use_adjudicate is None else use_adjudicate
 
     provider = provider or build_provider(cfg, provider_id, model, prompt_version)
     if escalation_provider is None and use_hybrid and provider_id != "anthropic":
@@ -164,6 +197,13 @@ def run_attribution(
     try:
         with ctx:
             with AttributionCache(book_dir / "attribution.db") as cache:
+                run_resolver = resolver
+                # Adjudication runs only on a FULL-book attribute: a --chapter subset carries a
+                # partial registry (merged later by _merge_partial_attribution), and adjudicating
+                # an incomplete registry is unsafe. The standalone `adjudicate` command is the
+                # registry-complete path for re-runs.
+                if run_resolver is None and use_adjudicate and not chapters:
+                    run_resolver = build_adjudicator(cfg, cache, book.book_meta.book_id)
                 raw = attribute_book(
                     book,
                     provider,
@@ -175,6 +215,10 @@ def run_attribution(
                     chapters=chapters,
                     progress=progress,
                     check_cancel=check_cancel,
+                    resolver=run_resolver,
+                    adjudication_confidence_threshold=cfg.adjudication_confidence_threshold,
+                    adjudication_candidate_cap=cfg.adjudication_candidate_cap,
+                    adjudication_use_nicknames=cfg.adjudication_use_nicknames,
                 )
         if chapters:
             raw = _merge_partial_attribution(book_dir, raw)
@@ -189,3 +233,74 @@ def run_attribution(
     for warning in warnings:
         say(f"edit overlay: {warning}")
     return effective
+
+
+def run_adjudication(
+    book_dir: Path,
+    *,
+    cfg,
+    progress: Callable[[str], None] | None = None,
+    gpu=None,
+    resolver=None,  # injectable AliasResolver for tests; built from cfg otherwise
+) -> AttributionReport:
+    """Standalone opt-in LLM alias adjudication over the registry-complete RAW report.
+
+    Loads ``attribution.json`` (always the full book), regenerates candidates from its
+    registry, runs the cached adjudicator, applies approved merges to the registry and
+    segment speakers, and rewrites ``attribution.json``. Idempotent: the per-book cache means
+    an unchanged candidate set replays cached verdicts with no LLM call, so the file is
+    byte-stable across reruns. The GPU is acquired only when the adjudication provider is
+    local (``uses_gpu``) and freed in ``finally``; anthropic (network-only) never touches it.
+    """
+    say = progress or (lambda _msg: None)
+    book_dir = Path(book_dir)
+    path = book_dir / ATTRIBUTION_NAME
+    if not path.is_file():
+        raise ServiceError(f"no attribution at {path}; run `seiyuu attribute` first")
+    try:
+        report = AttributionReport.model_validate_json(path.read_text(encoding="utf-8"))
+    except (ValidationError, OSError) as exc:
+        raise ServiceError(
+            f"corrupt attribution report {path}: {exc}; re-run `seiyuu attribute`"
+        ) from exc
+
+    gpu = gpu or get_gpu_manager()
+    with AttributionCache(book_dir / "attribution.db") as cache:
+        adjudicator = resolver or build_adjudicator(cfg, cache, report.book_id)
+        provider = getattr(adjudicator, "provider", None)
+        uses_gpu = bool(provider is not None and getattr(adjudicator, "uses_gpu", False))
+        ctx = (
+            gpu.acquire(provider, f"llm:adjudicate:{provider.provider_id}:{provider.model_id}")
+            if uses_gpu
+            else nullcontext()
+        )
+        registry = report.registry
+        pre_names = {c.id: c.canonical_name for c in registry.characters}
+        try:
+            with ctx:
+                id_remap, alias_notes = resolve_registry_aliases(
+                    registry,
+                    report.chapters,
+                    resolver=adjudicator,
+                    confidence_threshold=cfg.adjudication_confidence_threshold,
+                    candidate_cap=cfg.adjudication_candidate_cap,
+                    use_nicknames=cfg.adjudication_use_nicknames,
+                )
+        finally:
+            if uses_gpu:
+                gpu.free_all()
+
+    if id_remap:
+        for chapter_out in report.chapters:
+            chapter_out.segments = [
+                seg.model_copy(update={"speaker": id_remap[seg.speaker]})
+                if seg.speaker in id_remap
+                else seg
+                for seg in chapter_out.segments
+            ]
+    kept = _drop_superseded_notes(report.registry_notes, {pre_names[loser] for loser in id_remap})
+    notes = list(dict.fromkeys([*kept, *alias_notes]))
+    updated = report.model_copy(update={"registry": registry, "registry_notes": notes})
+    write_attribution(updated, book_dir)
+    say(f"adjudication: {len(id_remap)} merge(s) applied")
+    return updated

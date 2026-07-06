@@ -15,6 +15,7 @@ from typing import Any
 from seiyuu.attribute.providers.base import AttributionError, AttributionLLM
 
 _TOOL_NAME = "emit_attribution"
+_TOOL_DESCRIPTION = "Return the attributed segments and characters."
 # A chunk is ~2-4k input tokens; its segmented output is comparable. 16k stays well under
 # the SDK's non-streaming timeout while leaving headroom for dialogue-dense chapters.
 _MAX_TOKENS = 16000
@@ -55,6 +56,24 @@ class AnthropicProvider(AttributionLLM):
     def _complete_json(
         self, prompt: str, schema: dict[str, Any], attempt: int = 0
     ) -> dict[str, Any]:
+        # The attribution template keeps the default tool label (no regression).
+        return self._tool_call(prompt, schema, _TOOL_NAME, _TOOL_DESCRIPTION)
+
+    def complete_structured(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        *,
+        tool_name: str = "emit_structured",
+        tool_description: str = "Return the structured result matching the schema.",
+    ) -> dict[str, Any]:
+        # A one-off structured call (e.g. alias adjudication) labels the forced tool for its
+        # own schema so the description does not mislead the model into emitting attribution.
+        return self._tool_call(prompt, schema, tool_name, tool_description)
+
+    def _tool_call(
+        self, prompt: str, schema: dict[str, Any], tool_name: str, tool_description: str
+    ) -> dict[str, Any]:
         import anthropic
 
         try:
@@ -63,13 +82,13 @@ class AnthropicProvider(AttributionLLM):
                 max_tokens=self.max_tokens,
                 tools=[
                     {
-                        "name": _TOOL_NAME,
-                        "description": "Return the attributed segments and characters.",
+                        "name": tool_name,
+                        "description": tool_description,
                         "input_schema": schema,
                     }
                 ],
                 # Force the tool so output must match the schema — no free-text JSON.
-                tool_choice={"type": "tool", "name": _TOOL_NAME},
+                tool_choice={"type": "tool", "name": tool_name},
                 messages=[{"role": "user", "content": prompt}],
             )
         except anthropic.AuthenticationError as exc:

@@ -54,6 +54,28 @@ class Settings(BaseSettings):
     # Hybrid escalation: when on, chunks that fail local retries re-run through anthropic.
     attribution_hybrid: bool = False
 
+    # Opt-in LLM alias adjudication (fills the AliasResolver seam). Default OFF: the alias
+    # post-pass stays deterministic-only and byte-identical, with no LLM call and no cost.
+    # Runs only on a full-book attribute (a --chapter subset carries a partial registry) or
+    # via the standalone `seiyuu adjudicate` command.
+    attribution_adjudicate: bool = False
+    # Adjudication provider: "local" (Ollama, free, reuses the warm GPU) or "anthropic"
+    # (PAID; gated by the same missing-key ctor check as hybrid attribution).
+    adjudication_provider: str = "local"
+    # Adjudication model; defaults per-provider (attribution_model for local, anthropic_model
+    # for anthropic) when left unset.
+    adjudication_model: str | None = None
+    adjudication_prompt_version: str = "v1"
+    # Merge only when the adjudicator says same_person AND confidence >= this threshold;
+    # otherwise the pair stays flagged for review rather than merged.
+    adjudication_confidence_threshold: float = 0.85
+    # Cap on candidate pairs sent to the LLM per run (bounds cost + prompt size); overflow is
+    # flagged, not paid for. G1 (first-name) candidates are kept first.
+    adjudication_candidate_cap: int = 40
+    # Curated nickname/diminutive candidates (generator G3). Fuzzy/edit-distance matching is
+    # intentionally not implemented (highest over-merge risk); this toggles only the table.
+    adjudication_use_nicknames: bool = True
+
     # TTS defaults (M1).
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"
