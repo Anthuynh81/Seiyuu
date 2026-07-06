@@ -19,7 +19,7 @@ is decided later at voice assignment (M3), not here.
 
 from enum import StrEnum
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from seiyuu.ingest.models import BLOCK_ID_PATTERN
 
@@ -28,6 +28,23 @@ class SegmentType(StrEnum):
     NARRATION = "narration"
     DIALOGUE = "dialogue"
     THOUGHT = "thought"
+
+
+class EmotionLabel(StrEnum):
+    """Closed, compact emotion taxonomy (F2). Quantized so identical emotions collapse to
+    identical render settings (bounded cache churn) and NEUTRAL degrades to no override.
+
+    Chosen to align with IndexTTS-2's emotion categories so the M7 emotion-reference column
+    is a pure mapping add (no new prompt, no re-attribute).
+    """
+
+    NEUTRAL = "neutral"
+    HAPPY = "happy"
+    SAD = "sad"
+    ANGRY = "angry"
+    FEARFUL = "fearful"
+    TENDER = "tender"
+    TENSE = "tense"
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -81,17 +98,62 @@ class CharacterMention(BaseModel):
         return _clean_optional(value)
 
 
+class EmotionVerdict(BaseModel):
+    """A quantized emotion tag for ONE dialogue segment (F2 raw output AND stored form).
+
+    ``label`` is a closed :class:`EmotionLabel`; ``intensity`` is a 3-level scale
+    (1=low, 2=medium, 3=high). NEUTRAL (or a missing verdict) maps to no engine override at
+    render, so it never disturbs a segment's cache key. Attribution always captures this in
+    the v5/v6 output; whether it is APPLIED to render settings is the opt-in ``apply_emotion``
+    flag's decision, not attribution's.
+    """
+
+    label: EmotionLabel = EmotionLabel.NEUTRAL
+    intensity: int = Field(default=2, ge=1, le=3)
+
+
+class QuoteSpeaker(BaseModel):
+    """Per-quote speaker label for a MULTI-quote block (F1), keyed by the quoted-span ORDINAL.
+
+    ``index`` is the 0-based position of the quote AMONG THE BLOCK'S QUOTED SPANS (not the
+    interleaved prose+quote list) — we inject ``⟦Q{index}⟧`` markers into the prompt, so the
+    model reads a visible marker and never counts or reproduces text. A missing/``null``/
+    out-of-range label degrades that quote to narration (precision over recall — never a
+    guess-merge), exactly like today's un-attributed quote. ``emotion`` carries this quote's
+    F2 tag.
+    """
+
+    index: int
+    speaker: str | None = None
+    confidence: float = 1.0
+    emotion: EmotionVerdict | None = None
+
+    @field_validator("speaker")
+    @classmethod
+    def _clean_speaker(cls, value: str | None) -> str | None:
+        return _clean_optional(value)
+
+
 class BlockSpeaker(BaseModel):
-    """The model's only job per block: name who speaks its dialogue (null if none).
+    """The model's per-block attribution: who speaks its dialogue (null if none).
 
     Text and segment TYPE are derived deterministically (we split on quotes; quoted spans
     are dialogue, prose is narration), so the model never reproduces text or counts spans —
     it just attributes. That makes reconstruction structural and the task small models can do.
+
+    ``speaker`` is the WHOLE-BLOCK fallback used for single-quote blocks and for any v3/v4-
+    shaped cached row (no ``quotes`` field). ``quotes`` (F1) carries a per-quote label for a
+    MULTI-quote block; when it is non-empty each quoted span is labeled individually and an
+    unlabeled quote degrades to narration. ``emotion`` (F2) is the whole-block dialogue
+    emotion used on the single-quote path (per-quote emotion rides ``QuoteSpeaker.emotion``).
+    All added fields are optional and non-frozen.
     """
 
     block_id: str
     speaker: str | None = None
     confidence: float = 1.0
+    quotes: list[QuoteSpeaker] = []
+    emotion: EmotionVerdict | None = None
 
     @field_validator("speaker")
     @classmethod
@@ -138,10 +200,14 @@ class ChunkAttribution(BaseModel):
     """Assembled, validated attribution for one chunk; the cached unit.
 
     Speakers are still raw names here; registry resolution turns them into character ids.
+    ``segment_emotions`` (F2) is index-aligned to ``segments`` (regenerated together, so it
+    can never desync); it is empty on any v3/v4-shaped cached row, which downstream code
+    normalizes to all-None.
     """
 
     segments: list[Segment]
     characters: list[CharacterMention] = []
+    segment_emotions: list[EmotionVerdict | None] = []
 
 
 class Character(BaseModel):
@@ -244,6 +310,10 @@ class AttributedChapter(BaseModel):
     index: int  # 1-based chapter index within the normalized book
     title: str
     segments: list[Segment]  # resolved: speaker is a character id (or None for narration)
+    # F2: emotion per segment, index-aligned to ``segments`` (regenerated with them in the
+    # same attribution.json, so it can never desync). Empty on a v3/v4 report; render treats
+    # a missing/short list as all-None. Non-frozen — additive, never touches the Segment schema.
+    segment_emotions: list[EmotionVerdict | None] = []
 
 
 class AttributionReport(BaseModel):

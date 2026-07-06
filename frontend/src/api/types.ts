@@ -260,6 +260,41 @@ export interface SegmentBrowserOut {
   edit_warnings: string[];
 }
 
+// -- per-segment emotion (Phase 1 F2) --------------------------------------------------------
+
+/** The closed, quantized emotion taxonomy the v5/v6 attribution prompt emits (mirrors
+    `EmotionLabel` in attribute/models.py). NEUTRAL degrades to no render override. */
+export type EmotionLabel = "neutral" | "happy" | "sad" | "angry" | "fearful" | "tender" | "tense";
+
+/** One dialogue segment's emotion tag. `intensity` is a 3-level scale (1=low … 3=high). */
+export interface EmotionVerdict {
+  label: EmotionLabel;
+  intensity: number;
+}
+
+/** Minimal view of GET /api/books/{id}/attribution — only what the Review screen reads to
+    surface per-segment emotion. `segment_emotions` is index-aligned to `segments` (both are
+    regenerated together in the same attribution.json, so they can never desync); it is empty
+    on a pre-emotion (v3/v4) report, which the UI treats as "no tags". */
+export interface AttributionSegmentView {
+  block_id: string;
+}
+
+export interface AttributedChapterView {
+  index: number; // 1-based
+  segments: AttributionSegmentView[];
+  segment_emotions: (EmotionVerdict | null)[];
+}
+
+export interface AttributionReportView {
+  chapters: AttributedChapterView[];
+}
+
+export interface AttributionOut {
+  report: AttributionReportView;
+  edit_warnings: string[];
+}
+
 // -- word-exact read-along (F2) --------------------------------------------------------------
 
 /** One whisper-timed spoken token, seconds within the clip's wav. */

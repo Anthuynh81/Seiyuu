@@ -182,9 +182,10 @@ def run_attribution(
     provider_id = provider_id or cfg.attribution_provider
     model = model or cfg.attribution_model
     emit_thoughts = cfg.emit_thoughts if emit_thoughts is None else emit_thoughts
-    # Thought emission requires the thought-aware v4 prompt; opting in forces it (and thus a
-    # distinct cache key) unless the caller pins an explicit --prompt-version.
-    default_prompt_version = "v4" if emit_thoughts else cfg.attribution_prompt_version
+    # Thought emission requires the thought-aware v6 prompt (v5 per-quote + emotion + the
+    # thought-candidates section); opting in forces it (and thus a distinct cache key) unless
+    # the caller pins an explicit --prompt-version. Thought-off uses v5 (the new base).
+    default_prompt_version = "v6" if emit_thoughts else cfg.attribution_prompt_version
     prompt_version = prompt_version or default_prompt_version
     use_hybrid = cfg.attribution_hybrid if use_hybrid is None else use_hybrid
     use_adjudicate = cfg.attribution_adjudicate if use_adjudicate is None else use_adjudicate

@@ -22,11 +22,22 @@ from seiyuu.attribute.models import (
     CharacterRegistry,
     ChunkAttribution,
     ChunkLabels,
+    EmotionVerdict,
+    QuoteSpeaker,
     Segment,
     SegmentType,
     ThoughtVerdict,
 )
-from seiyuu.attribute.spans import Span, thought_candidate_spans
+from seiyuu.attribute.spans import Span, quoted_ordinals, thought_candidate_spans
+
+# Prompt versions that use the F1 per-quote (hybrid) + F2 emotion contract: owned blocks with
+# >1 quote are indexed with ⟦Q{ordinal}⟧ markers and the model labels quotes BY INDEX. v6 is
+# v5 plus the thought-candidates section. v3/v4 stay on the whole-block-speaker contract.
+_PER_QUOTE_VERSIONS = frozenset({"v5", "v6"})
+# ⟦ ⟧ (U+27E6/U+27E7) never occur in ordinary prose, so a marker can't collide with real text.
+# Markers live ONLY in the rendered prompt; assembly re-splits the RAW source (never the marked
+# string), so they can never reach a Span, a Segment.text, or a CharacterMention.
+_QUOTE_MARKER = "⟦Q{index}⟧"
 
 
 class AttributionError(Exception):
@@ -71,6 +82,33 @@ def _render_blocks(blocks: list) -> str:
     return "\n\n".join(f"[{b.id}]\n{b.text}" for b in blocks) or "(none)"
 
 
+def _render_owned_blocks_indexed(chunk: Chunk, spans_by_block: dict[str, list[Span]]) -> str:
+    """Render owned blocks for the per-quote prompt (F1, v5/v6), HYBRID by design.
+
+    A block with more than one quoted span gets a ``⟦Q{ordinal}⟧`` marker before each quoted
+    run, so the model can label quotes by index without ever counting. A single-quote block
+    stays plain (byte-identical to the v3 render), keeping the dominant path on the proven
+    whole-block contract. Ordinals come from :func:`quoted_ordinals` — the SAME helper
+    ``_assemble_segments`` keys on — so the two sides can never disagree. Markers are inserted
+    only into this display string; the block's real text is untouched.
+    """
+    rendered: list[str] = []
+    for block in chunk.owned_blocks:
+        spans = spans_by_block[block.id]
+        ordinals = quoted_ordinals(spans)
+        if len(ordinals) <= 1:
+            rendered.append(f"[{block.id}]\n{block.text}")
+            continue
+        marker_at = {span: ordinal for ordinal, span in ordinals}
+        parts: list[str] = []
+        for span in spans:
+            if span in marker_at:
+                parts.append(_QUOTE_MARKER.format(index=marker_at[span]))
+            parts.append(span.text)
+        rendered.append(f"[{block.id}]\n{''.join(parts)}")
+    return "\n\n".join(rendered) or "(none)"
+
+
 def _render_thought_candidates(spans_by_block: dict[str, list[Span]]) -> str:
     """The deterministic thought candidates (candidate_id + its exact text) for the prompt."""
     lines = [
@@ -87,6 +125,7 @@ def render_prompt(
     registry: CharacterRegistry,
     chunk: Chunk,
     thought_candidates: str = "(none)",
+    owned_render: str | None = None,
 ) -> str:
     owned_ids = chunk.owned_ids
     context_blocks = [b for b in chunk.blocks if b.id not in owned_ids]
@@ -108,12 +147,14 @@ def render_prompt(
         ensure_ascii=False,
     )
     # Literal replacement, not str.format — the prompt contains JSON examples with braces.
-    # The {thought_candidates} placeholder only exists in the thought-aware (v4) prompt; on
-    # v3 the replace is a no-op, so the rendered prompt is byte-identical to today.
+    # The {thought_candidates} placeholder only exists in the thought-aware (v4/v6) prompt; on
+    # v3/v5 the replace is a no-op. ``owned_render`` is the per-quote-indexed block render for
+    # v5/v6; when None (v3/v4) we fall back to the plain whole-block render, byte-identical.
+    owned = owned_render if owned_render is not None else _render_blocks(chunk.owned_blocks)
     return (
         template.replace("{registry_json}", registry_json)
         .replace("{context_blocks}", _render_blocks(context_blocks))
-        .replace("{blocks}", _render_blocks(chunk.owned_blocks))
+        .replace("{blocks}", owned)
         .replace("{thought_candidates}", thought_candidates)
     )
 
@@ -167,18 +208,30 @@ class AttributionLLM(ABC):
         }
         template = _prompt_template(self.prompts_dir, self.prompt_version)
         candidates = _render_thought_candidates(spans_by_block) if self.emit_thoughts else "(none)"
-        prompt = render_prompt(template, registry, chunk, candidates)
+        # v5/v6 index multi-quote blocks so the model labels quotes BY INDEX (F1); v3/v4 keep
+        # the plain whole-block render. Single-quote blocks stay plain on every version.
+        per_quote = self.prompt_version in _PER_QUOTE_VERSIONS
+        owned_render = _render_owned_blocks_indexed(chunk, spans_by_block) if per_quote else None
+        prompt = render_prompt(template, registry, chunk, candidates, owned_render)
         if attempt > 0:
-            prompt += (
-                "\n\n## Reminder\n\nReturn one entry per block with the `block_id` and the "
-                "speaker of that block's dialogue (null if the block is pure narration)."
-            )
+            if per_quote:
+                prompt += (
+                    "\n\n## Reminder\n\nFor a block with ⟦Q0⟧/⟦Q1⟧ markers, return a `quotes` "
+                    "entry per marker with its `index` and the speaker of THAT quote (and its "
+                    "`emotion`); for a block with a single quote, return the block `speaker`. "
+                    "Use null for a quote you cannot attribute."
+                )
+            else:
+                prompt += (
+                    "\n\n## Reminder\n\nReturn one entry per block with the `block_id` and the "
+                    "speaker of that block's dialogue (null if the block is pure narration)."
+                )
         raw = self._complete_json(prompt, chunk_label_schema(), attempt)
         if not isinstance(raw, dict):
             raise MalformedOutputError(
                 f"{self.provider_id}/{self.model_id} returned a non-object for chunk {chunk.index}"
             )
-        segments = self._assemble_segments(
+        segments, segment_emotions = self._assemble_segments(
             raw.get("blocks") or [], spans_by_block, raw.get("thoughts") or []
         )
         # Character mentions are auxiliary metadata; a malformed one must not sink the whole
@@ -189,26 +242,35 @@ class AttributionLLM(ABC):
                 characters.append(CharacterMention.model_validate(entry))
             except Exception:
                 continue
-        return ChunkAttribution(segments=segments, characters=characters)
+        return ChunkAttribution(
+            segments=segments, characters=characters, segment_emotions=segment_emotions
+        )
 
     def _assemble_segments(
         self,
         raw_blocks: list,
         spans_by_block: dict[str, list[Span]],
         raw_thoughts: list,
-    ) -> list[Segment]:
-        """Build segments from source spans: quoted span -> dialogue (model's per-block
-        speaker), a confirmed thought candidate -> thought (its named thinker), prose ->
-        narration. The model never counts spans or echoes text, so this can't fail on
-        alignment; an un-attributed quote or an unconfirmed candidate degrades to narration.
+    ) -> tuple[list[Segment], list[EmotionVerdict | None]]:
+        """Build segments from source spans and a parallel per-segment emotion list.
+
+        Quoted span -> dialogue; a confirmed thought candidate -> thought; prose -> narration.
+        The model never counts spans or echoes text (F1 markers live only in the prompt), so
+        this can't fail on alignment. Per-quote (F1): when a block emitted ``quotes``, each
+        quoted span is labeled by its quoted-span ORDINAL (via the shared
+        :func:`quoted_ordinals`); an unlabeled/null/out-of-range quote degrades to narration
+        (never a guess-merge). When a block emitted no ``quotes`` (single-quote block or a
+        v3/v4-shaped row) the whole-block ``speaker`` labels every quote — byte-identical to
+        today. The returned ``emotions`` list is index-aligned to ``segments`` (F2): dialogue
+        carries its emotion tag (or None); narration and thought carry None.
         """
-        speakers: dict[str, tuple[str | None, float]] = {}
+        blocks: dict[str, BlockSpeaker] = {}
         for raw_block in raw_blocks:
             try:
                 block = BlockSpeaker.model_validate(raw_block)
             except Exception:
                 continue  # drop a malformed entry; its block just gets no attributed speaker
-            speakers[block.block_id] = (block.speaker, block.confidence)
+            blocks[block.block_id] = block
 
         # Only verdicts for candidate_ids we deterministically generated are honored, so a
         # stray/hallucinated id can never mint a thought (mirrors the alias adjudicator).
@@ -225,21 +287,61 @@ class AttributionLLM(ABC):
                 verdicts[verdict.candidate_id] = verdict
 
         segments: list[Segment] = []
+        emotions: list[EmotionVerdict | None] = []
         for block_id, spans in spans_by_block.items():
-            speaker, confidence = speakers.get(block_id, (None, 1.0))
+            block = blocks.get(block_id)
+            ordinal_of = {span: ordinal for ordinal, span in quoted_ordinals(spans)}
+            valid_ordinals = set(ordinal_of.values())
+            # Per-quote labels keyed by quoted-span ordinal, dropping any index that isn't an
+            # actual quoted span in this block (mirrors the adjudicator's unknown-id discard).
+            quote_labels: dict[int, QuoteSpeaker] = {}
+            if block is not None:
+                for quote in block.quotes:
+                    if quote.index in valid_ordinals:
+                        quote_labels[quote.index] = quote
+            # A block that emitted per-quote labels is in per-quote mode: each quote must be
+            # labeled individually and an unlabeled one is narration (no whole-block fallback,
+            # or two speakers trading lines would collapse to one).
+            per_quote_mode = bool(quote_labels)
+            block_speaker = block.speaker if block is not None else None
+            block_conf = block.confidence if block is not None else 1.0
+            block_emotion = block.emotion if block is not None else None
+
             for span in spans:
                 if not span.text.strip():
                     continue  # whitespace-only span (e.g. a seam) carries no segment
-                if span.quoted and speaker:
-                    segments.append(
-                        Segment(
-                            block_id=block_id,
-                            type=SegmentType.DIALOGUE,
-                            speaker=speaker,
-                            text=span.text,
-                            confidence=confidence,
+                if span.quoted:
+                    if per_quote_mode:
+                        quote = quote_labels.get(ordinal_of[span])
+                        if quote is not None and quote.speaker:
+                            segments.append(
+                                Segment(
+                                    block_id=block_id,
+                                    type=SegmentType.DIALOGUE,
+                                    speaker=quote.speaker,
+                                    text=span.text,
+                                    confidence=quote.confidence,
+                                )
+                            )
+                            emotions.append(quote.emotion)
+                            continue
+                    elif block_speaker:
+                        segments.append(
+                            Segment(
+                                block_id=block_id,
+                                type=SegmentType.DIALOGUE,
+                                speaker=block_speaker,
+                                text=span.text,
+                                confidence=block_conf,
+                            )
                         )
+                        emotions.append(block_emotion)
+                        continue
+                    # Unattributed / unlabeled quote -> narration (precision over recall).
+                    segments.append(
+                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span.text)
                     )
+                    emotions.append(None)
                     continue
                 verdict = verdicts.get(span.candidate_id) if span.candidate_id else None
                 if (
@@ -257,12 +359,14 @@ class AttributionLLM(ABC):
                             confidence=verdict.confidence,
                         )
                     )
+                    emotions.append(None)  # dialogue-only emotion in v1
                 else:
                     # Prose, an unattributed quote, or an unconfirmed candidate: narration.
                     segments.append(
                         Segment(block_id=block_id, type=SegmentType.NARRATION, text=span.text)
                     )
-        return segments
+                    emotions.append(None)
+        return segments, emotions
 
     def complete_structured(
         self,

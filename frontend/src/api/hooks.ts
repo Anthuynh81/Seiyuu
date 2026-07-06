@@ -4,6 +4,7 @@ import { api, ApiError, postForm, postJson } from "./client";
 import type {
   AssignmentDraftResponse,
   AssignmentWrite,
+  AttributionOut,
   AuditionOut,
   CastStrategy,
   BookDeletedOut,
@@ -238,6 +239,18 @@ export function useSegments(bookId: string | null, chapter: number, attributed: 
   });
 }
 
+/** The chapter's effective attribution report, trimmed to one chapter (`?chapters=`), for the
+    per-segment emotion side-channel the Review screen shows (Phase 1 F2). Read-only: emotion is
+    captured by v5/v6 attribution regardless of the server's opt-in `apply_emotion` render flag.
+    Keyed under "attribution" so a recorded edit (invalidateReview) also refreshes it. */
+export function useChapterAttribution(bookId: string | null, chapter: number, attributed: boolean) {
+  return useQuery({
+    queryKey: ["attribution", bookId, chapter],
+    queryFn: () => api<AttributionOut>(`/api/books/${bookId}/attribution?chapters=${chapter}`),
+    enabled: bookId !== null && attributed,
+  });
+}
+
 /** One clip = one rendered wav we want whisper word-timings for. `audioKey` is the wav's
     SegmentKey hash: it changes iff the audio content changes, so it doubles as the
     react-query cache key AND the cache-buster (a re-render re-fetches, never serves stale). */
@@ -311,7 +324,7 @@ export function useEditLog(bookId: string | null) {
 }
 
 function invalidateReview(qc: ReturnType<typeof useQueryClient>, bookId: string) {
-  for (const key of ["characters", "segments", "edits", "estimate"] as const) {
+  for (const key of ["characters", "segments", "attribution", "edits", "estimate"] as const) {
     qc.invalidateQueries({ queryKey: [key, bookId] });
   }
 }

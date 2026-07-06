@@ -58,6 +58,24 @@ class Span:
     candidate_id: str | None = None
 
 
+def quoted_ordinals(spans: list[Span]) -> list[tuple[int, Span]]:
+    """``(ordinal, span)`` for each QUOTED span, where ``ordinal`` is its 0-based position
+    AMONG THE QUOTED SPANS ONLY (not the interleaved prose+quote list).
+
+    This is the single shared definition of a quote's index (F1). BOTH the prompt indexer
+    (which injects ``⟦Q{ordinal}⟧`` markers) and ``_assemble_segments`` (which looks the
+    label up) must key on THIS ordinal, or a multi-quote block mis-aligns. Keeping it here,
+    over the same ``Span`` list both sides already build, makes drift impossible.
+    """
+    out: list[tuple[int, Span]] = []
+    ordinal = 0
+    for span in spans:
+        if span.quoted:
+            out.append((ordinal, span))
+            ordinal += 1
+    return out
+
+
 # A thought candidate must be a multi-word italic run — single italic words, titles, and
 # foreign phrases are emphasis, not interior monologue, and are excluded here (the primary
 # emphasis-as-thought guard alongside the prose-only rule and the LLM confirm step).
