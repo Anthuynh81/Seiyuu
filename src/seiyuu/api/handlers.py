@@ -138,6 +138,7 @@ def build_handlers(
         gate reason in Job.error and never burns the token; a crash AFTER consumption
         requires a re-estimate, and the refusal message says so."""
         from seiyuu.api.money import compute_estimate, resolve_single
+        from seiyuu.normalize.lexicon import load_compiled_lexicon
         from seiyuu.render.gate import CostQuote, verify_quote
         from seiyuu.render.pipeline import render_book, render_book_multivoice
         from seiyuu.services import load_assignment, load_report
@@ -149,6 +150,9 @@ def build_handlers(
         book = _load_normalized(cfg, book_id)
         book_output_dir = cfg.output_dir / book_id
         library = VoiceLibrary(cfg.voices_dir)
+        # F3: same compiled lexicon compute_estimate used above (same file) — render must
+        # normalize IDENTICALLY to the estimate the cost gate just verified.
+        lexicon = load_compiled_lexicon(cfg.books_dir / book_id)
         chapters = tuple(sorted(set(params.chapters)))
         single = resolve_single(cfg, params.single) if params.mode == "single" else None
         with gate.hold("job"):
@@ -207,6 +211,7 @@ def build_handlers(
                     cloud_max_slots=cfg.elevenlabs_max_voice_slots,
                     check_cancel=ctx.check_cancel,
                     broker=broker,  # lend the resident engine to auditions between segments
+                    lexicon=lexicon,
                 )
             else:
                 render_book(
@@ -225,6 +230,7 @@ def build_handlers(
                     max_paid_usd=approved_usd,
                     check_cancel=ctx.check_cancel,
                     broker=broker,  # lend the resident engine to auditions between segments
+                    lexicon=lexicon,
                 )
 
     # assemble/master deliberately do NOT hold the heavy-work gate: they are pure

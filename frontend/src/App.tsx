@@ -5,6 +5,7 @@ import { Route, Routes } from "react-router-dom";
 import { useLiveJobs } from "./api/hooks";
 import { NavRail } from "./app/NavRail";
 import { TransportBar } from "./app/TransportBar";
+import { Lexicon } from "./screens/Lexicon";
 import { Library } from "./screens/Library";
 import { Listen } from "./screens/Listen";
 import { RenderJobs } from "./screens/RenderJobs";
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="/" element={<Library />} />
           <Route path="/listen" element={<Listen />} />
           <Route path="/review" element={<Review />} />
+          <Route path="/lexicon" element={<Lexicon />} />
           <Route path="/voices" element={<Voices />} />
           <Route path="/render" element={<RenderJobs />} />
         </Routes>

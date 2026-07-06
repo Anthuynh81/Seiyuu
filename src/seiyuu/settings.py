@@ -82,7 +82,8 @@ class Settings(BaseSettings):
 
     # Text normalization (M3). Output changes auto-invalidate the segment cache via
     # normalized_text_hash; this string is for debuggability only, NOT part of the key.
-    normalization_version: str = "1"
+    # v2 (F3): the per-book pronunciation lexicon respell pass joined apply_profile.
+    normalization_version: str = "2"
 
     # GPU resource management (M3). One heavy model resident at a time on a single GPU.
     gpu_device: str = "cuda"

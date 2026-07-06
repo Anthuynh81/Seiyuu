@@ -586,10 +586,16 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/voices/{voice_id}", "PATCH") in paths
     assert ("/api/books/{book_id}", "DELETE") in paths  # F3 guarded book deletion
     assert ("/api/books/{book_id}/segments/{block_id}/words", "GET") in paths  # F2 read-along
+    # per-book pronunciation lexicon (roadmap F3): read, write, preview affected count
+    assert ("/api/books/{book_id}/lexicon", "GET") in paths
+    assert ("/api/books/{book_id}/lexicon", "PUT") in paths
+    assert ("/api/books/{book_id}/lexicon/preview", "POST") in paths
+    assert ("/api/books/{book_id}/assignment/suggest", "POST") in paths  # F4 smart-cast preview
     # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer
     # demos) + PATCH voice tags (library organization) + DELETE book (F3) + GET
-    # segment words (F2 forced alignment)
-    assert len(paths) == 49
+    # segment words (F2 forced alignment) + 3 pronunciation-lexicon routes + F4
+    # smart-cast suggest
+    assert len(paths) == 53
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

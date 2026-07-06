@@ -10,12 +10,24 @@ Number/word expansion is identical across engines so there is one spoken-word re
 M4 whisper validation; only punctuation handling differs per profile.
 """
 
+from typing import TYPE_CHECKING
+
 from seiyuu.normalize.profiles import apply_profile, profile_for
 
+if TYPE_CHECKING:
+    from seiyuu.normalize.lexicon import CompiledLexicon
 
-def normalize_text(text: str, *, profile: str = "default") -> str:
-    """Normalize `text` to speakable words under an engine profile ('kokoro'|'chatterbox')."""
-    return apply_profile(text, profile)
+
+def normalize_text(
+    text: str, *, profile: str = "default", lexicon: "CompiledLexicon | None" = None
+) -> str:
+    """Normalize `text` to speakable words under an engine profile ('kokoro'|'chatterbox').
+
+    ``lexicon`` (F3), when given, is a pre-compiled per-book pronunciation matcher applied as
+    a respell pass right after unicode cleanup. It is passed IN (never read from disk here) so
+    this stays a pure, deterministic, fixture-testable function.
+    """
+    return apply_profile(text, profile, lexicon=lexicon)
 
 
 __all__ = ["normalize_text", "profile_for"]

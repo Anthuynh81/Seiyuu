@@ -50,6 +50,44 @@ export interface BooksOut {
   books: BookCard[];
 }
 
+// -- per-book pronunciation lexicon ----------------------------------------------------------
+
+/** One pronunciation override. `respelling` is spoken on every engine; `ipa` (optional) is
+    honored ONLY on the Kokoro profile and ignored on validated engines. */
+export interface LexiconEntry {
+  term: string;
+  respelling: string;
+  ipa: string | null;
+  note: string | null;
+  case_sensitive: boolean;
+}
+
+export interface SuggestedTerm {
+  term: string;
+  count: number;
+  sample: string;
+}
+
+export interface LexiconOut {
+  book_id: string;
+  schema_version: number;
+  entries: LexiconEntry[];
+  suggestions: SuggestedTerm[];
+}
+
+export interface LexiconSaved {
+  book_id: string;
+  schema_version: number;
+  entries: LexiconEntry[];
+  affected_blocks: number;
+  total_speakable_blocks: number;
+}
+
+export interface LexiconPreviewOut {
+  affected_blocks: number;
+  total_speakable_blocks: number;
+}
+
 // -- delete a book (F3) ----------------------------------------------------------------------
 
 /** DELETE /api/books/{id} success — what was actually torn down. */
@@ -265,6 +303,15 @@ export interface VoiceAssignment {
 export interface AssignmentDraftResponse {
   assignment: VoiceAssignment;
   created_voice_ids: string[];
+  edit_warnings: string[];
+}
+
+export type CastStrategy = "hash" | "smart";
+
+export interface SuggestCastResponse {
+  assignment: VoiceAssignment;
+  would_create_voice_ids: string[];
+  would_recast_voice_ids: string[];
   edit_warnings: string[];
 }
 

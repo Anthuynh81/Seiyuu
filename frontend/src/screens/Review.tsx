@@ -12,9 +12,11 @@ import {
   useRecordEdit,
   useSaveAssignment,
   useSegments,
+  useSuggestCast,
   useUndoEdit,
   useVoices,
 } from "../api/hooks";
+import type { SuggestCastResponse } from "../api/types";
 import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
@@ -105,6 +107,54 @@ function RosterRow({
 }
 
 /* -------------------------------------------------- casting */
+
+/** Preview of the smart caster: distinct voice per character. Applying is NOT a silent
+    no-op — it spells out how many voices it creates and, if some are already cast, offers an
+    explicit re-cast (which re-renders that audio) instead of quietly skipping them. */
+function SuggestCastPanel({
+  preview,
+  applying,
+  onApply,
+  onDismiss,
+}: {
+  preview: SuggestCastResponse;
+  applying: boolean;
+  onApply: (recast: boolean) => void;
+  onDismiss: () => void;
+}) {
+  const [recast, setRecast] = useState(false);
+  const create = preview.would_create_voice_ids.length;
+  const existing = preview.would_recast_voice_ids.length;
+  const noop = create === 0 && !recast; // every character already cast, recast off
+  return (
+    <div className="caststrip" style={{ flexWrap: "wrap", gap: 8, background: "var(--surface-2)" }}>
+      <span className="tag">smart cast</span>
+      <span className="mono" style={{ fontSize: 11, color: "var(--ink-2)" }}>
+        every character a distinct voice · {create} new
+        {existing > 0 ? ` · ${existing} already cast` : ""}
+      </span>
+      {existing > 0 && (
+        <label className="mono" style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}>
+          <input type="checkbox" checked={recast} onChange={(e) => setRecast(e.target.checked)} />
+          re-cast the {existing} existing (re-renders their audio)
+        </label>
+      )}
+      <span style={{ flex: 1 }} />
+      <button className="key quiet" style={{ padding: "3px 9px" }} onClick={onDismiss}>
+        dismiss
+      </button>
+      <button
+        className="key"
+        style={{ padding: "3px 12px" }}
+        disabled={applying || noop}
+        title={noop ? "every character is already cast — enable re-cast to overwrite" : undefined}
+        onClick={() => onApply(recast)}
+      >
+        {applying ? "applying…" : noop ? "nothing to apply" : "apply cast"}
+      </button>
+    </div>
+  );
+}
 
 function VoicePicker({
   value,
@@ -271,6 +321,7 @@ export function Review() {
   const assignment = useAssignment(bookId, attributed);
   const voicesQ = useVoices();
   const draftCast = useDraftAssignment(bookId ?? "");
+  const suggestCast = useSuggestCast(bookId ?? "");
   const saveCast = useSaveAssignment(bookId ?? "");
   const [casting, setCasting] = useState<CastingState | null>(null);
   useEffect(() => {
@@ -423,10 +474,19 @@ export function Review() {
                       no casting yet — auto-cast gives every character a distinct voice blend
                     </span>
                     <button
+                      className="key quiet"
+                      style={{ marginLeft: "auto", padding: "3px 9px" }}
+                      title="preview a smart cast: every character a distinct voice, no collisions"
+                      disabled={suggestCast.isPending}
+                      onClick={() => suggestCast.mutate()}
+                    >
+                      {suggestCast.isPending ? "thinking…" : "suggest cast"}
+                    </button>
+                    <button
                       className="key"
-                      style={{ marginLeft: "auto" }}
+                      style={{ padding: "3px 12px" }}
                       disabled={draftCast.isPending}
-                      onClick={() => draftCast.mutate()}
+                      onClick={() => draftCast.mutate({})}
                     >
                       {draftCast.isPending ? "casting…" : "auto-cast"}
                     </button>
@@ -446,9 +506,18 @@ export function Review() {
                     <button
                       className="key quiet"
                       style={{ marginLeft: "auto", padding: "3px 9px" }}
+                      title="preview a smart cast: every character a distinct voice, no collisions"
+                      disabled={suggestCast.isPending}
+                      onClick={() => suggestCast.mutate()}
+                    >
+                      {suggestCast.isPending ? "thinking…" : "suggest cast"}
+                    </button>
+                    <button
+                      className="key quiet"
+                      style={{ padding: "3px 9px" }}
                       title="re-run the deterministic draft — fills newly-discovered characters, keeps existing voices"
                       disabled={draftCast.isPending}
-                      onClick={() => draftCast.mutate()}
+                      onClick={() => draftCast.mutate({})}
                     >
                       re-draft
                     </button>
@@ -470,6 +539,27 @@ export function Review() {
                   </>
                 )}
               </div>
+              {suggestCast.data && (
+                <SuggestCastPanel
+                  preview={suggestCast.data}
+                  applying={draftCast.isPending}
+                  onApply={(recast) =>
+                    draftCast.mutate(
+                      { strategy: "smart", recast },
+                      { onSuccess: () => suggestCast.reset() },
+                    )
+                  }
+                  onDismiss={() => suggestCast.reset()}
+                />
+              )}
+              {suggestCast.error && (
+                <div className="refusal" style={{ margin: "8px 12px" }}>
+                  <span className="tag">
+                    {suggestCast.error instanceof ApiError ? suggestCast.error.code : "error"}
+                  </span>
+                  <p>{suggestCast.error.message}</p>
+                </div>
+              )}
               {draftCast.data && draftCast.data.created_voice_ids.length > 0 && (
                 <div className="caststrip" style={{ color: "var(--ok)", fontFamily: "var(--mono)", fontSize: 11 }}>
                   created {draftCast.data.created_voice_ids.length} voice(s) — tune them in Voice Studio

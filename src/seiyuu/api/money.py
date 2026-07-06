@@ -14,6 +14,7 @@ from pathlib import Path
 from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.schemas import SingleSpec
 from seiyuu.ingest.models import NormalizedBook
+from seiyuu.normalize.lexicon import load_compiled_lexicon
 from seiyuu.render.gate import CostGateError, hash_assignment
 from seiyuu.render.pipeline import (
     CostEstimate,
@@ -87,12 +88,16 @@ def compute_estimate(
     """
     book_output_dir = Path(cfg.output_dir) / book_id
     library = VoiceLibrary(cfg.voices_dir)
+    # F3: the SAME compiled per-book lexicon the render loop uses, so the cost gate authorizes
+    # exactly the SegmentKeys render will bill. Loaded once here; render loads the same file.
+    lexicon = load_compiled_lexicon(cfg.books_dir / book_id)
     if mode == "multivoice":
         report, warnings = load_report(cfg.books_dir / book_id)
         assignment = load_assignment(cfg.output_dir, book_id)
         est = estimate_render_cost(
-            report, book, library, assignment, book_output_dir, chapters=chapters
-        )
+            report, book, library, assignment, book_output_dir,
+            chapters=chapters, lexicon=lexicon,
+        )  # fmt: skip
         return EstimateContext(
             est=est, assignment_hash=hash_assignment(assignment), edit_warnings=warnings
         )
@@ -107,6 +112,7 @@ def compute_estimate(
         seed=single.seed,
         chapters=chapters,
         library=library,
+        lexicon=lexicon,
     )
     return EstimateContext(est=est, assignment_hash=None, edit_warnings=[])
 
