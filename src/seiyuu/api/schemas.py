@@ -84,7 +84,8 @@ class AttributeParams(BaseModel):
     model: str | None = None
     prompt_version: str | None = None
     use_hybrid: bool | None = None  # None -> settings.attribution_hybrid
-    emit_thoughts: bool | None = None  # None -> settings.emit_thoughts; True forces the v4 prompt
+    use_adjudicate: bool | None = None  # None -> settings.attribution_adjudicate
+    emit_thoughts: bool | None = None  # None -> settings.emit_thoughts; True forces the v6 prompt
     confirm_paid: bool = False  # checked at enqueue against the EFFECTIVE paid-ness
 
 
