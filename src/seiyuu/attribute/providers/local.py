@@ -70,6 +70,7 @@ class OllamaProvider(AttributionLLM):
         model: str,
         prompts_dir,
         prompt_version: str = "v1",
+        emit_thoughts: bool = False,
         base_url: str = "http://localhost:11434/v1",
         transport: str = "native",
         temperature: float = 0.0,
@@ -81,7 +82,12 @@ class OllamaProvider(AttributionLLM):
         post: Callable[..., dict] | None = None,  # native HTTP POST (injectable for tests)
         get: Callable[..., dict] | None = None,  # native HTTP GET (injectable for tests)
     ) -> None:
-        super().__init__(model=model, prompts_dir=prompts_dir, prompt_version=prompt_version)
+        super().__init__(
+            model=model,
+            prompts_dir=prompts_dir,
+            prompt_version=prompt_version,
+            emit_thoughts=emit_thoughts,
+        )
         if transport not in _TRANSPORTS:
             raise ValueError(f"unknown ollama transport {transport!r}; choose from {_TRANSPORTS}")
         self.base_url = base_url

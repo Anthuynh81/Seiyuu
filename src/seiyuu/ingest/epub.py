@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, CData, NavigableString
 from ebooklib import ITEM_DOCUMENT, epub
 
 from seiyuu.ingest.models import Block, BlockType, BookMeta, Chapter, NormalizedBook
@@ -55,11 +55,18 @@ class IngestError(Exception):
     """Loud, actionable ingest failure."""
 
 
+# Inline tags whose text is the standard unspoken-thought / emphasis signal. Phase 1 is
+# inline markup only: CSS-class italics (external stylesheet) are invisible here and a
+# deliberate, silent miss, not an error.
+_ITALIC_TAGS = {"em", "i"}
+
+
 @dataclass
 class RawBlock:
     kind: BlockType
     text: str = ""
     level: int = 0  # heading level, 0 for non-headings
+    italic_spans: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +90,88 @@ def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Single whitespace char, using the SAME class as ``_collapse``'s ``\s+`` so the italic
+# walker collapses identically to ``_collapse(el.get_text())`` for the text itself.
+_WS_CHAR = re.compile(r"\s")
+
+
+def _collapse_with_italics(el) -> tuple[str, list[tuple[int, int]]]:
+    """Collapsed text of ``el`` AND its inline-italic run offsets, in a single pass.
+
+    The offsets index the FINAL, post-collapse/strip text — never the raw ``get_text()``.
+    ``_collapse`` rewrites every whitespace run to one space and strips the ends, which
+    shifts positions; a "find in get_text() then collapse" shortcut would silently
+    mis-slice. So we gather each descendant string with a flag for whether it sits inside an
+    ``<em>``/``<i>`` (bounded by ``el``), collapse the char stream once, and read the italic
+    runs straight off the collapsed flags. The text half is identical to
+    ``_collapse(el.get_text())``; scene-break/decorative handling is unchanged upstream.
+    """
+    raw_chars: list[str] = []
+    raw_italic: list[bool] = []
+    for node in el.descendants:
+        # Match ``get_text()`` semantics EXACTLY: it yields only the base string
+        # types (NavigableString, CData). ``isinstance`` would also catch NavigableString
+        # subclasses — Comment, Stylesheet, Script, Declaration, ProcessingInstruction —
+        # which ``get_text()`` excludes, injecting comment/script text into narration and
+        # breaking the thought-off byte-identity invariant.
+        if type(node) not in (NavigableString, CData):
+            continue
+        italic = False
+        for parent in node.parents:
+            if parent is el:
+                break
+            if parent.name in _ITALIC_TAGS:
+                italic = True
+                break
+        for ch in str(node):
+            raw_chars.append(ch)
+            raw_italic.append(italic)
+
+    # Collapse each maximal whitespace run to a single space, mirroring
+    # ``re.sub(r"\s+", " ", ...)``. The collapsed space stays italic ONLY when italic on BOTH
+    # sides (interior to an italic run); a boundary seam is non-italic, so an italic run never
+    # absorbs the whitespace that separates it from surrounding prose.
+    out_chars: list[str] = []
+    out_italic: list[bool] = []
+    i = 0
+    n = len(raw_chars)
+    while i < n:
+        if _WS_CHAR.match(raw_chars[i]):
+            j = i + 1
+            while j < n and _WS_CHAR.match(raw_chars[j]):
+                j += 1
+            left_italic = raw_italic[i - 1] if i > 0 else False
+            right_italic = raw_italic[j] if j < n else False
+            out_chars.append(" ")
+            out_italic.append(left_italic and right_italic)
+            i = j
+        else:
+            out_chars.append(raw_chars[i])
+            out_italic.append(raw_italic[i])
+            i += 1
+
+    # Strip the (single, non-italic) leading/trailing collapsed spaces, mirroring ``.strip()``.
+    start = 0
+    end = len(out_chars)
+    while start < end and out_chars[start] == " ":
+        start += 1
+    while end > start and out_chars[end - 1] == " ":
+        end -= 1
+
+    text = "".join(out_chars[start:end])
+    spans: list[tuple[int, int]] = []
+    pos = start
+    while pos < end:
+        if out_italic[pos]:
+            run_start = pos
+            while pos < end and out_italic[pos]:
+                pos += 1
+            spans.append((run_start - start, pos - start))
+        else:
+            pos += 1
+    return text, spans
+
+
 def _extract_doc_blocks(html: bytes) -> list[RawBlock]:
     """Ordered blocks from one spine document, with non-narration markup removed."""
     soup = BeautifulSoup(html, "html.parser")
@@ -99,7 +188,7 @@ def _extract_doc_blocks(html: bytes) -> list[RawBlock]:
             empty_run = 0
             blocks.append(RawBlock(BlockType.SCENE_BREAK))
             continue
-        text = _collapse(el.get_text())
+        text, italic_spans = _collapse_with_italics(el)
         if el.name == "p":
             if not text:
                 empty_run += 1
@@ -110,11 +199,15 @@ def _extract_doc_blocks(html: bytes) -> list[RawBlock]:
             if DECORATIVE_PATTERN.match(text):
                 blocks.append(RawBlock(BlockType.SCENE_BREAK))
             else:
-                blocks.append(RawBlock(BlockType.PARAGRAPH, text))
+                blocks.append(RawBlock(BlockType.PARAGRAPH, text, italic_spans=italic_spans))
         else:  # heading
             empty_run = 0
             if text:
-                blocks.append(RawBlock(BlockType.HEADING, text, level=int(el.name[1])))
+                blocks.append(
+                    RawBlock(
+                        BlockType.HEADING, text, level=int(el.name[1]), italic_spans=italic_spans
+                    )
+                )
     return blocks
 
 
@@ -237,7 +330,12 @@ def parse_epub(
             Chapter(
                 title=proto.title or "Untitled",
                 blocks=[
-                    Block(id=f"ch{ci:03d}_b{bi:04d}", type=rb.kind, text=rb.text)
+                    Block(
+                        id=f"ch{ci:03d}_b{bi:04d}",
+                        type=rb.kind,
+                        text=rb.text,
+                        italic_spans=rb.italic_spans,
+                    )
                     for bi, rb in enumerate(blocks, start=1)
                 ],
             )

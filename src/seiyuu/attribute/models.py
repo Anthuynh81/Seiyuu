@@ -99,14 +99,39 @@ class BlockSpeaker(BaseModel):
         return _clean_optional(value)
 
 
+class ThoughtVerdict(BaseModel):
+    """The model's confirm/thinker decision for ONE deterministic thought candidate.
+
+    Keyed by ``candidate_id`` (``"{block_id}:{start_offset}"``, generated deterministically
+    from the italic runs) — the model returns a verdict per candidate, never a slice or
+    offset, so it can neither split/rewrite text nor mint a candidate. Verdicts whose
+    ``candidate_id`` is not in the generated set are dropped. A candidate becomes a THOUGHT
+    only when ``is_thought`` is true with a resolvable ``thinker`` above the confidence floor;
+    otherwise it degrades to narration (the same source slice).
+    """
+
+    candidate_id: str
+    is_thought: bool = False
+    thinker: str | None = None  # raw name (pre-resolution); resolved like any speaker
+    confidence: float = 1.0
+
+    @field_validator("thinker")
+    @classmethod
+    def _clean_thinker(cls, value: str | None) -> str | None:
+        return _clean_optional(value)
+
+
 class ChunkLabels(BaseModel):
     """An ``AttributionLLM`` provider's RAW output: a speaker per block + character mentions.
 
     The provider assembles this into a :class:`ChunkAttribution` (segments with source text).
+    ``thoughts`` carries one :class:`ThoughtVerdict` per presented thought candidate; it is
+    empty (and unused) on the thought-off v3 path.
     """
 
     blocks: list[BlockSpeaker] = []
     characters: list[CharacterMention] = []
+    thoughts: list[ThoughtVerdict] = []
 
 
 class ChunkAttribution(BaseModel):

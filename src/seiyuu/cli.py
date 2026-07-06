@@ -439,6 +439,11 @@ def _convert_multivoice(
     help="Run the opt-in LLM alias adjudication after attribution (full-book runs only).",
 )
 @click.option(
+    "--emit-thoughts/--no-emit-thoughts",
+    default=None,
+    help="Emit thought segments for italic interior monologue (uses the v4 prompt; opt-in).",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -452,6 +457,7 @@ def attribute(
     chapter_indices: tuple[int, ...],
     hybrid: bool | None,
     adjudicate: bool | None,
+    emit_thoughts: bool | None,
     books_dir: Path | None,
 ) -> None:
     """Attribute speakers with the local LLM: writes attribution.json + a cache DB."""
@@ -485,6 +491,7 @@ def attribute(
             prompt_version=prompt_version,
             use_hybrid=hybrid,
             use_adjudicate=adjudicate,
+            emit_thoughts=emit_thoughts,
             chapters=chapter_indices,
             progress=click.echo,
         )

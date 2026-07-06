@@ -28,6 +28,13 @@ class Block(BaseModel):
     id: str
     type: BlockType
     text: str = ""
+    # Half-open [start, end) CODE-POINT offsets of inline-italic (<em>/<i>) runs into
+    # ``text``, sorted ascending and non-overlapping. Additive metadata (default empty):
+    # ingest captures the author's italic signal so a downstream markup-aware pass can emit
+    # SegmentType.THOUGHT for interior monologue. Ingest makes NO thought-vs-emphasis
+    # judgement here — it only records where the italics are. Old normalized.json without
+    # the key validates and yields []; only re-ingest populates it.
+    italic_spans: list[tuple[int, int]] = []
 
     @model_validator(mode="after")
     def _check_invariants(self) -> "Block":
@@ -37,7 +44,25 @@ class Block(BaseModel):
             raise ValueError(f"scene_break block {self.id} must have empty text")
         if self.type is not BlockType.SCENE_BREAK and not self.text.strip():
             raise ValueError(f"{self.type} block {self.id} must have non-empty text")
+        self._check_italic_spans()
         return self
+
+    def _check_italic_spans(self) -> None:
+        if self.type is BlockType.SCENE_BREAK and self.italic_spans:
+            raise ValueError(f"scene_break block {self.id} must have no italic_spans")
+        prev_end = 0
+        n = len(self.text)
+        for start, end in self.italic_spans:
+            if not 0 <= start < end <= n:
+                raise ValueError(
+                    f"block {self.id} italic span ({start}, {end}) out of range for text len {n}"
+                )
+            if start < prev_end:
+                raise ValueError(
+                    f"block {self.id} italic_spans must be sorted and non-overlapping "
+                    f"(span ({start}, {end}) follows end {prev_end})"
+                )
+            prev_end = end
 
     @property
     def is_speakable(self) -> bool:
