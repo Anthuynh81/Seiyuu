@@ -84,6 +84,7 @@ class AttributeParams(BaseModel):
     model: str | None = None
     prompt_version: str | None = None
     use_hybrid: bool | None = None  # None -> settings.attribution_hybrid
+    use_adjudicate: bool | None = None  # None -> settings.attribution_adjudicate
     confirm_paid: bool = False  # checked at enqueue against the EFFECTIVE paid-ness
 
 

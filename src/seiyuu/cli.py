@@ -182,7 +182,7 @@ def render(
 
     from seiyuu.engines import get_engine
     from seiyuu.render import RenderError, estimate_render_cost_single, render_book
-    from seiyuu.voices import VoiceLibrary
+    from seiyuu.voices import VoiceLibrary, VoiceLibraryError
 
     engine_id = engine_id or cfg.tts_engine
     voice = voice or cfg.kokoro_default_voice
@@ -197,7 +197,7 @@ def render(
         # gate as multivoice (the M5 gap: --confirm-cost used to authorize blind)
         est = estimate_render_cost_single(
             book, engine, voice, out_book_dir,
-            settings={"speed": speed}, seed=seed, chapters=chapter_indices,
+            settings={"speed": speed}, seed=seed, chapters=chapter_indices, library=lib,
         )  # fmt: skip
         approved_usd = _pass_cost_gate(
             cfg, est,
@@ -222,7 +222,7 @@ def render(
             allow_paid=approved_usd is not None,
             max_paid_usd=approved_usd,
         )
-    except (RenderError, ValueError) as exc:
+    except (RenderError, ValueError, VoiceLibraryError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     minutes = result.total_audio_seconds / 60
@@ -1448,6 +1448,7 @@ def estimate_cost(
         from seiyuu.engines import get_engine
         from seiyuu.ingest.models import NormalizedBook
         from seiyuu.render import estimate_render_cost_single
+        from seiyuu.voices import VoiceLibrary
 
         book_dir = _resolve_book_dir(
             books_dir or cfg.books_dir, book_id, "normalized.json", "Run `seiyuu ingest` first."
@@ -1463,6 +1464,7 @@ def estimate_cost(
             settings={"speed": speed},
             seed=seed,
             chapters=chapter_indices,
+            library=VoiceLibrary(voices_dir or cfg.voices_dir),
         )
         assignment_hash = None
     else:
@@ -1668,7 +1670,7 @@ def convert(
     else:
         click.echo("== render ==")
         from seiyuu.render import estimate_render_cost_single
-        from seiyuu.voices import VoiceLibrary
+        from seiyuu.voices import VoiceLibrary, VoiceLibraryError
 
         lib = VoiceLibrary(voices_dir or cfg.voices_dir)
         try:
@@ -1678,7 +1680,7 @@ def convert(
             single_voice = voice or cfg.kokoro_default_voice
             est = estimate_render_cost_single(
                 book, engine, single_voice, book_dir,
-                settings={"speed": speed}, seed=seed, chapters=chapter_indices,
+                settings={"speed": speed}, seed=seed, chapters=chapter_indices, library=lib,
             )  # fmt: skip
             approved_usd = _pass_cost_gate(
                 cfg, est,
@@ -1703,7 +1705,7 @@ def convert(
                 allow_paid=approved_usd is not None,
                 max_paid_usd=approved_usd,
             )
-        except (RenderError, ValueError) as exc:
+        except (RenderError, ValueError, VoiceLibraryError) as exc:
             raise click.ClickException(str(exc)) from exc
         msg = f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache"
         if render_result.validation_failures:

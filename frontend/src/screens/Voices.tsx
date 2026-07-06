@@ -268,9 +268,22 @@ function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: s
     JSON envelopes, which an <audio src> would swallow silently. */
 function useDemoPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null); // the object URL currently backing audioRef
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false); // waiting out a render's GPU borrow
+
+  // pause the prior element and revoke its blob URL — object URLs live until revoked, so tuning
+  // a blend (a preview per click) would otherwise leak a blob every click.
+  const release = () => {
+    audioRef.current?.pause();
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+  };
+  useEffect(() => release, []); // on unmount: stop playback and revoke any outstanding url
+
   const play = async (url: string, attempt = 0) => {
     setError(null);
     audioRef.current?.pause();
@@ -288,9 +301,21 @@ function useDemoPlayer() {
         throw new Error(body?.error?.message ?? `preview failed (${res.status})`);
       }
       setRetrying(false);
-      const el = new Audio(URL.createObjectURL(await res.blob()));
+      const objectUrl = URL.createObjectURL(await res.blob());
+      release(); // free the previous preview's element + url now that this one is ready
+      urlRef.current = objectUrl;
+      const el = new Audio(objectUrl);
       audioRef.current = el;
-      el.onended = () => setBusy(null);
+      const done = () => {
+        setBusy(null);
+        // revoke only if we're still the current preview (a newer play() may have taken over)
+        if (urlRef.current === objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          urlRef.current = null;
+        }
+      };
+      el.onended = done;
+      el.onerror = done;
       await el.play();
     } catch (e) {
       setBusy(null);

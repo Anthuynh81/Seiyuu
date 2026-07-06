@@ -355,6 +355,26 @@ def attribute_book_job(
                 503, "not_ready", "ANTHROPIC_API_KEY not set; required for anthropic/hybrid"
             )
 
+    # Second paid path: the alias adjudicator runs ONLY on a full-book attribute (no
+    # params.chapters — matching run_attribution) with cfg.adjudication_provider. When that
+    # provider is anthropic it is a paid Anthropic call on this automatic HTTP path, so it
+    # needs the same confirm_paid + key gate. The provider gate above never covers it.
+    effective_adjudicate = (
+        cfg.attribution_adjudicate if params.use_adjudicate is None else params.use_adjudicate
+    )
+    if effective_adjudicate and not params.chapters and cfg.adjudication_provider == "anthropic":
+        if not params.confirm_paid:
+            raise ApiError(
+                402,
+                "payment_confirmation_required",
+                "alias adjudication with adjudication_provider=anthropic calls the paid "
+                "Anthropic API; re-send with confirm_paid=true to approve the spend",
+            )
+        if not cfg.anthropic_api_key:
+            raise ApiError(
+                503, "not_ready", "ANTHROPIC_API_KEY not set; required for anthropic adjudication"
+            )
+
     job = enqueue_job(
         store=store,
         runner=runner,

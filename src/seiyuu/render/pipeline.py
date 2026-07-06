@@ -59,6 +59,32 @@ def _paid_fingerprint(paid_key_hashes: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(paid_key_hashes)).encode("utf-8")).hexdigest()
 
 
+def _effective_single_args(
+    library: "VoiceLibrary | None",
+    voice_id: str,
+    settings: dict[str, Any],
+    seed: int | None,
+) -> tuple[str, dict[str, Any], int | None, VoiceMeta | None]:
+    """Resolve the (engine_voice, settings, seed, meta) the single-voice SegmentKey and
+    synthesis actually use for a possibly-saved library voice.
+
+    For a bare preset id (no library directory) the caller's values are returned verbatim
+    and meta is None. For a SAVED library voice they come from ``render_voice_args(meta)``
+    + ``meta.seed`` — a Kokoro preset addresses the engine by preset_id, a blend folds its
+    recipe into settings. Shared by ``render_book`` and ``estimate_render_cost_single`` so
+    the FROZEN SegmentKey they build can never drift. Does NOT verify consent — the
+    read-only estimate must not; ``render_book`` gates consent separately.
+    """
+    if library is not None and (
+        library.meta_path(voice_id).is_file() or library.reference_path(voice_id).is_file()
+    ):
+        # load() also refuses a reference.wav-only dir (no meta = never attested)
+        meta = library.load(voice_id)
+        engine_voice, effective_settings = render_voice_args(meta)
+        return engine_voice, effective_settings, meta.seed, meta
+    return voice_id, settings, seed, None
+
+
 def _gate_paid(
     engine: TTSEngine,
     text: str,
@@ -219,14 +245,19 @@ def render_book(
     if broker is not None and engine.uses_gpu:
         broker.publish(engine.engine_id, engine)
 
-    if library is not None and (
-        library.meta_path(voice_id).is_file() or library.reference_path(voice_id).is_file()
-    ):
-        try:
-            # load() also refuses a reference.wav-only dir (no meta = never attested)
-            library.verify_consent(library.load(voice_id))
-        except VoiceLibraryError as exc:
-            raise RenderError(str(exc)) from exc
+    # The engine voice arg / settings / seed the adapter actually synthesizes with. For a
+    # bare preset id (no library dir) these are the caller's values verbatim. For a SAVED
+    # library voice they come from render_voice_args(meta): a Kokoro preset addresses the
+    # engine by preset_id, a blend folds its recipe into settings — passing voice_id verbatim
+    # (as the bare path does) crashes those. The FROZEN SegmentKey still keys on voice_id.
+    try:
+        engine_voice, effective_settings, effective_seed, meta = _effective_single_args(
+            library, voice_id, settings, seed
+        )
+        if meta is not None:
+            library.verify_consent(meta)
+    except VoiceLibraryError as exc:
+        raise RenderError(str(exc)) from exc
 
     wanted = set(chapters)
     unknown = wanted - set(range(1, len(book.chapters) + 1))
@@ -259,8 +290,8 @@ def render_book(
                     engine=engine.engine_id,
                     engine_model_version=engine.model_version,
                     voice_id=voice_id,
-                    settings=settings,
-                    seed=seed,
+                    settings=effective_settings,
+                    seed=effective_seed,
                     normalized_text=text,
                 )
                 wav_path = cache.get(key)
@@ -269,6 +300,13 @@ def render_book(
                     duration = sf.info(str(wav_path)).duration
                     validation = cache.get_validation(key)
                     attempts = 1
+                    if validation is None and engine.requires_validation and validator is not None:
+                        # A cache hit with no stored verdict (crash between the wav write and
+                        # the verdict write, or a pre-M4 segment) must not ship unvalidated:
+                        # re-validate the cached wav and persist the verdict so it is counted
+                        # and flagged exactly like a fresh render.
+                        validation, _words = _validate_capturing_words(validator, wav_path, text)
+                        cache.put_validation(key, validation)
                 else:
                     paid_spent = _gate_paid(
                         engine, text, allow_paid, paid_spent, max_paid_usd,
@@ -282,7 +320,7 @@ def render_book(
                         )
                         with ctx:
                             audio, validation, attempts, words = _synthesize_validated(
-                                engine, text, voice_id, settings, seed,
+                                engine, text, engine_voice, effective_settings, effective_seed,
                                 validator=validator, max_retries=validation_max_retries,
                                 cache_dir=cache.cache_dir,
                             )  # fmt: skip
@@ -314,7 +352,7 @@ def render_book(
                         wav=wav_path.relative_to(book_output_dir).as_posix(),
                         duration_seconds=round(duration, 3),
                         voice_id=voice_id,
-                        seed=seed,
+                        seed=effective_seed,
                         settings_hash=key.settings_hash,
                         validation=validation,
                         synth_attempts=attempts,
@@ -339,8 +377,8 @@ def render_book(
         engine=engine.engine_id,
         engine_model_version=engine.model_version,
         voice_id=voice_id,
-        settings=settings,
-        seed=seed,
+        settings=effective_settings,
+        seed=effective_seed,
         chapters=rendered_chapters,
         validation_failures=validation_failures,
     )
@@ -476,6 +514,19 @@ def render_book_multivoice(
                         duration = sf.info(str(wav_path)).duration
                         validation = cache.get_validation(key)
                         attempts = 1
+                        if (
+                            validation is None
+                            and engine.requires_validation
+                            and validator is not None
+                        ):
+                            # A cache hit with no stored verdict (crash between the wav write
+                            # and the verdict write, or a pre-M4 segment) must not ship
+                            # unvalidated: re-validate the cached wav and persist the verdict
+                            # so it is counted and flagged exactly like a fresh render.
+                            validation, _words = _validate_capturing_words(
+                                validator, wav_path, text
+                            )
+                            cache.put_validation(key, validation)
                     else:
                         paid_spent = _gate_paid(
                             engine, text, allow_paid, paid_spent, max_paid_usd,
@@ -662,13 +713,20 @@ def estimate_render_cost_single(
     settings: dict[str, Any] | None = None,
     seed: int | None = None,
     chapters: tuple[int, ...] = (),
+    library: VoiceLibrary | None = None,
 ) -> CostEstimate:
     """Pre-flight cost of a SINGLE-VOICE render (M6a) — the counterpart the M5 gate lacked,
     so a paid engine could be authorized with no estimate at all. Same loop and FROZEN
-    SegmentKey as render_book, so cache hits are counted exactly; free engines total 0."""
+    SegmentKey as render_book, so cache hits are counted exactly; free engines total 0.
+
+    When ``library`` is given and ``voice_id`` is a SAVED library voice, the key is built
+    from the voice's stored settings + pinned seed (via the shared ``_effective_single_args``)
+    exactly as ``render_book`` now does — otherwise the estimate would key on the caller's
+    raw settings/seed and never match what render actually caches for saved voices."""
     settings = settings or {}
     cache = SegmentCache(Path(book_output_dir) / "cache")
     profile = profile_for(engine.engine_id)
+    _engine_voice, settings, seed, _meta = _effective_single_args(library, voice_id, settings, seed)
     wanted = set(chapters)
     total = 0.0
     paid = cached = free = 0

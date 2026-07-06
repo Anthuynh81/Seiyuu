@@ -213,6 +213,18 @@ export interface SegmentWordsResult {
   sig: string;
 }
 
+/** Signature of which clips have resolved AND at what audio identity. Folding `audioKey` in
+    means a re-render / reassignment that swaps a clip's wav (same clip key, new audio_key)
+    flips the signature even when the SET of resolved keys is unchanged — so the read-along
+    re-applies the fresh whisper timings instead of silently keeping the old ones. Pure and
+    order-independent (sorted). */
+export function resolvedSig(resolved: { key: string; audioKey: string | null }[]): string {
+  return resolved
+    .map((r) => `${r.key}@${r.audioKey ?? ""}`)
+    .sort()
+    .join("|");
+}
+
 /** Fetch whisper word-timings for every clip in a chapter at once (react-query `useQueries`,
     one entry per wav, keyed by audio_key). 404 degrades to null (no timing) rather than
     throwing, so a scene-break / not-yet-rendered clip simply stays on interpolation. */
@@ -235,14 +247,14 @@ export function useSegmentWords(bookId: string | null, clips: SegmentWordsClip[]
     })),
     combine: (results): SegmentWordsResult => {
       const byKey = new Map<string, SegmentWords>();
-      const loaded: string[] = [];
+      const resolved: { key: string; audioKey: string | null }[] = [];
       results.forEach((r, i) => {
         if (r.data) {
           byKey.set(clips[i].key, r.data);
-          loaded.push(clips[i].key);
+          resolved.push({ key: clips[i].key, audioKey: clips[i].audioKey });
         }
       });
-      return { byKey, sig: loaded.sort().join("|") };
+      return { byKey, sig: resolvedSig(resolved) };
     },
   });
 }
