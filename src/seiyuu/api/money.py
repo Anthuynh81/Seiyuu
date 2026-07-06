@@ -106,6 +106,7 @@ def compute_estimate(
         settings=single.settings,
         seed=single.seed,
         chapters=chapters,
+        library=library,
     )
     return EstimateContext(est=est, assignment_hash=None, edit_warnings=[])
 

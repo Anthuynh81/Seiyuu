@@ -275,6 +275,50 @@ def test_attribute_hybrid_settings_default_needs_confirm(tmp_path, epub_bytes) -
         assert release_free.status_code == 202
 
 
+def _wait_terminal(client, job_id: str, timeout: float = 5.0):
+    store: JobStore = client.app.state.store
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not store.get(job_id).is_terminal:
+        time.sleep(0.02)
+    return store.get(job_id)
+
+
+def test_attribute_adjudication_paid_gate(tmp_path, epub_bytes, monkeypatch) -> None:
+    # A server default of attribution_adjudicate=true + adjudication_provider=anthropic makes
+    # the alias adjudicator a PAID Anthropic call on the automatic attribute path; it must be
+    # confirm_paid-gated even though the attribution provider itself is local. (#2)
+    app = create_app(
+        settings=make_settings(
+            tmp_path, attribution_adjudicate=True, adjudication_provider="anthropic"
+        )
+    )
+    monkeypatch.setattr("seiyuu.api.handlers.run_attribution", lambda *a, **kw: None)
+    with TestClient(app) as c:
+        c.app = app
+        book_id = _ingested(c, epub_bytes)
+
+        # full-book, unconfirmed -> 402 (the provider gate above would have let this through)
+        resp = c.post(f"/api/books/{book_id}/attribute", json={})
+        assert resp.status_code == 402
+        assert _error(resp)["code"] == "payment_confirmation_required"
+
+        # full-book, confirmed but no key -> proceeds past the confirm gate to the 503 key check
+        confirmed = c.post(f"/api/books/{book_id}/attribute", json={"confirm_paid": True})
+        assert confirmed.status_code == 503
+        assert _error(confirmed)["code"] == "not_ready"
+
+        # a --chapters SUBSET never runs adjudication (run_attribution gates it to full-book),
+        # so it is NOT paid-gated
+        subset = c.post(f"/api/books/{book_id}/attribute", json={"chapters": [1]})
+        assert subset.status_code == 202
+        _wait_terminal(c, subset.json()["job_id"])
+
+        # an explicit opt-OUT of adjudication also skips the gate on a full book
+        opt_out = c.post(f"/api/books/{book_id}/attribute", json={"use_adjudicate": False})
+        assert opt_out.status_code == 202
+        _wait_terminal(c, opt_out.json()["job_id"])
+
+
 def test_attribute_not_ingested_is_409(client) -> None:
     odir = client.app.state.settings.output_dir / "bk-output-only"
     odir.mkdir(parents=True)

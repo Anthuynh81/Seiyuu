@@ -23,6 +23,15 @@ from seiyuu.normalize.numbers import roman_to_int
         ("paid £20", "paid twenty pounds"),
         ("worth $5 million", "worth five million dollars"),
         ("a $5.5 billion deal", "a five point five billion dollars deal"),
+        # zero-cents currency reads as whole dollars, never "point zero zero" (#6)
+        ("It cost $5.00.", "It cost five dollars."),
+        ("Just $1.00 left.", "Just one dollar left."),
+        ("It cost $5.0.", "It cost five dollars."),
+        # vs abbreviation expands only as a standalone token, not word-initial (#7)
+        ("cats vs dogs", "cats versus dogs"),
+        ("cats vs. dogs", "cats versus dogs"),
+        ("the vsync test", "the vsync test"),
+        ("open vscode now", "open vscode now"),
         # decades (must not produce "ninetys")
         ("the 1990s were wild", "the nineteen nineties were wild"),
         ("back in the '90s", "back in the nineties"),

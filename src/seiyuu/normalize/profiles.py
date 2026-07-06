@@ -37,7 +37,7 @@ _ABBREVIATIONS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\be\.g\.", re.I), "for example"),
     (re.compile(r"\bi\.e\.", re.I), "that is"),
     (re.compile(r"\betc\.", re.I), "et cetera"),
-    (re.compile(r"\bvs\.?", re.I), "versus"),
+    (re.compile(r"\bvs\b\.?", re.I), "versus"),  # trailing \b so vsync/vscode stay intact
     (re.compile(r"\bNo\.\s*(?=\d)", re.I), "Number "),
     (re.compile(r"&"), " and "),
 ]

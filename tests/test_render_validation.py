@@ -96,6 +96,37 @@ def test_kokoro_skips_validation(tmp_path):
     assert v.calls == 0  # validator never consulted for a deterministic engine
 
 
+def test_missing_verdict_revalidated_on_cache_hit(tmp_path):
+    # A cache hit whose validation sidecar is MISSING (crash between the wav write and the
+    # verdict write, or a pre-M4 segment) must be RE-validated, never shipped unvalidated. (#3)
+    book, out = _one_block_book(), tmp_path / "out"
+    first = render_book(
+        book, _validating_engine(), "v", out, seed=41172,
+        validator=ScriptedValidator([(True, 0.9)]),
+    )  # fmt: skip
+    assert first.synthesized == 1
+
+    # simulate the lost verdict: drop the validation sidecar(s), keep the cached wav
+    removed = [p for p in (out / "cache").glob("*.validation.json")]
+    assert removed  # sanity: there was a verdict to lose
+    for sidecar in removed:
+        sidecar.unlink()
+
+    fresh = ScriptedValidator([(False, 0.2)])
+    second = render_book(book, _validating_engine(), "v", out, seed=41172, validator=fresh)
+    assert second.cache_hits == 1 and second.synthesized == 0
+    assert fresh.calls == 1  # re-validated the cached wav rather than trusting a missing verdict
+    seg = _seg(second)
+    assert seg.validation is not None and seg.validation.ok is False
+    assert second.validation_failures == 1  # counted/flagged exactly like a fresh render
+
+    # and the re-derived verdict is persisted again: a third run needs no validator call
+    third_v = ScriptedValidator([(True, 1.0)])
+    third = render_book(book, _validating_engine(), "v", out, seed=41172, validator=third_v)
+    assert third.cache_hits == 1 and third_v.calls == 0
+    assert _seg(third).validation is not None and _seg(third).validation.ok is False
+
+
 def test_verdict_persists_across_cache_hit(tmp_path):
     book, out = _one_block_book(), tmp_path / "out"
     first = render_book(

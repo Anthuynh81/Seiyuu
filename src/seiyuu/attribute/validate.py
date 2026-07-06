@@ -39,15 +39,35 @@ _QUOTE_FOLD = str.maketrans(
 )
 
 
+def _fold(text: str) -> str:
+    """NFC + typographic-quote fold — shared by the readable compare form and the strict one."""
+    return unicodedata.normalize("NFC", text).translate(_QUOTE_FOLD)
+
+
 def normalize_ws(text: str) -> str:
-    """Canonical compare form: NFC, typographic quotes folded, whitespace collapsed, trimmed."""
-    text = unicodedata.normalize("NFC", text).translate(_QUOTE_FOLD)
-    return _WHITESPACE.sub(" ", text).strip()
+    """Readable compare form: NFC, typographic quotes folded, whitespace collapsed, trimmed.
+
+    Kept for the ReconstructionFailure diagnostics (expected/got) — a single-spaced,
+    trimmed rendering a human can diff. The reconstruction VERDICT uses ``_cmp`` below.
+    """
+    return _WHITESPACE.sub(" ", _fold(text)).strip()
+
+
+def _cmp(text: str) -> str:
+    """Whitespace-INSENSITIVE compare form: reconstruction tolerates ANY whitespace at
+    segment seams. A quote abutting a non-space char (em-dash-attached dialogue, a
+    space-less ``said,"Hello."`` tag) injects a seam space the collapse form cannot remove,
+    which would wrongly reject a split that reproduced the text exactly. Removing ALL
+    whitespace only ever reduces false-NEGATIVES: a real word/punctuation change (paraphrase,
+    dropped/added word, reordered dialogue) still differs after stripping, because non-space
+    characters are untouched.
+    """
+    return _WHITESPACE.sub("", _fold(text))
 
 
 def reconstructs_block(block_text: str, segment_texts: Sequence[str]) -> bool:
-    """True if the segment texts, joined in order, reproduce ``block_text`` (whitespace-modulo)."""
-    return normalize_ws(" ".join(segment_texts)) == normalize_ws(block_text)
+    """True if the segments, joined in order, reproduce ``block_text`` (whitespace-insensitive)."""
+    return _cmp("".join(segment_texts)) == _cmp(block_text)
 
 
 @dataclass(frozen=True)

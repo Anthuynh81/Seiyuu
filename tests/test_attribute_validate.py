@@ -71,6 +71,33 @@ def test_seam_whitespace_tolerated():
     )
 
 
+def test_abutting_emdash_dialogue_reconstructs():
+    # An em-dash-attached quote has NO seam whitespace between prose and dialogue; the
+    # collapse form would inject a space here and wrongly fail. Whitespace-insensitive
+    # comparison reconstructs it exactly. (#1)
+    block = '"Stop!"—but he didn\'t.'
+    assert reconstructs_block(block, ['"Stop!"', "—but he didn't."])
+
+
+def test_spaceless_tag_reconstructs():
+    # A space-less speech tag: prose abuts the quote with no separating space.
+    block = 'He said,"Hello."'
+    assert reconstructs_block(block, ["He said,", '"Hello."'])
+
+
+def test_dropped_seam_space_reconstructs():
+    # The pre-existing dropped-whitespace-seam case: '"A""B"' splits into '"A"' + '"B"'
+    # with no space between; must reconstruct.
+    assert reconstructs_block('"A""B"', ['"A"', '"B"'])
+
+
+def test_real_change_still_rejected_whitespace_insensitive():
+    # Whitespace-insensitivity must ONLY reduce false-negatives: a genuine word change /
+    # dropped word (whitespace aside) still fails. (#1)
+    assert not reconstructs_block('He said,"Hello."', ["He said,", '"Goodbye."'])
+    assert not reconstructs_block('"Stop!"—but he didn\'t.', ['"Stop!"', "—but he did."])
+
+
 def test_nfc_canonical_equivalence_tolerated():
     # Composed vs decomposed accent is the same text.
     assert reconstructs_block("café", ["café"])

@@ -87,6 +87,8 @@ def _say_currency(match: re.Match) -> str:
         n, c = int(whole), int(frac)
         cents = "pence" if minor == "pence" else (minor if c == 1 else _pluralize(minor))
         return f"{cardinal(n)} {major if n == 1 else _pluralize(major)} and {cardinal(c)} {cents}"
+    if frac and int(frac) == 0:  # "$5.00"/"$5.0" -> whole dollars, not "five point zero zero"
+        frac = None
     if frac:  # other decimal, no scale: "$5.5" -> "five point five dollars"
         return f"{_say_amount(whole, frac)} {_pluralize(major)}"
     n = int(whole)

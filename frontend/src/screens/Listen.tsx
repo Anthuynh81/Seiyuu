@@ -105,6 +105,11 @@ export function Listen() {
   const builtRef = useRef<
     { ci: number; key: string; clipWords: PlayWord[]; rows: { rowKey: string; count: number }[]; duration: number }[]
   >([]);
+  // Bumped every time the build effect rebuilds builtRef (a same-chapter reassignment, alias
+  // merge, or refetch gives playableRows a new identity and resets every clip to interpolation).
+  // The apply effect depends on this, so it re-applies the cached whisper timings onto the fresh
+  // spans even when `words.sig` didn't change — otherwise the read-along drifts permanently.
+  const [buildGen, setBuildGen] = useState(0);
 
   useEffect(() => {
     if (!player || !bookId || !pageRef.current || playableRows.length === 0) return;
@@ -167,14 +172,18 @@ export function Listen() {
       onEnded: chapterDone,
     });
     autoplayNext.current = false;
+    // signal the apply effect that clips were rebuilt so it re-applies whisper timings even
+    // when the resolved-clip signature is unchanged (same chapter, new playableRows identity)
+    setBuildGen((g) => g + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId, effectiveChapter, playableRows]);
 
   // When a clip's whisper words arrive, drive its highlight from the real (start,end) times
   // instead of length interpolation — mutating the existing spans in place (no player.load,
   // so playback never hitches) and refreshing that clip's per-row seek points. Clips still
-  // loading or 404'd keep their interpolated fallback. Keyed on `words.sig`, which only
-  // changes when the SET of resolved clips changes.
+  // loading or 404'd keep their interpolated fallback. Re-runs on `words.sig` (timings arrive
+  // or a clip's audio identity changes) AND on `buildGen` (the build effect rebuilt every clip
+  // back to interpolation for the same chapter — reassignment, alias merge, or refetch).
   useEffect(() => {
     for (const clip of builtRef.current) {
       const sw = words.byKey.get(clip.key);
@@ -193,8 +202,10 @@ export function Listen() {
         idx += r.count;
       }
     }
+    // buildGen re-fires this on every rebuild (a same-chapter reassignment/refetch resets the
+    // clips to interpolation without changing words.sig); words.sig re-fires it when timings load
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [words.sig, effectiveChapter]);
+  }, [words.sig, effectiveChapter, buildGen]);
 
   // Highlight loop: rAF reading the audio element's clock directly — smooth and never
   // behind the 250ms timeupdate events.
