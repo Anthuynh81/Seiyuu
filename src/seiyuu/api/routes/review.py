@@ -24,6 +24,7 @@ from seiyuu.api.schemas import (
     EditRequest,
     MergeRequest,
     RenameRequest,
+    SuggestCastResponse,
 )
 from seiyuu.services import (
     EditLog,
@@ -36,6 +37,7 @@ from seiyuu.services import (
     load_edits,
     record_edit,
     save_assignment,
+    suggest_assignment,
     undo_edit,
 )
 from seiyuu.settings import Settings
@@ -168,13 +170,48 @@ def draft(
                 accent=body.accent,
                 stage=AssignmentStage(body.stage),
                 overrides=body.overrides,
+                strategy=body.strategy,
+                recast=body.recast,
             )
-        except ServiceError as exc:  # unknown character / voice — actionable verbatim
+        except (ServiceError, ValueError) as exc:  # unknown character/voice, exhausted pool
             raise ApiError(422, "invalid", str(exc)) from exc
         save_assignment(assignment, cfg.output_dir)
         created = sorted(_existing_voice_ids(cfg) - before)
     return AssignmentDraftResponse(
         assignment=assignment, created_voice_ids=created, edit_warnings=warnings
+    )
+
+
+@router.post("/books/{book_id}/assignment/suggest", response_model=SuggestCastResponse)
+def suggest(
+    book_id: str,
+    body: AssignmentDraftRequest,
+    cfg: SettingsDep,
+) -> SuggestCastResponse:
+    """PREVIEW the smart cast without saving: the proposed distinct-voice assignment plus
+    which auto voices it would create vs (with recast) overwrite. The user commits it via
+    POST /assignment/draft with strategy=smart — this endpoint writes nothing, so it is safe
+    to call repeatedly and never touches the render cache."""
+    status = status_or_404(cfg, book_id)
+    report, warnings = effective_report(cfg, book_id, status)
+    try:
+        preview = suggest_assignment(
+            report,
+            VoiceLibrary(cfg.voices_dir),
+            default_preset=cfg.kokoro_default_voice,
+            narrator_voice_id=body.narrator_voice_id,
+            thought_voice_id=body.thought_voice_id,
+            accent=body.accent,
+            stage=AssignmentStage(body.stage),
+            overrides=body.overrides,
+        )
+    except (ServiceError, ValueError) as exc:
+        raise ApiError(422, "invalid", str(exc)) from exc
+    return SuggestCastResponse(
+        assignment=preview.assignment,
+        would_create_voice_ids=preview.would_create,
+        would_recast_voice_ids=preview.would_recast,
+        edit_warnings=warnings,
     )
 
 

@@ -308,11 +308,27 @@ class AssignmentDraftRequest(BaseModel):
     accent: Literal["a", "b"] = "a"
     stage: Literal["draft", "final"] = "draft"
     overrides: dict[str, str] = Field(default_factory=dict)  # character_id -> voice_id
+    # "hash" = legacy per-character isolated blend; "smart" = book-level collision-free cast.
+    strategy: Literal["hash", "smart"] = "hash"
+    # smart only: OVERWRITE existing {char_id}_auto voices to apply the new cast (re-renders
+    # those voices' segments). Without it, smart stays skip-if-exists like the legacy draft.
+    recast: bool = False
 
 
 class AssignmentDraftResponse(BaseModel):
     assignment: VoiceAssignment
     created_voice_ids: list[str]
+    edit_warnings: list[str]
+
+
+class SuggestCastResponse(BaseModel):
+    """A smart-cast PREVIEW (nothing written). ``would_create`` are new auto voices; the
+    ``would_recast`` voices already exist and only an apply with ``recast=true`` overwrites
+    them — surfaced so the UI can warn that applying re-renders those voices."""
+
+    assignment: VoiceAssignment
+    would_create_voice_ids: list[str]
+    would_recast_voice_ids: list[str]
     edit_warnings: list[str]
 
 

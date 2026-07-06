@@ -7,6 +7,7 @@ already folds em-dashes/ellipses/curly quotes while Kokoro does not.
 
 import re
 import unicodedata
+from typing import TYPE_CHECKING
 
 from seiyuu.normalize.numbers import (
     expand_currency,
@@ -16,6 +17,9 @@ from seiyuu.normalize.numbers import (
     expand_percent,
     expand_roman_numerals,
 )
+
+if TYPE_CHECKING:
+    from seiyuu.normalize.lexicon import CompiledLexicon
 
 _ZERO_WIDTH = dict.fromkeys(map(ord, "​‌‍﻿­"), None)
 _WHITESPACE = re.compile(r"[ \t ]+")
@@ -85,9 +89,14 @@ def profile_for(engine_id: str | None) -> str:
     return engine_id if engine_id in _PROFILES else "default"
 
 
-def apply_profile(text: str, profile: str) -> str:
+def apply_profile(text: str, profile: str, *, lexicon: "CompiledLexicon | None" = None) -> str:
     opts = _PROFILES.get(profile, _PROFILES["default"])
     text = _unicode_clean(text)
+    # F3 respell pass: right after NFKC + curly-quote folding (so terms match cleanly) and
+    # BEFORE number/abbrev/punctuation, in the SHARED path so every engine gets the identical
+    # spoken-word string (one whisper reference). IPA inside is Kokoro-only (see CompiledLexicon).
+    if lexicon is not None:
+        text = lexicon.apply(text, profile=profile)
     text = _abbreviations(text)
     text = expand_roman_numerals(text)
     text = expand_percent(text)

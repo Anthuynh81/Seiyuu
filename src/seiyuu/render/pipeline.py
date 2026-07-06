@@ -16,6 +16,7 @@ import soundfile as sf
 
 if TYPE_CHECKING:
     from seiyuu.api.concurrency import BorrowBroker
+    from seiyuu.normalize.lexicon import CompiledLexicon
 
 from seiyuu.attribute.models import AttributionReport
 from seiyuu.engines import TTSEngine, get_engine
@@ -212,6 +213,7 @@ def render_book(
     max_paid_usd: float | None = None,
     check_cancel: Callable[[], None] | None = None,
     broker: "BorrowBroker | None" = None,
+    lexicon: "CompiledLexicon | None" = None,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
@@ -285,7 +287,7 @@ def render_book(
                 if block.type is BlockType.SCENE_BREAK:
                     segments.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
-                text = normalize_text(block.text, profile=profile)
+                text = normalize_text(block.text, profile=profile, lexicon=lexicon)
                 key = SegmentKey.build(
                     engine=engine.engine_id,
                     engine_model_version=engine.model_version,
@@ -410,6 +412,7 @@ def render_book_multivoice(
     cloud_max_slots: int = 10,
     check_cancel: Callable[[], None] | None = None,
     broker: "BorrowBroker | None" = None,
+    lexicon: "CompiledLexicon | None" = None,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -498,7 +501,9 @@ def render_book_multivoice(
                         # next yield point (lend() reads these via closure)
                         broker.publish(meta.engine, engine)
                         lent_id, lent_engine = meta.engine, engine
-                    text = normalize_text(seg.text, profile=profile_for(meta.engine))
+                    text = normalize_text(
+                        seg.text, profile=profile_for(meta.engine), lexicon=lexicon
+                    )
                     engine_voice, settings = render_voice_args(meta)
                     key = SegmentKey.build(
                         engine=meta.engine,
@@ -631,6 +636,7 @@ def estimate_render_cost(
     book_output_dir: Path,
     *,
     chapters: tuple[int, ...] = (),
+    lexicon: "CompiledLexicon | None" = None,
 ) -> CostEstimate:
     """Pre-flight cost of a multi-voice render: USD over the segments that aren't already cached.
 
@@ -674,7 +680,7 @@ def estimate_render_cost(
                 voice_id = resolve_voice(seg, assignment)
                 meta = meta_for(voice_id)
                 engine = engine_for(meta.engine)
-                text = normalize_text(seg.text, profile=profile_for(meta.engine))
+                text = normalize_text(seg.text, profile=profile_for(meta.engine), lexicon=lexicon)
                 _, settings = render_voice_args(meta)
                 key = SegmentKey.build(
                     engine=meta.engine,
@@ -714,6 +720,7 @@ def estimate_render_cost_single(
     seed: int | None = None,
     chapters: tuple[int, ...] = (),
     library: VoiceLibrary | None = None,
+    lexicon: "CompiledLexicon | None" = None,
 ) -> CostEstimate:
     """Pre-flight cost of a SINGLE-VOICE render (M6a) — the counterpart the M5 gate lacked,
     so a paid engine could be authorized with no estimate at all. Same loop and FROZEN
@@ -737,7 +744,7 @@ def estimate_render_cost_single(
         for block in chapter.blocks:
             if block.type is BlockType.SCENE_BREAK:
                 continue
-            text = normalize_text(block.text, profile=profile)
+            text = normalize_text(block.text, profile=profile, lexicon=lexicon)
             key = SegmentKey.build(
                 engine=engine.engine_id,
                 engine_model_version=engine.model_version,

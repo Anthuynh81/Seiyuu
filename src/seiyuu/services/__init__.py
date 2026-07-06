@@ -6,10 +6,12 @@ thin adapters. Services raise :class:`ServiceError` (or a stage's own loud error
 callers map it to their boundary (ClickException, HTTP status)."""
 
 from seiyuu.services.assignment import (
+    CastPreview,
     assignment_path,
     draft_assignment,
     load_assignment,
     save_assignment,
+    suggest_assignment,
 )
 from seiyuu.services.attribution import (
     build_adjudicator,
@@ -40,6 +42,7 @@ from seiyuu.services.voices import VoiceReference, delete_voice, voice_reference
 
 __all__ = [
     "EDITS_NAME",
+    "CastPreview",
     "CharacterSummary",
     "CharactersOverview",
     "EditLog",
@@ -67,6 +70,7 @@ __all__ = [
     "run_attribution",
     "save_assignment",
     "save_edits",
+    "suggest_assignment",
     "undo_edit",
     "voice_references",
 ]

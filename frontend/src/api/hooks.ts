@@ -5,6 +5,7 @@ import type {
   AssignmentDraftResponse,
   AssignmentWrite,
   AuditionOut,
+  CastStrategy,
   BookDeletedOut,
   BookDetail,
   BooksOut,
@@ -17,12 +18,17 @@ import type {
   IngestResponse,
   JobOut,
   JobsOut,
+  LexiconEntry,
+  LexiconOut,
+  LexiconPreviewOut,
+  LexiconSaved,
   QuoteResponse,
   RenderMode,
   RenderRequest,
   RenderSummaryOut,
   SegmentBrowserOut,
   SegmentWords,
+  SuggestCastResponse,
   SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
@@ -166,6 +172,43 @@ export function useAttribute(bookId: string) {
       qc.invalidateQueries({ queryKey: ["jobs"] });
       qc.invalidateQueries({ queryKey: ["book", bookId] });
     },
+  });
+}
+
+// -- pronunciation lexicon -----------------------------------------------------------------
+
+export function useLexicon(bookId: string | null) {
+  return useQuery({
+    queryKey: ["lexicon", bookId],
+    queryFn: () => api<LexiconOut>(`/api/books/${bookId}/lexicon`),
+    enabled: bookId !== null,
+  });
+}
+
+/** Save the whole lexicon. Returns the affected-segment count vs the previous save so the UI
+    can tell the user how many segments the change re-synthesizes. Editing invalidates the
+    estimate (normalized_text_hash shifts) and the book (a lexicon is per-book input). */
+export function useSaveLexicon(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (entries: LexiconEntry[]) =>
+      api<LexiconSaved>(`/api/books/${bookId}/lexicon`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lexicon", bookId] });
+      qc.invalidateQueries({ queryKey: ["estimate", bookId] });
+    },
+  });
+}
+
+/** Affected-segment count for a PROPOSED lexicon, without saving — shown before commit. */
+export function usePreviewLexicon(bookId: string) {
+  return useMutation({
+    mutationFn: (entries: LexiconEntry[]) =>
+      postJson<LexiconPreviewOut>(`/api/books/${bookId}/lexicon/preview`, { entries }),
   });
 }
 
@@ -323,11 +366,27 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
   qc.invalidateQueries({ queryKey: ["estimate", bookId] }); // assignment hash drifts quotes
 }
 
+export interface DraftInput {
+  strategy?: CastStrategy; // "hash" (legacy) | "smart" (collision-free book cast)
+  recast?: boolean; // smart only: overwrite existing auto voices (re-renders them)
+}
+
 export function useDraftAssignment(bookId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => postJson<AssignmentDraftResponse>(`/api/books/${bookId}/assignment/draft`, {}),
+    mutationFn: (input: DraftInput = {}) =>
+      postJson<AssignmentDraftResponse>(`/api/books/${bookId}/assignment/draft`, input),
     onSuccess: () => invalidateCasting(qc, bookId),
+  });
+}
+
+/** PREVIEW the smart cast without writing anything — returns the proposed distinct-voice
+    assignment plus which auto voices it would create vs (with recast) overwrite. Apply it by
+    calling useDraftAssignment with strategy:"smart". */
+export function useSuggestCast(bookId: string) {
+  return useMutation({
+    mutationFn: () =>
+      postJson<SuggestCastResponse>(`/api/books/${bookId}/assignment/suggest`, { strategy: "smart" }),
   });
 }
 

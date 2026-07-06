@@ -6,6 +6,7 @@ const items = [
   { to: "/", label: "Library" },
   { to: "/listen", label: "Listen" },
   { to: "/review", label: "Character Review" },
+  { to: "/lexicon", label: "Pronunciation" },
   { to: "/voices", label: "Voice Studio" },
   { to: "/render", label: "Render & Jobs" },
 ];
