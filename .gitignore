@@ -9,4 +9,4 @@ data/
 *.wav
 *.pt
 node_modules/
-voices/
+/voices/
