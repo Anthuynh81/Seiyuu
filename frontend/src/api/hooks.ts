@@ -24,11 +24,15 @@ import type {
   LexiconPreviewOut,
   LexiconSaved,
   QuoteResponse,
+  LinkSuggestionsOut,
   RenderMode,
   RenderRequest,
   RenderSummaryOut,
+  SaveCastOut,
   SegmentBrowserOut,
   SegmentWords,
+  Series,
+  SeriesListOut,
   SuggestCastResponse,
   SystemStatusOut,
   ValidationReportOut,
@@ -382,6 +386,9 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
 export interface DraftInput {
   strategy?: CastStrategy; // "hash" (legacy) | "smart" (collision-free book cast)
   recast?: boolean; // smart only: overwrite existing auto voices (re-renders them)
+  // F5: character_id -> voice_id inherited from a series; wins over the auto-cast pick. The
+  // smart caster reserves these so a new character is never cast onto a series-pinned voice.
+  overrides?: Record<string, string>;
 }
 
 export function useDraftAssignment(bookId: string) {
@@ -413,6 +420,69 @@ export function useSaveAssignment(bookId: string) {
         body: JSON.stringify(body),
       }),
     onSuccess: () => invalidateCasting(qc, bookId),
+  });
+}
+
+// -- series / library voice consistency (F5) -------------------------------------------------
+
+/** All declared series (global registry). */
+export function useSeriesList() {
+  return useQuery({ queryKey: ["series"], queryFn: () => api<SeriesListOut>("/api/series") });
+}
+
+/** Create a series SEEDED from a book — its cast becomes the initial voice_links. The book must
+    be attributed and assigned (the backend 409s / 4xx otherwise, surfaced to the caller). */
+export function useCreateSeries() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, bookId }: { name: string; bookId: string }) =>
+      postJson<Series>("/api/series", { name, book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Attach a sibling book to a series (idempotent). Does NOT learn its cast — that is the
+    explicit save-cast action, so precision is preserved. */
+export function useAddBookToSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (bookId: string) =>
+      postJson<Series>(`/api/series/${seriesId}/books`, { book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Cross-book link SUGGESTIONS for a book joining a series: each character whose name matches an
+    existing link, for the user to confirm. Never auto-applied. Scoped to this series only. */
+export function useLinkSuggestions(seriesId: string | null, bookId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["link-suggestions", seriesId, bookId],
+    queryFn: () =>
+      api<LinkSuggestionsOut>(`/api/series/${seriesId}/books/${bookId}/link-suggestions`),
+    enabled: enabled && seriesId !== null && bookId !== null,
+  });
+}
+
+/** Explicit write-back: fold a book's cast into the series' voice_links (last-write-wins). The
+    only path that grows a series' links from a book — nothing is learned silently. */
+export function useSaveCastToSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (bookId: string) =>
+      postJson<SaveCastOut>(`/api/series/${seriesId}/save-cast`, { book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Remove a character's voice link by identity key (case-insensitive; idempotent). */
+export function useUnlinkSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) =>
+      api<Series>(`/api/series/${seriesId}/links?name=${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
   });
 }
 

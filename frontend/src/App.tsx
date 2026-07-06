@@ -10,6 +10,7 @@ import { Library } from "./screens/Library";
 import { Listen } from "./screens/Listen";
 import { RenderJobs } from "./screens/RenderJobs";
 import { Review } from "./screens/Review";
+import { Series } from "./screens/Series";
 import { Voices } from "./screens/Voices";
 
 /** When a job finishes (the live count drops), every screen showing stage artifacts is
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/review" element={<Review />} />
           <Route path="/lexicon" element={<Lexicon />} />
           <Route path="/voices" element={<Voices />} />
+          <Route path="/series" element={<Series />} />
           <Route path="/render" element={<RenderJobs />} />
         </Routes>
       </main>

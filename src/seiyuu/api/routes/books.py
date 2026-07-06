@@ -52,6 +52,7 @@ from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME
 from seiyuu.services import ServiceError, characters_overview
 from seiyuu.services.characters import CharactersOverview
 from seiyuu.services.deletion import detect_paid_artifacts
+from seiyuu.voices import drop_book_everywhere
 
 router = APIRouter(tags=["books"])
 
@@ -279,6 +280,10 @@ def delete_book(
                 detail={"survivors": result.survivors},
             )
         jobs_deleted = store.delete_jobs_for_book(book_id)
+        # A deleted book must leave no series membership behind (its output/books trees are
+        # gone, so it would be an unresolvable ghost id in book_ids). Links are name-keyed and
+        # harmless, so they stay.
+        drop_book_everywhere(cfg.data_dir, book_id)
     return BookDeletedOut(
         book_id=book_id,
         output_removed=result.output_removed,

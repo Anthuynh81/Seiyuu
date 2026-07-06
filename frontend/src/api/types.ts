@@ -357,6 +357,46 @@ export interface AssignmentWrite {
   thought_voice_id: string | null;
 }
 
+// -- series / library voice consistency (F5) -------------------------------------------------
+
+/** One declared series. `voice_links` maps a cross-book identity key (casefolded canonical
+    name) -> library voice_id; `book_ids` is a plain membership list. Cross-book matching is
+    scoped to THIS series only — there is no global name match. */
+export interface Series {
+  series_id: string;
+  name: string;
+  book_ids: string[];
+  voice_links: Record<string, string>; // identity_key -> voice_id
+}
+
+export interface SeriesListOut {
+  series: Series[];
+}
+
+/** A within-series name match surfaced for the user to CONFIRM (never auto-applied). Character
+    `character_id` in the joining book matches an existing link. `voice_exists` is false when the
+    linked voice was deleted — the UI shows it unavailable and it can't be inherited. */
+export interface LinkSuggestion {
+  character_id: string;
+  canonical_name: string;
+  identity_key: string;
+  voice_id: string;
+  voice_exists: boolean;
+}
+
+export interface LinkSuggestionsOut {
+  series_id: string;
+  book_id: string;
+  suggestions: LinkSuggestion[];
+}
+
+/** Result of an explicit save-to-series write-back: the updated series plus the identity keys
+    that were added or updated by folding the book's cast in. */
+export interface SaveCastOut {
+  series: Series;
+  linked_keys: string[];
+}
+
 // -- voice studio --------------------------------------------------------------------------
 
 export interface VoiceOut {

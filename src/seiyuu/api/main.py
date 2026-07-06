@@ -26,6 +26,7 @@ from seiyuu.api.routes import jobs as jobs_routes
 from seiyuu.api.routes import lexicon as lexicon_routes
 from seiyuu.api.routes import render as render_routes
 from seiyuu.api.routes import review as review_routes
+from seiyuu.api.routes import series as series_routes
 from seiyuu.api.routes import system as system_routes
 from seiyuu.api.routes import voices as voices_routes
 from seiyuu.gpu import get_gpu_manager
@@ -70,6 +71,9 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         # Serializes assignment writes against voice deletion (M6b-6): a voice must not
         # vanish between an assignment's validation and its durable write.
         app.state.voices_mutex = threading.Lock()
+        # Serializes read-modify-write on the global series.json (F5) so concurrent series
+        # edits (link, add-book, save-cast) can't clobber each other.
+        app.state.series_mutex = threading.Lock()
         app.state.audition_slot = AuditionSlot()
         # F2 forced alignment: ONE process-shared whisper aligner (lazy model load) + one lock
         # so read-along requests serialize. Pinned to CPU/int8 REGARDLESS of whisper_device: this
@@ -113,6 +117,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(lexicon_routes.router, prefix="/api")
     app.include_router(review_routes.router, prefix="/api")
     app.include_router(render_routes.router, prefix="/api")
+    app.include_router(series_routes.router, prefix="/api")
     app.include_router(voices_routes.router, prefix="/api")
     return app
 

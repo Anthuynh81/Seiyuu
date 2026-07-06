@@ -134,6 +134,11 @@ def draft_assignment(
             assignments[char.id] = voice_id
     else:  # "hash": legacy per-character isolated blend (collision-blind)
         for char in report.registry.characters:
+            # Skip characters the overrides cover (F5 inheritance or an explicit pick): the
+            # override loop below sets their assignment, so creating a throwaway {id}_auto voice
+            # here would just orphan it. Mirrors the smart path's ``castable`` filter.
+            if char.id in override_ids:
+                continue
             voice_id = f"{char.id}_auto"
             if not library.meta_path(voice_id).is_file():
                 recipe = auto_blend_recipe(char.canonical_name, char.gender, accent=accent)

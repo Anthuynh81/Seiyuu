@@ -591,11 +591,22 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/books/{book_id}/lexicon", "PUT") in paths
     assert ("/api/books/{book_id}/lexicon/preview", "POST") in paths
     assert ("/api/books/{book_id}/assignment/suggest", "POST") in paths  # F4 smart-cast preview
+    # series / library voice consistency (roadmap F5): 9 routes — CRUD + membership +
+    # link-suggestions + inheritance overrides + explicit save-cast/unlink
+    assert ("/api/series", "POST") in paths
+    assert ("/api/series", "GET") in paths
+    assert ("/api/series/{series_id}", "GET") in paths
+    assert ("/api/series/{series_id}/books", "POST") in paths
+    assert ("/api/series/{series_id}/books/{book_id}", "DELETE") in paths
+    assert ("/api/series/{series_id}/books/{book_id}/link-suggestions", "GET") in paths
+    assert ("/api/series/{series_id}/books/{book_id}/overrides", "GET") in paths
+    assert ("/api/series/{series_id}/save-cast", "POST") in paths
+    assert ("/api/series/{series_id}/links", "DELETE") in paths
     # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer
     # demos) + PATCH voice tags (library organization) + DELETE book (F3) + GET
     # segment words (F2 forced alignment) + 3 pronunciation-lexicon routes + F4
-    # smart-cast suggest
-    assert len(paths) == 53
+    # smart-cast suggest + 9 F5 series routes
+    assert len(paths) == 62
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
