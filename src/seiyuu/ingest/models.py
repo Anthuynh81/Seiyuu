@@ -28,12 +28,14 @@ class Block(BaseModel):
     id: str
     type: BlockType
     text: str = ""
-    # Half-open [start, end) CODE-POINT offsets of inline-italic (<em>/<i>) runs into
-    # ``text``, sorted ascending and non-overlapping. Additive metadata (default empty):
-    # ingest captures the author's italic signal so a downstream markup-aware pass can emit
-    # SegmentType.THOUGHT for interior monologue. Ingest makes NO thought-vs-emphasis
-    # judgement here — it only records where the italics are. Old normalized.json without
-    # the key validates and yields []; only re-ingest populates it.
+    # Half-open [start, end) CODE-POINT offsets of italic runs into ``text``, sorted
+    # ascending and non-overlapping. Runs originate from inline <em>/<i> (Phase 1) OR from
+    # CSS class / inline style="font-style:italic|oblique" (Phase 2a) — the offset geometry
+    # is identical either way, and this schema is provenance-agnostic. Additive metadata
+    # (default empty): ingest captures the author's italic signal so a downstream
+    # markup-aware pass can emit SegmentType.THOUGHT for interior monologue. Ingest makes NO
+    # thought-vs-emphasis judgement here — it only records where the italics are. Old
+    # normalized.json without the key validates and yields []; only re-ingest populates it.
     italic_spans: list[tuple[int, int]] = []
 
     @model_validator(mode="after")
