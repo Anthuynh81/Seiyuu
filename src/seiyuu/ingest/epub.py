@@ -12,8 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bs4 import BeautifulSoup, CData, NavigableString
-from ebooklib import ITEM_DOCUMENT, epub
+from ebooklib import ITEM_DOCUMENT, ITEM_STYLE, epub
 
+from seiyuu.ingest.css_italics import (
+    EMPTY_ITALIC_MAP,
+    INLINE_ITALIC,
+    INLINE_NORMAL,
+    ItalicStyleMap,
+    parse_css_italics,
+)
 from seiyuu.ingest.models import Block, BlockType, BookMeta, Chapter, NormalizedBook
 from seiyuu.repository import atomic_write_text
 
@@ -55,9 +62,9 @@ class IngestError(Exception):
     """Loud, actionable ingest failure."""
 
 
-# Inline tags whose text is the standard unspoken-thought / emphasis signal. Phase 1 is
-# inline markup only: CSS-class italics (external stylesheet) are invisible here and a
-# deliberate, silent miss, not an error.
+# Inline tags whose text is the standard unspoken-thought / emphasis signal. Kept as the
+# highest-priority per-element signal so the tag italic is byte-identical to Phase 1 even
+# when CSS restyles <em>/<i> to normal (see ItalicStyleMap.em_forced_normal, not acted on).
 _ITALIC_TAGS = {"em", "i"}
 
 
@@ -95,16 +102,48 @@ def _collapse(text: str) -> str:
 _WS_CHAR = re.compile(r"\s")
 
 
-def _collapse_with_italics(el) -> tuple[str, list[tuple[int, int]]]:
-    """Collapsed text of ``el`` AND its inline-italic run offsets, in a single pass.
+def _element_font_style(el, italic_map: ItalicStyleMap) -> bool | None:
+    """Font-style DECLARED by this single element: ``True`` italic, ``False`` normal-forced,
+    ``None`` undeclared. Priority mirrors the resolution the walker needs, not raw CSS
+    specificity: the ``<em>``/``<i>`` tag signal is kept first (byte-identical to Phase 1),
+    then the inline ``style`` (nearer normal cancels), then a class token in the italic set.
+    """
+    if el.name in _ITALIC_TAGS:
+        return True
+    style = el.get("style")  # a STRING, or None if absent
+    if style:
+        if INLINE_ITALIC.search(style):
+            return True
+        if INLINE_NORMAL.search(style):
+            return False
+    classes = el.get("class")  # a LIST, or None if absent
+    if classes:
+        for token in classes:
+            if token in italic_map.italic_classes:
+                return True
+    return None
+
+
+def _collapse_with_italics(
+    el, italic_map: ItalicStyleMap = EMPTY_ITALIC_MAP
+) -> tuple[str, list[tuple[int, int]]]:
+    """Collapsed text of ``el`` AND its italic run offsets, in a single pass.
 
     The offsets index the FINAL, post-collapse/strip text — never the raw ``get_text()``.
     ``_collapse`` rewrites every whitespace run to one space and strips the ends, which
     shifts positions; a "find in get_text() then collapse" shortcut would silently
-    mis-slice. So we gather each descendant string with a flag for whether it sits inside an
-    ``<em>``/``<i>`` (bounded by ``el``), collapse the char stream once, and read the italic
-    runs straight off the collapsed flags. The text half is identical to
-    ``_collapse(el.get_text())``; scene-break/decorative handling is unchanged upstream.
+    mis-slice. So we gather each descendant string with a flag for whether it is italic
+    (bounded by ``el``), collapse the char stream once, and read the italic runs straight
+    off the collapsed flags. The text half is identical to ``_collapse(el.get_text())``;
+    scene-break/decorative handling is unchanged upstream.
+
+    Italic is resolved inheritance-correctly (Phase 2a): for each string node we climb its
+    ancestors up to (but excluding) ``el`` and take the NEAREST ancestor that declares a
+    font-style — an ``<em>``/``<i>`` tag, an inline ``style="font-style:italic|oblique"``,
+    or a class in ``italic_map.italic_classes``. font-style inherits, so a class on a
+    wrapper italicizes its descendants; a nearer ``style="font-style:normal"`` (or a
+    normal-forced element) cancels it. ``el``'s OWN font-style is deliberately invisible —
+    a fully-italic paragraph (letter/telegraph) must not become a mid-prose thought.
     """
     raw_chars: list[str] = []
     raw_italic: list[bool] = []
@@ -112,16 +151,17 @@ def _collapse_with_italics(el) -> tuple[str, list[tuple[int, int]]]:
         # Match ``get_text()`` semantics EXACTLY: it yields only the base string
         # types (NavigableString, CData). ``isinstance`` would also catch NavigableString
         # subclasses — Comment, Stylesheet, Script, Declaration, ProcessingInstruction —
-        # which ``get_text()`` excludes, injecting comment/script text into narration and
-        # breaking the thought-off byte-identity invariant.
+        # which ``get_text()`` excludes, injecting comment/script/CSS text into narration
+        # and breaking the thought-off byte-identity invariant.
         if type(node) not in (NavigableString, CData):
             continue
         italic = False
         for parent in node.parents:
             if parent is el:
                 break
-            if parent.name in _ITALIC_TAGS:
-                italic = True
+            decl = _element_font_style(parent, italic_map)
+            if decl is not None:  # nearest declaring ancestor wins (normal cancels italic)
+                italic = decl
                 break
         for ch in str(node):
             raw_chars.append(ch)
@@ -172,8 +212,15 @@ def _collapse_with_italics(el) -> tuple[str, list[tuple[int, int]]]:
     return text, spans
 
 
-def _extract_doc_blocks(html: bytes) -> list[RawBlock]:
-    """Ordered blocks from one spine document, with non-narration markup removed."""
+def _extract_doc_blocks(
+    html: bytes, italic_map: ItalicStyleMap = EMPTY_ITALIC_MAP
+) -> list[RawBlock]:
+    """Ordered blocks from one spine document, with non-narration markup removed.
+
+    ``italic_map`` widens the italic signal beyond inline ``<em>``/``<i>`` to CSS-class and
+    inline-style italics (Phase 2a). The default empty map reduces the walker to Phase-1
+    tag-only behavior exactly (byte-identity).
+    """
     soup = BeautifulSoup(html, "html.parser")
     for el in soup.find_all(class_=SKIP_CLASS_PATTERN):
         el.decompose()
@@ -188,7 +235,7 @@ def _extract_doc_blocks(html: bytes) -> list[RawBlock]:
             empty_run = 0
             blocks.append(RawBlock(BlockType.SCENE_BREAK))
             continue
-        text, italic_spans = _collapse_with_italics(el)
+        text, italic_spans = _collapse_with_italics(el, italic_map)
         if el.name == "p":
             if not text:
                 empty_run += 1
@@ -269,6 +316,25 @@ def _matches_any(name: str, idref: str, needles: tuple[str, ...]) -> bool:
     return any(n.lower() in name.lower() or n.lower() in idref.lower() for n in needles)
 
 
+def _build_italic_style_map(book: epub.EpubBook) -> ItalicStyleMap:
+    """Once-per-book union of every italic CSS class from external sheets AND in-document
+    ``<style>`` blocks. External sheets are ITEM_STYLE items; in-document ``<style>`` is not
+    ITEM_STYLE and its text is (correctly) excluded from narration, so it is read here in a
+    SEPARATE pass — the narration string filter in ``_collapse_with_italics`` is untouched.
+    """
+    sheets: list[str] = []
+    for item in book.get_items_of_type(ITEM_STYLE):
+        sheets.append(item.get_content().decode("utf-8", errors="replace"))
+    for idref, _linear in book.spine:
+        item = book.get_item_with_id(idref)
+        if item is None or item.get_type() != ITEM_DOCUMENT:
+            continue
+        soup = BeautifulSoup(item.get_content(), "html.parser")
+        for style in soup.find_all("style"):
+            sheets.append(style.get_text())
+    return parse_css_italics(sheets)
+
+
 def parse_epub(
     epub_path: Path,
     include_items: tuple[str, ...] = (),
@@ -289,6 +355,10 @@ def parse_epub(
     sha = hashlib.sha256(epub_path.read_bytes()).hexdigest()
     book_id = f"{_slug(title)}-{sha[:8]}"
 
+    # Book-global italic class set (external sheets + in-document <style>), built BEFORE the
+    # spine content loop so every document resolves CSS italics against the same map.
+    italic_map = _build_italic_style_map(book)
+
     raws: list[RawBlock] = []
     skipped: list[str] = []
     for idref, _linear in book.spine:
@@ -299,7 +369,7 @@ def parse_epub(
         if _matches_any(name, idref, exclude_items):
             skipped.append(name)
             continue
-        doc_blocks = _extract_doc_blocks(item.get_content())
+        doc_blocks = _extract_doc_blocks(item.get_content(), italic_map)
         doc_words = sum(len(b.text.split()) for b in doc_blocks)
         if (
             (_name_tokens(name, idref) & SKIP_NAME_TOKENS)
