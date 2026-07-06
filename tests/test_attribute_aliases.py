@@ -417,6 +417,23 @@ def test_adversarial_gender_clash_never_merges_even_when_approved():
     assert _ids(reg) == {"mr_bennet", "mrs_bennet"}
 
 
+def test_title_implied_gender_vetoes_titled_vs_given_name():
+    # 'Mr. Bennet' carries NO gender field — only the honorific implies male; 'Elizabeth Bennet'
+    # is female. A G2 title<->given candidate would otherwise form (father vs daughter), so the
+    # title-implied gender must drop it at generation and veto it end-to-end even when approved.
+    reg = _reg(
+        Character(id="mr_bennet", canonical_name="Mr. Bennet"),  # gender field unset
+        Character(id="elizabeth_bennet", canonical_name="Elizabeth Bennet", gender="female"),
+    )
+    cands, _ = _generate_candidates(reg, Counter(), cap=40, use_nicknames=False)
+    assert cands == []  # pre-filtered by _conflict via the title-implied gender
+    remap, _ = resolve_registry_aliases(
+        reg, _ch("mr_bennet", "elizabeth_bennet"), resolver=FakeAliasResolver(approve_all(1.0))
+    )
+    assert remap == {}
+    assert _ids(reg) == {"mr_bennet", "elizabeth_bennet"}
+
+
 def test_adversarial_siblings_never_merge_even_when_approved():
     reg = _reg(
         Character(id="elizabeth_bennet", canonical_name="Elizabeth Bennet", gender="female"),

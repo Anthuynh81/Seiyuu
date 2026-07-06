@@ -98,9 +98,31 @@ def _norm_gender(g: str | None) -> str:
     return "unknown"
 
 
+# An honorific carries gender even when the record's gender field is empty; a "child" title
+# (Master/young) is a generation signal, not a reliable gender one, so it stays unknown here
+# and is caught by the title-CLASS check below instead.
+_TITLE_GENDER = {"male_adult": "male", "female_adult": "female", "female_unmarried": "female"}
+
+
+def _effective_gender(c: Character) -> str:
+    """Explicit gender if known, else the gender implied by an honorific (Mr. -> male, Miss ->
+    female). Lets _conflict veto e.g. 'Mr. Bennet' <-> 'Elizabeth Bennet' when only the given
+    side carries a gender field — the titled side's gender was previously invisible unless the
+    OTHER side also had a title."""
+    g = _norm_gender(c.gender)
+    if g != "unknown":
+        return g
+    return _TITLE_GENDER.get(_title_class(c.canonical_name), "unknown")
+
+
 def _conflict(a: Character, b: Character) -> bool:
-    """True if a and b cannot be the same person (gender or generation/role clash)."""
-    ga, gb = _norm_gender(a.gender), _norm_gender(b.gender)
+    """True if a and b cannot be the same person (gender or generation/role clash).
+
+    Gender uses the title-implied gender as a fallback (see ``_effective_gender``); the separate
+    title-CLASS check still guards generation/role independently of gender (e.g. Master vs Mr. —
+    a boy vs a man — and Mrs. vs Miss — a married woman vs an unmarried one — both stay flagged
+    even though each pair shares an effective gender)."""
+    ga, gb = _effective_gender(a), _effective_gender(b)
     if ga != "unknown" and gb != "unknown" and ga != gb:
         return True
     ca, cb = _title_class(a.canonical_name), _title_class(b.canonical_name)
