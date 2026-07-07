@@ -66,6 +66,32 @@ def fake_render_engine(monkeypatch):
 # --- voice library commands ------------------------------------------------
 
 
+def test_voice_clone_indextts2_records_engine(tmp_path):
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFF-fake-reference")  # clone copies + hashes bytes; no audio parse
+    voices = tmp_path / "voices"
+    _ok(
+        "voice", "clone", "Mr Darcy", str(ref),
+        "--engine", "indextts2", "--consent", "--consent-by", "ann",
+        "--voice-id", "darcy_x", "--voices-dir", str(voices),
+    )  # fmt: skip
+    from seiyuu.voices import VoiceLibrary
+
+    meta = VoiceLibrary(voices).load("darcy_x")
+    assert meta.engine == "indextts2" and meta.kind.value == "cloned"
+
+
+def test_voice_clone_rejects_unknown_engine(tmp_path):
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFF-fake-reference")
+    result = _invoke(
+        "voice", "clone", "X", str(ref), "--engine", "chaterbox", "--consent",
+        "--voices-dir", str(tmp_path / "voices"),
+    )  # fmt: skip
+    assert result.exit_code != 0  # click.Choice rejects the typo before any file is written
+    assert "chaterbox" in result.output
+
+
 def test_voice_add_preset_then_list(tmp_path):
     vdir = str(tmp_path / "voices")
     _ok("voice", "add-preset", "Narrator", "af_heart", "--voice-id", "narr", "--voices-dir", vdir)

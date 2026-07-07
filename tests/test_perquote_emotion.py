@@ -308,6 +308,10 @@ def test_map_emotion_neutral_and_none_yield_no_override():
     assert map_emotion("chatterbox", None) == {}
     assert map_emotion("chatterbox", EmotionVerdict(label=EmotionLabel.NEUTRAL, intensity=3)) == {}
     assert map_emotion("elevenlabs", EmotionVerdict(label=EmotionLabel.NEUTRAL, intensity=2)) == {}
+    # indextts2 NEUTRAL/None -> {} so the engine takes its neutral-from-speaker path and the
+    # segment key stays byte-identical to a no-emotion render (the F2 cache invariant).
+    assert map_emotion("indextts2", None) == {}
+    assert map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.NEUTRAL, intensity=3)) == {}
 
 
 def test_map_emotion_kokoro_never_overrides():
@@ -315,9 +319,47 @@ def test_map_emotion_kokoro_never_overrides():
         assert map_emotion("kokoro", EmotionVerdict(label=label, intensity=3)) == {}
 
 
-def test_map_emotion_indextts2_stub_and_unknown_engines_no_override():
-    assert map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.ANGRY, intensity=3)) == {}
+def test_map_emotion_unknown_engine_no_override():
     assert map_emotion("something-new", EmotionVerdict(label=EmotionLabel.HAPPY, intensity=2)) == {}
+
+
+# IndexTTS-2 emo_vector order: [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+def test_map_emotion_indextts2_drives_one_dominant_dimension():
+    expected_dim = {
+        EmotionLabel.HAPPY: 0,
+        EmotionLabel.ANGRY: 1,
+        EmotionLabel.SAD: 2,
+        EmotionLabel.FEARFUL: 3,
+        EmotionLabel.TENSE: 3,  # single dim, NOT an afraid+angry blend
+        EmotionLabel.TENDER: 7,
+    }
+    for label, dim in expected_dim.items():
+        out = map_emotion("indextts2", EmotionVerdict(label=label, intensity=2))
+        assert set(out) == {"emo_vector", "emo_alpha"}
+        vector = out["emo_vector"]
+        assert len(vector) == 8
+        nonzero = [i for i, w in enumerate(vector) if w != 0.0]
+        assert nonzero == [dim], f"{label} should drive only dim {dim}, got {nonzero}"
+        assert 0.0 < vector[dim] <= 1.0
+
+
+def test_map_emotion_indextts2_intensity_scales_alpha_not_direction():
+    low = map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.ANGRY, intensity=1))
+    mid = map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.ANGRY, intensity=2))
+    high = map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.ANGRY, intensity=3))
+    # intensity raises emo_alpha monotonically, capped at the upstream max of 1.0
+    assert low["emo_alpha"] < mid["emo_alpha"] < high["emo_alpha"] <= 1.0
+    # direction (the vector) is intensity-independent — only alpha carries strength
+    assert low["emo_vector"] == mid["emo_vector"] == high["emo_vector"]
+
+
+def test_map_emotion_indextts2_is_pure_and_rounded():
+    v = EmotionVerdict(label=EmotionLabel.SAD, intensity=3)
+    out = map_emotion("indextts2", v)
+    assert map_emotion("indextts2", v) == out  # deterministic
+    # every emitted float is 3-dp rounded so estimate and render hash identically
+    assert all(w == round(w, 3) for w in out["emo_vector"])
+    assert out["emo_alpha"] == round(out["emo_alpha"], 3)
 
 
 def test_map_emotion_chatterbox_sets_capped_exaggeration_and_temperature():

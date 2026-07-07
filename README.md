@@ -68,8 +68,14 @@ CLI before any UI is involved.
 |---|---|---|---|
 | **Kokoro-82M** | local | fast/free drafts, preset & blended voices | — |
 | **Chatterbox** | local | primary zero-shot cloning (~7–20 s reference) | ✅ |
+| **IndexTTS-2** | local | slow high-quality finisher; native emotion control | ✅ |
 | **ElevenLabs** | cloud | premium final renders | ✅ (IVC) |
-| Fish Audio, IndexTTS-2 | cloud / local | cheaper cloud renders / accuracy-critical (planned) | ✅ |
+| Fish Audio | cloud | cheaper cloud renders (planned) | ✅ |
+
+IndexTTS-2 runs **out-of-process** in its own CUDA env (it pins a torch/transformers combo that
+conflicts with Chatterbox's), driven by a stdlib adapter over JSON stdio — see
+[IndexTTS-2 setup](#indextts-2-optional-second-local-engine) below. It is opt-in and off the
+default path.
 
 **Attribution LLMs** (behind the `AttributionLLM` interface):
 
@@ -119,6 +125,43 @@ If a dependency change silently reinstalls the CPU torch wheel (the classic "Tor
 compiled with CUDA enabled" failure), force-reinstall the **same** pinned version from the
 CUDA index — never bump the version, Chatterbox pins it.
 
+### IndexTTS-2 (optional second local engine)
+
+IndexTTS-2 is a slow, high-quality local cloning engine with **native emotion control** — a
+finisher for accuracy-critical narration while Kokoro/Chatterbox stay the fast draft path. It
+hard-pins **torch 2.8 / cu128 + transformers 4.52**, which conflict irreconcilably with this
+project's torch 2.6 + transformers 5, so it **cannot** be installed into `.venv`. Instead it runs
+as a subprocess **worker in its own CUDA environment**; this project only ships a stdlib adapter
+that drives it over JSON stdio. Setup is opt-in:
+
+```bash
+# 1. Create a SEPARATE env for IndexTTS-2 (its own torch 2.8/cu128 + transformers 4.52).
+#    Follow the upstream install (git clone + `uv sync`); on Windows omit --all-extras
+#    (DeepSpeed fails to build) and leave the BigVGAN CUDA kernel off.
+
+# 2. Download the IndexTTS-2 checkpoints (multi-GB) into a directory.
+
+# 3. Point this project at that env + weights, in .env:
+#    INDEXTTS2_WORKER_PYTHON=C:\path\to\indextts2-env\Scripts\python.exe
+#    INDEXTTS2_CHECKPOINTS_DIR=C:\path\to\indextts2\checkpoints
+```
+
+On an **8 GB card the peak sits right at the ceiling**, so two host settings are effectively
+required:
+
+- **NVIDIA Control Panel → Manage 3D settings → Program Settings → (your IndexTTS-2 `python.exe`)
+  → "CUDA – Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".** Without this, Windows spills
+  to system RAM over PCIe and RTF collapses from ~4× to ~40×. With it, IndexTTS-2 fits the 8 GB
+  3070 at ~4× realtime. Close other GPU apps during a render (no gaming).
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` fixes allocator fragmentation at the ceiling
+  — the adapter sets it on the worker automatically, so no action is needed.
+
+The adapter is **OOM-safe**: a CUDA out-of-memory (or a hung/dead worker) kills and restarts the
+worker and retries the segment before failing loudly. `unload()` terminates the worker, so VRAM is
+reclaimed by process death and the single-GPU discipline holds. Once configured, clone a voice with
+`--engine indextts2` (or the Voice Studio engine picker) and render as usual; output rides the same
+whisper validation and per-segment cost/cache paths as every other engine.
+
 ## Usage
 
 ### CLI (the whole pipeline)
@@ -167,7 +210,7 @@ src/seiyuu/
   attribute/     LLM speaker attribution (providers/ holds the LLM SDKs)
   normalize/     pure, deterministic text normalization
   voices/        voice library, blends, cloud slot manager
-  engines/       TTSEngine adapters (Kokoro, Chatterbox, ElevenLabs) — the only SDKs
+  engines/       TTSEngine adapters (Kokoro, Chatterbox, IndexTTS-2, ElevenLabs) — the only SDKs
   render/        segment rendering + content-addressed cache + cost gate
   validate/      faster-whisper transcription validation
   assemble/      pauses, loudness, chapter MP3s, .m4b master
@@ -204,6 +247,8 @@ recorded fixtures (free to regenerate from the local model), and GPU work is beh
 Milestones **M1–M6 are complete**: the full CLI pipeline (ingest → attribute → normalize →
 cast → render → validate → assemble → master), local + cloud attribution, the voice library
 with cloning and blends, cloud TTS with the cost gate, a durable job/persistence layer, the
-FastAPI backend, and the React web UI. **M7** (IndexTTS-2, a second local cloning engine)
-and **M8** (PDF ingestion) are planned. See [SPEC.md](SPEC.md) for the full design and the
-per-milestone design notes.
+FastAPI backend, and the React web UI. **M7** (IndexTTS-2, a second local cloning engine with
+native emotion control) is in progress — the out-of-process worker + adapter and its clone/render
+surface are landed; see [IndexTTS-2 setup](#indextts-2-optional-second-local-engine). **M8** (PDF
+ingestion) is planned. See [SPEC.md](SPEC.md) for the full design and the per-milestone design
+notes.

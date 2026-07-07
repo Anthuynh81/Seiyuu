@@ -39,6 +39,11 @@ class TTSEngine(ABC):
     # cloud engines (ElevenLabs) set this False so they don't needlessly unload a resident
     # local model while waiting on the network.
     uses_gpu: bool = True
+    # Cloning engines resolve a voice from voices/{voice_id}/reference.wav, so they must be
+    # constructed with the voice-library dir (and the consent gate binds to those exact bytes —
+    # see api/registry). The pipeline/CLI pass voices_dir iff this is True; preset/cloud engines
+    # (Kokoro, ElevenLabs) leave it False. Chatterbox and IndexTTS-2 set it True.
+    clones_from_library: bool = False
 
     @property
     @abstractmethod

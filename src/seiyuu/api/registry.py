@@ -21,15 +21,16 @@ import os
 import threading
 from pathlib import Path
 
-from seiyuu.engines import TTSEngine, get_engine, list_engine_ids
+from seiyuu.engines import TTSEngine, get_engine, list_engine_ids, voices_dir_kwargs
 from seiyuu.gpu import GpuResourceManager, get_gpu_manager
-from seiyuu.settings import Settings
+from seiyuu.settings import Settings, get_settings
 
 # Static catalog facts with no home on the adapter classes; uses_gpu/requires_validation
 # come from the classes themselves (seiyuu.engines.get_engine_class).
 ENGINE_FACTS: dict[str, dict[str, bool]] = {
     "kokoro": {"paid": False, "supports_cloning": False},
     "chatterbox": {"paid": False, "supports_cloning": True},
+    "indextts2": {"paid": False, "supports_cloning": True},
     "elevenlabs": {"paid": True, "supports_cloning": True},
 }
 
@@ -55,9 +56,25 @@ class EngineRegistry:
             return engine
 
     def _construct_kwargs(self, engine_id: str) -> dict:
+        # Consent invariant — see module docstring. Cloning engines (chatterbox, indextts2) must
+        # see the SAME voices_dir the VoiceLibrary uses; voices_dir_kwargs tolerates an unknown
+        # (test-injected) id by returning {}.
+        kwargs: dict = dict(voices_dir_kwargs(engine_id, self._settings.voices_dir))
+        if engine_id == "indextts2":
+            # Explicit kwargs so the injected Settings governs the out-of-process worker config
+            # (the adapter's own fallback reads the global get_settings(), which must not engage
+            # here). See engines/indextts2_engine.py.
+            kwargs.update(
+                checkpoints_dir=self._settings.indextts2_checkpoints_dir,
+                worker_python=self._settings.indextts2_worker_python,
+                use_fp16=self._settings.indextts2_use_fp16,
+                load_timeout=self._settings.indextts2_worker_load_timeout,
+                request_timeout=self._settings.indextts2_worker_request_timeout,
+                max_restarts=self._settings.indextts2_worker_max_restarts,
+            )
+            return kwargs
         if engine_id == "chatterbox":
-            # Consent invariant — see module docstring.
-            return {"voices_dir": self._settings.voices_dir}
+            return kwargs
         if engine_id == "elevenlabs":
             # Explicit kwargs so the injected Settings governs; the adapter's own
             # fallback reads the global get_settings(), which must never engage here.
@@ -89,6 +106,14 @@ def weights_cached(engine_id: str) -> bool | None:
     """Best-effort HF hub cache probe; None means unknowable (cloud engines, odd cache).
     A False for a downloaded model is cosmetic (the UI shows a download warning), so a
     substring scan of ``models--*`` dir names is deliberately good enough."""
+    if engine_id == "indextts2":
+        # IndexTTS-2 weights are a downloaded checkpoints dir (not the HF hub cache).
+        from seiyuu.engines.indextts2_engine import checkpoints_present
+
+        try:
+            return checkpoints_present(get_settings().indextts2_checkpoints_dir)
+        except OSError:
+            return None
     needle = _HF_NEEDLES.get(engine_id)
     if needle is None:
         return None
