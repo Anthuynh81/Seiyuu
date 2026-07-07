@@ -566,6 +566,7 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
           <label>engine</label>
           <select value={engine} onChange={(e) => setEngine(e.target.value)}>
             <option value="chatterbox">chatterbox — local, free</option>
+            <option value="indextts2">indextts2 — local, emotion + cloning (slow, high quality)</option>
             <option value="elevenlabs">elevenlabs — cloud IVC, paid</option>
           </select>
           <div className="paper release slim">

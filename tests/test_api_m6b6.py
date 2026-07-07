@@ -214,6 +214,19 @@ def test_clone_requires_consent_and_attestor(client) -> None:
     assert "attested_by" in _error(no_by)["message"]
 
 
+def test_clone_indextts2_engine_recorded(client) -> None:
+    # indextts2 (M7) is a valid cloning engine: the record saves reference.wav + meta with no
+    # engine construction (the worker only spins up at render), so no checkpoints are needed here.
+    resp = _clone(client, engine="indextts2")
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["engine"] == "indextts2"
+
+
+def test_clone_rejects_unknown_engine(client) -> None:
+    # the engine Form pattern rejects a typo/unsupported engine before any state changes
+    assert _clone(client, engine="chaterbox").status_code == 422
+
+
 def test_reclone_blocked_then_replace_purges(client) -> None:
     assert _clone(client).status_code == 201
     cfg = client.app.state.settings

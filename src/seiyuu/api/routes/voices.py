@@ -241,7 +241,7 @@ def clone_voice(
     store: StoreDep,
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1)],
-    engine: Annotated[str, Form(pattern="^(chatterbox|elevenlabs)$")] = "chatterbox",
+    engine: Annotated[str, Form(pattern="^(chatterbox|elevenlabs|indextts2)$")] = "chatterbox",
     consent: Annotated[bool, Form()] = False,
     attested_by: Annotated[str, Form()] = "",
     seed: Annotated[int, Form()] = 41172,
@@ -332,9 +332,13 @@ def clone_voice(
                     source="user_upload",
                 )
             )
-            # the shared chatterbox instance caches per-run reference hashes; a re-clone
-            # must not let a warm engine keep speaking the old speaker
+            # the shared cloning-engine instances cache per-run reference state and must not let
+            # a warm engine keep speaking the old speaker after a re-clone: chatterbox caches
+            # per-run reference hashes; indextts2's worker caches the speaker cond in-memory keyed
+            # by reference PATH (unchanged on re-clone), so dropping the instance forces a fresh
+            # worker with a cond recomputed from the new reference.wav.
             registry.invalidate("chatterbox")
+            registry.invalidate("indextts2")
         response.headers["Location"] = f"/api/voices/{vid}"
         return _voice_out(library, library.load(vid))
     finally:

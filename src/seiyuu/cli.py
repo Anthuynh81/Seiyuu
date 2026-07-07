@@ -1264,7 +1264,13 @@ def voice_delete(
 @voice.command("clone")
 @click.argument("name")
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--engine", default="chatterbox", show_default=True, help="Cloning engine.")
+@click.option(
+    "--engine",
+    type=click.Choice(["chatterbox", "indextts2", "elevenlabs"]),
+    default="chatterbox",
+    show_default=True,
+    help="Cloning engine: chatterbox/indextts2 (local) or elevenlabs (cloud IVC).",
+)
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
 )
@@ -1280,7 +1286,7 @@ def voice_clone(
     name: str, reference: Path, engine: str, consent: bool, consent_by: str | None,
     seed: int, voice_id: str | None, voices_dir: Path | None,
 ) -> None:  # fmt: skip
-    """Create a cloned voice from a reference clip (chatterbox local or elevenlabs IVC)."""
+    """Create a cloned voice from a reference clip (chatterbox/indextts2 local, elevenlabs IVC)."""
     import getpass
     import shutil
 
