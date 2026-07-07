@@ -10,3 +10,5 @@ data/
 *.pt
 node_modules/
 /voices/
+# IndexTTS-2's separate cu128 env + multi-GB checkpoints (M7): a local clone, never committed.
+/index-tts/
