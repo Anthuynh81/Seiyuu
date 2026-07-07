@@ -82,6 +82,10 @@ _PROFILES = {
     "default": {"fold_dashes": True},
     "kokoro": {"fold_dashes": True},
     "chatterbox": {"fold_dashes": False},  # the engine's punc_norm folds these itself
+    # IndexTTS-2 has no confirmed dash/ellipsis folding of its own, so keep the shared default
+    # (fold to a comma pause). Explicit entry documents the decision; revisit if auditions show
+    # it double-folds. Same spoken-word string as every engine -> one whisper-validation reference.
+    "indextts2": {"fold_dashes": True},
 }
 
 

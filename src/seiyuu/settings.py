@@ -106,6 +106,24 @@ class Settings(BaseSettings):
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"
 
+    # IndexTTS-2 (M7): a SECOND local cloning engine that CANNOT share this venv — it hard-pins
+    # torch 2.8/cu128 + transformers 4.52, irreconcilable with chatterbox's torch 2.6 + transformers
+    # 5. So it runs as a subprocess worker in its OWN cu128 uv env; this venv holds only the stdlib
+    # adapter that drives it over newline-JSON stdio. These point at that separate env + weights.
+    # Unset (None) until the engine is set up; the adapter fails loudly with an actionable message.
+    indextts2_worker_python: Path | None = None  # python.exe of the cu128 IndexTTS-2 env
+    indextts2_checkpoints_dir: Path | None = (
+        None  # downloaded weights; model_version fingerprints it
+    )
+    indextts2_use_fp16: bool = True  # fp16 to fit the 8GB card (peak ~7.8GB — borderline)
+    # First weights load can be slow (multi-GB load / one-time download); a long narration segment
+    # runs ~4-10x realtime. Generous timeouts; a genuinely hung worker is killed + restarted.
+    indextts2_worker_load_timeout: float = 600.0
+    indextts2_worker_request_timeout: float = 600.0
+    # OOM-safe: on a CUDA OOM (or dead/hung worker) kill + restart the worker and retry this many
+    # times. Peak sits at the 8GB edge, so a long block can tip over; a fresh process == clean VRAM.
+    indextts2_worker_max_restarts: int = 1
+
     # Per-segment emotion (F2). Opt-in, default OFF: when off, render/estimate IGNORE the
     # attribution's segment_emotions and settings stay byte-identical to a no-emotion render
     # (cache stable). When on, the quantized emotion folds into each dialogue segment's

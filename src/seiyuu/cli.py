@@ -188,7 +188,7 @@ def render(
         )  # fmt: skip
         return
 
-    from seiyuu.engines import get_engine
+    from seiyuu.engines import SynthesisError, get_engine, voices_dir_kwargs
     from seiyuu.normalize.lexicon import load_compiled_lexicon
     from seiyuu.render import RenderError, estimate_render_cost_single, render_book
     from seiyuu.voices import VoiceLibrary, VoiceLibraryError
@@ -199,10 +199,9 @@ def render(
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     lexicon = load_compiled_lexicon(book_dir)  # F3: same lexicon for estimate + render
     try:
-        # chatterbox resolves clones from the library dir; the consent gate in render_book
+        # cloning engines resolve clones from the library dir; the consent gate in render_book
         # needs the same library, or --voices-dir clones would render ungated
-        extra = {"voices_dir": lib.voices_dir} if engine_id == "chatterbox" else {}
-        engine = get_engine(engine_id, **extra)
+        engine = get_engine(engine_id, **voices_dir_kwargs(engine_id, lib.voices_dir))
         # pre-flight: single-voice paid renders get the same estimate + ceiling + approval
         # gate as multivoice (the M5 gap: --confirm-cost used to authorize blind)
         est = estimate_render_cost_single(
@@ -234,7 +233,9 @@ def render(
             max_paid_usd=approved_usd,
             lexicon=lexicon,
         )
-    except (RenderError, ValueError, VoiceLibraryError) as exc:
+    # SynthesisError covers indextts2's model_version raising on missing checkpoints (the only
+    # engine whose model_version can fail) — surface it as a clean click error, not a traceback.
+    except (RenderError, SynthesisError, ValueError, VoiceLibraryError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     minutes = result.total_audio_seconds / 60
@@ -1132,7 +1133,7 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     """Synthesize a sample line with a voice so you can hear it (loads a TTS engine)."""
     from contextlib import nullcontext
 
-    from seiyuu.engines import get_engine
+    from seiyuu.engines import get_engine, voices_dir_kwargs
     from seiyuu.engines.base import SynthesisError
     from seiyuu.gpu import get_gpu_manager
     from seiyuu.normalize import normalize_text, profile_for
@@ -1156,8 +1157,7 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     except VoiceLibraryError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    extra = {"voices_dir": lib.voices_dir} if meta.engine == "chatterbox" else {}
-    engine = get_engine(meta.engine, **extra)
+    engine = get_engine(meta.engine, **voices_dir_kwargs(meta.engine, lib.voices_dir))
     engine_voice, settings = render_voice_args(meta)
     norm = normalize_text(text, profile=profile_for(meta.engine))
 
@@ -1771,6 +1771,7 @@ def estimate_cost(
     The estimate must be built with the same parameters the render will use, or a token
     issued from it will (correctly) refuse.
     """
+    from seiyuu.engines import SynthesisError
     from seiyuu.settings import get_settings
 
     cfg = get_settings()
@@ -1788,17 +1789,21 @@ def estimate_cost(
         book = NormalizedBook.model_validate_json(
             (book_dir / "normalized.json").read_text(encoding="utf-8")
         )
-        est = estimate_render_cost_single(
-            book,
-            get_engine(engine_id or cfg.tts_engine),
-            voice or cfg.kokoro_default_voice,
-            (output_dir or cfg.output_dir) / book.book_meta.book_id,
-            settings={"speed": speed},
-            seed=seed,
-            chapters=chapter_indices,
-            library=VoiceLibrary(voices_dir or cfg.voices_dir),
-            lexicon=load_compiled_lexicon(book_dir),
-        )
+        try:
+            est = estimate_render_cost_single(
+                book,
+                get_engine(engine_id or cfg.tts_engine),
+                voice or cfg.kokoro_default_voice,
+                (output_dir or cfg.output_dir) / book.book_meta.book_id,
+                settings={"speed": speed},
+                seed=seed,
+                chapters=chapter_indices,
+                library=VoiceLibrary(voices_dir or cfg.voices_dir),
+                lexicon=load_compiled_lexicon(book_dir),
+            )
+        # indextts2's model_version raises SynthesisError on missing checkpoints — clean error.
+        except SynthesisError as exc:
+            raise click.ClickException(str(exc)) from exc
         assignment_hash = None
     else:
         from seiyuu.render import estimate_render_cost, hash_assignment
@@ -1806,10 +1811,14 @@ def estimate_cost(
         report, book, lib, assignment, out_book_dir, lexicon = _load_multivoice_inputs(
             cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices
         )
-        est = estimate_render_cost(
-            report, book, lib, assignment, out_book_dir,
-            chapters=chapter_indices, lexicon=lexicon,
-        )  # fmt: skip
+        try:
+            est = estimate_render_cost(
+                report, book, lib, assignment, out_book_dir,
+                chapters=chapter_indices, lexicon=lexicon,
+            )  # fmt: skip
+        # a voice assigned to indextts2 without checkpoints raises here — clean error.
+        except SynthesisError as exc:
+            raise click.ClickException(str(exc)) from exc
         assignment_hash = hash_assignment(assignment)
     click.echo(
         f"estimated cost: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s); "
@@ -1951,7 +1960,7 @@ def convert(
 ) -> None:
     """Full pipeline: EPUB -> normalized JSON -> render (single- or multi-voice) -> chapter MP3s."""
     from seiyuu.assemble import AssembleError, assemble_book, master_book
-    from seiyuu.engines import get_engine
+    from seiyuu.engines import SynthesisError, get_engine, voices_dir_kwargs
     from seiyuu.ingest import IngestError, parse_epub, write_normalized
     from seiyuu.render import RenderError, render_book
     from seiyuu.render.gate import FULL_RENDER_CONFIRM_BLOCKS
@@ -2011,7 +2020,7 @@ def convert(
         lexicon = load_compiled_lexicon(book_books_dir / book.book_meta.book_id)
         try:
             single_engine_id = engine_id or cfg.tts_engine
-            extra = {"voices_dir": lib.voices_dir} if single_engine_id == "chatterbox" else {}
+            extra = voices_dir_kwargs(single_engine_id, lib.voices_dir)
             engine = get_engine(single_engine_id, **extra)
             single_voice = voice or cfg.kokoro_default_voice
             est = estimate_render_cost_single(
@@ -2043,7 +2052,7 @@ def convert(
                 max_paid_usd=approved_usd,
                 lexicon=lexicon,
             )
-        except (RenderError, ValueError, VoiceLibraryError) as exc:
+        except (RenderError, SynthesisError, ValueError, VoiceLibraryError) as exc:
             raise click.ClickException(str(exc)) from exc
         msg = f"{render_result.synthesized} synthesized, {render_result.cache_hits} from cache"
         if render_result.validation_failures:

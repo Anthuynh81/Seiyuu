@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from seiyuu.normalize.lexicon import CompiledLexicon
 
 from seiyuu.attribute.models import AttributionReport, EmotionVerdict
-from seiyuu.engines import TTSEngine, get_engine
+from seiyuu.engines import TTSEngine, get_engine, voices_dir_kwargs
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
@@ -489,7 +489,7 @@ def render_book_multivoice(
 
     def engine_for(engine_id: str) -> TTSEngine:
         if engine_id not in engines:
-            extra = {"voices_dir": library.voices_dir} if engine_id == "chatterbox" else {}
+            extra = voices_dir_kwargs(engine_id, library.voices_dir)
             engines[engine_id] = get_engine(engine_id, **extra)
         return engines[engine_id]
 
@@ -695,7 +695,7 @@ def estimate_render_cost(
 
     def engine_for(engine_id: str) -> TTSEngine:
         if engine_id not in engines:
-            extra = {"voices_dir": library.voices_dir} if engine_id == "chatterbox" else {}
+            extra = voices_dir_kwargs(engine_id, library.voices_dir)
             engines[engine_id] = get_engine(engine_id, **extra)
         return engines[engine_id]
 

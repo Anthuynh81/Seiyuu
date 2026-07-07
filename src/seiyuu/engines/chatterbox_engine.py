@@ -29,6 +29,7 @@ _GEN_KEYS = ("exaggeration", "cfg_weight", "temperature", "repetition_penalty", 
 class ChatterboxEngine(TTSEngine):
     engine_id = "chatterbox"
     requires_validation = True  # autoregressive: outputs must pass whisper validation
+    clones_from_library = True  # renders from voices/{voice_id}/reference.wav
 
     def __init__(
         self,

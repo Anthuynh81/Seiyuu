@@ -68,7 +68,7 @@ def test_system_shape_and_defaults(client) -> None:
     assert body["attribution"]["model"] == "qwen2.5:7b"
     assert body["attribution"]["prompt_version"]
     assert body["attribution"]["hybrid"] is False
-    assert body["engines"] == ["chatterbox", "elevenlabs", "kokoro"]
+    assert body["engines"] == ["chatterbox", "elevenlabs", "indextts2", "kokoro"]
     assert body["version"] == __version__
 
 
@@ -126,7 +126,7 @@ def test_startup_reconciles_orphaned_jobs(tmp_path) -> None:
 def test_engines_catalog(client) -> None:
     body = client.get("/api/engines").json()
     by_id = {e["engine_id"]: e for e in body["engines"]}
-    assert set(by_id) == {"kokoro", "chatterbox", "elevenlabs"}
+    assert set(by_id) == {"kokoro", "chatterbox", "indextts2", "elevenlabs"}
 
     assert by_id["kokoro"]["uses_gpu"] is True
     assert by_id["kokoro"]["requires_validation"] is False
@@ -136,6 +136,14 @@ def test_engines_catalog(client) -> None:
     assert by_id["chatterbox"]["uses_gpu"] is True
     assert by_id["chatterbox"]["requires_validation"] is True
     assert by_id["chatterbox"]["supports_cloning"] is True
+
+    # IndexTTS-2 (M7): local, autoregressive (validated), cloning, free. weights_cached is False
+    # here (no checkpoints dir configured in the test settings), never None.
+    assert by_id["indextts2"]["uses_gpu"] is True
+    assert by_id["indextts2"]["requires_validation"] is True
+    assert by_id["indextts2"]["supports_cloning"] is True
+    assert by_id["indextts2"]["paid"] is False
+    assert by_id["indextts2"]["weights_cached"] is False
 
     assert by_id["elevenlabs"]["uses_gpu"] is False
     assert by_id["elevenlabs"]["paid"] is True
