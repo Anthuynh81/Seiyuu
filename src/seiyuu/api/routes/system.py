@@ -91,6 +91,7 @@ def system_status(
             prompt_version=cfg.attribution_prompt_version,
             hybrid=cfg.attribution_hybrid,
         ),
+        apply_emotion=cfg.apply_emotion,
         engines=catalog_ids(),
         version=__version__,
     )
@@ -109,6 +110,7 @@ def settings_view(cfg: SettingsDep) -> SettingsView:
         attribution_model=cfg.attribution_model,
         attribution_prompt_version=cfg.attribution_prompt_version,
         attribution_hybrid=cfg.attribution_hybrid,
+        apply_emotion=cfg.apply_emotion,
         narration_wpm=cfg.narration_wpm,
         render_max_usd=cfg.render_max_usd,
         cost_quote_ttl_seconds=cfg.cost_quote_ttl_seconds,

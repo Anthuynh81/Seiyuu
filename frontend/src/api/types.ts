@@ -88,6 +88,20 @@ export interface LexiconPreviewOut {
   total_speakable_blocks: number;
 }
 
+/** F3 (v1.1): one ADVISORY LLM-proposed grapheme respelling. The user accepts it into the
+    lexicon (which stays the deterministic source of truth); the LLM never writes it. */
+export interface RespellSuggestion {
+  term: string;
+  respelling: string;
+  note: string | null;
+}
+
+export interface RespellSuggestOut {
+  provider: string;
+  model: string;
+  suggestions: RespellSuggestion[];
+}
+
 // -- delete a book (F3) ----------------------------------------------------------------------
 
 /** DELETE /api/books/{id} success — what was actually torn down. */
@@ -176,6 +190,8 @@ export interface RenderRequest {
   cost_token?: string;
   confirm_full?: boolean;
   single?: { engine?: string; voice?: string; speed?: number; seed?: number };
+  // F2b: per-render emotion override (undefined -> the server default cfg.apply_emotion)
+  apply_emotion?: boolean;
 }
 
 export interface RenderSummaryOut {
@@ -316,7 +332,9 @@ export interface SegmentWords {
 export type EditRequest =
   | { op: "rename"; character_id: string; new_name: string }
   | { op: "merge"; loser_id: string; winner_id: string }
-  | { op: "reassign"; block_id: string; segment_index: number; speaker: string | null };
+  | { op: "reassign"; block_id: string; segment_index: number; speaker: string | null }
+  // F2a: set (verdict) or clear (null) one segment's emotion overlay
+  | { op: "set_emotion"; block_id: string; segment_index: number; emotion: EmotionVerdict | null };
 
 export interface EditLog {
   version: number;
@@ -355,6 +373,46 @@ export interface AssignmentWrite {
   narrator_voice_id: string;
   assignments: Record<string, string>;
   thought_voice_id: string | null;
+}
+
+// -- series / library voice consistency (F5) -------------------------------------------------
+
+/** One declared series. `voice_links` maps a cross-book identity key (casefolded canonical
+    name) -> library voice_id; `book_ids` is a plain membership list. Cross-book matching is
+    scoped to THIS series only — there is no global name match. */
+export interface Series {
+  series_id: string;
+  name: string;
+  book_ids: string[];
+  voice_links: Record<string, string>; // identity_key -> voice_id
+}
+
+export interface SeriesListOut {
+  series: Series[];
+}
+
+/** A within-series name match surfaced for the user to CONFIRM (never auto-applied). Character
+    `character_id` in the joining book matches an existing link. `voice_exists` is false when the
+    linked voice was deleted — the UI shows it unavailable and it can't be inherited. */
+export interface LinkSuggestion {
+  character_id: string;
+  canonical_name: string;
+  identity_key: string;
+  voice_id: string;
+  voice_exists: boolean;
+}
+
+export interface LinkSuggestionsOut {
+  series_id: string;
+  book_id: string;
+  suggestions: LinkSuggestion[];
+}
+
+/** Result of an explicit save-to-series write-back: the updated series plus the identity keys
+    that were added or updated by folding the book's cast in. */
+export interface SaveCastOut {
+  series: Series;
+  linked_keys: string[];
 }
 
 // -- voice studio --------------------------------------------------------------------------
@@ -433,6 +491,7 @@ export interface AttributionDefaults {
 export interface SystemStatusOut {
   attribution: AttributionDefaults;
   keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
+  apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
 }
 
 /** "ch013_b0042" -> 13; null when unparsable. */

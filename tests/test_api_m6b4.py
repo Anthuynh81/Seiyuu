@@ -83,6 +83,43 @@ def test_record_reassign_and_anchor_staleness(client) -> None:
     assert any("reassign skipped" in w for w in body["edit_warnings"])
 
 
+def test_record_set_emotion_and_clear(client) -> None:
+    # SET the ch1 dialogue (block ch001_b0001, index 1 within the block) to happy/2
+    resp = client.post(
+        f"/api/books/{BOOK}/edits",
+        json={
+            "op": "set_emotion",
+            "block_id": "ch001_b0001",
+            "segment_index": 1,
+            "emotion": {"label": "happy", "intensity": 2},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["text_anchor"] == '"Hello."'  # server-filled content anchor
+
+    # the overlay lands on the effective report's segment_emotions, index-aligned to segments
+    report = client.get(f"/api/books/{BOOK}/attribution").json()["report"]
+    ch1 = next(c for c in report["chapters"] if c["index"] == 1)
+    assert ch1["segment_emotions"][1] == {"label": "happy", "intensity": 2}
+    assert ch1["segment_emotions"][0] is None
+
+    # CLEAR it (emotion: null) — required-nullable, so null is accepted, omitting is a 422
+    clear = client.post(
+        f"/api/books/{BOOK}/edits",
+        json={"op": "set_emotion", "block_id": "ch001_b0001", "segment_index": 1, "emotion": None},
+    )
+    assert clear.status_code == 201, clear.text
+    report = client.get(f"/api/books/{BOOK}/attribution").json()["report"]
+    ch1 = next(c for c in report["chapters"] if c["index"] == 1)
+    assert ch1["segment_emotions"][1] is None
+
+    missing = client.post(
+        f"/api/books/{BOOK}/edits",
+        json={"op": "set_emotion", "block_id": "ch001_b0001", "segment_index": 1},
+    )
+    assert missing.status_code == 422  # emotion is required-nullable, not optional
+
+
 def test_record_merge_and_self_merge_rejected(client) -> None:
     resp = client.post(
         f"/api/books/{BOOK}/edits",

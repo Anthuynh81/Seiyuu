@@ -1,4 +1,4 @@
-import type { LexiconEntry } from "../api/types";
+import type { LexiconEntry, RespellSuggestion } from "../api/types";
 
 /** A fresh, empty editor row. */
 export function blankEntry(term = ""): LexiconEntry {
@@ -35,4 +35,32 @@ export function duplicateTerms(entries: LexiconEntry[]): string[] {
 /** Stable signature of the editable content, for dirty detection against the server state. */
 export function entriesSig(entries: LexiconEntry[]): string {
   return JSON.stringify(cleanForSave(entries));
+}
+
+/** F3 (v1.1): fold ADVISORY AI respellings into the editor rows WITHOUT clobbering user input.
+    For a term that already has a row, fill an EMPTY respelling (and empty note) but never
+    overwrite text the user typed; for a suggested term with no row yet, append a new row. Purely
+    functional — the user still reviews and saves. Suggestions are matched case-insensitively. */
+export function applyRespellings(
+  rows: LexiconEntry[],
+  suggestions: RespellSuggestion[],
+): LexiconEntry[] {
+  const byTerm = new Map(suggestions.map((s) => [s.term.trim().toLowerCase(), s]));
+  const present = new Set(rows.map((r) => r.term.trim().toLowerCase()).filter(Boolean));
+  const next = rows.map((row) => {
+    const s = byTerm.get(row.term.trim().toLowerCase());
+    if (!s) return row;
+    return {
+      ...row,
+      respelling: row.respelling.trim() ? row.respelling : s.respelling,
+      note: row.note?.trim() ? row.note : (s.note ?? null),
+    };
+  });
+  for (const s of suggestions) {
+    const key = s.term.trim().toLowerCase();
+    if (key && !present.has(key)) {
+      next.push({ ...blankEntry(s.term.trim()), respelling: s.respelling, note: s.note ?? null });
+    }
+  }
+  return next;
 }

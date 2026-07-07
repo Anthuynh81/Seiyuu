@@ -369,8 +369,18 @@ export function RenderJobs() {
   const chapterCount = book.data?.chapters?.length ?? 0;
   const chapters = useMemo(() => scopeChapters(scope, chapterCount), [scope, chapterCount]);
 
+  const system = useSystem();
+  // F2b: per-render emotion override. null = follow the server default; a bool overrides it.
+  // Only meaningful for multivoice (single-voice has no attribution to tag), so single passes
+  // undefined and its estimate/quote/render stay emotion-agnostic.
+  const emotionDefault = system.data?.apply_emotion ?? false;
+  const [emotionChoice, setEmotionChoice] = useState<boolean | null>(null);
+  useEffect(() => setEmotionChoice(null), [bookId]); // a choice for one book must not stick
+  const applyEmotion = emotionChoice ?? emotionDefault;
+  const emotionArg = mode === "multivoice" ? applyEmotion : undefined;
+
   const ready = !!status?.ingested && (mode === "single" || (status?.attributed && status?.assigned));
-  const estimate = useEstimate(bookId, mode, chapters, ready);
+  const estimate = useEstimate(bookId, mode, chapters, ready, emotionArg);
   const jobs = useBookJobs(bookId);
   const validation = useValidation(bookId, !!status?.rendered);
   const summary = useRenderSummary(bookId, !!status?.rendered);
@@ -381,7 +391,6 @@ export function RenderJobs() {
 
   const mint = useMintQuote(bookId ?? "");
   const attribute = useAttribute(bookId ?? "");
-  const system = useSystem();
   const [llm, setLlm] = useState<{ provider: "local" | "anthropic"; model: string } | null>(null);
   const [llmOpen, setLlmOpen] = useState(false);
   const attrDefaults = system.data?.attribution;
@@ -410,7 +419,7 @@ export function RenderJobs() {
   const doMint = () => {
     setFlowError(null);
     mint.mutate(
-      { mode, chapters },
+      { mode, chapters, applyEmotion: emotionArg },
       {
         onSuccess: (quote) => setTicket({ kind: "live", quote }),
         onError: (e) => setFlowError(e instanceof ApiError ? e.message : String(e)),
@@ -421,7 +430,14 @@ export function RenderJobs() {
   const startRender = (opts: { token?: string; confirmFull?: boolean }) => {
     setFlowError(null);
     render.mutate(
-      { mode, chapters, ...singleSpec, ...(opts.token ? { cost_token: opts.token } : {}), ...(opts.confirmFull ? { confirm_full: true } : {}) },
+      {
+        mode,
+        chapters,
+        ...singleSpec,
+        ...(emotionArg === undefined ? {} : { apply_emotion: emotionArg }),
+        ...(opts.token ? { cost_token: opts.token } : {}),
+        ...(opts.confirmFull ? { confirm_full: true } : {}),
+      },
       {
         onSuccess: () => {
           setTicket({ kind: "none" });
@@ -521,6 +537,29 @@ export function RenderJobs() {
           )}
           {book.data?.chapters && (
             <ScopeRow scope={scope} setScope={setScope} chapters={book.data.chapters} renderedSet={renderedSet} />
+          )}
+          {mode === "multivoice" && (
+            <div className="scoperow">
+              <span className="tag">emotion</span>
+              <label
+                className="mono"
+                style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}
+                title="voice each dialogue line with the emotion attribution tagged it. Off keeps delivery flat and the render cache byte-identical to a no-emotion render."
+              >
+                <input
+                  type="checkbox"
+                  checked={applyEmotion}
+                  onChange={(e) => setEmotionChoice(e.target.checked)}
+                />
+                voice per-line emotion
+              </label>
+              <span className="mono scopehint">
+                {applyEmotion
+                  ? "dialogue lines are voiced with their tagged emotion"
+                  : "flat delivery — emotion tags ignored (cache-stable)"}
+                {emotionChoice === null && ` · system default: ${emotionDefault ? "on" : "off"}`}
+              </span>
+            </div>
           )}
           {status?.ingested && !status.attributed && (
             book.data?.active_job?.kind === "attribute" ? (

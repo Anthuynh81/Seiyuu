@@ -24,11 +24,16 @@ import type {
   LexiconPreviewOut,
   LexiconSaved,
   QuoteResponse,
+  LinkSuggestionsOut,
   RenderMode,
+  RespellSuggestOut,
   RenderRequest,
   RenderSummaryOut,
+  SaveCastOut,
   SegmentBrowserOut,
   SegmentWords,
+  Series,
+  SeriesListOut,
   SuggestCastResponse,
   SystemStatusOut,
   ValidationReportOut,
@@ -121,11 +126,20 @@ function chapterParams(chapters: number[]): string {
   return chapters.map((c) => `&chapters=${c}`).join("");
 }
 
-export function useEstimate(bookId: string | null, mode: RenderMode, chapters: number[], ready: boolean) {
+export function useEstimate(
+  bookId: string | null,
+  mode: RenderMode,
+  chapters: number[],
+  ready: boolean,
+  applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
+) {
+  const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null],
     queryFn: () =>
-      api<CostEstimateOut>(`/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}`),
+      api<CostEstimateOut>(
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}`,
+      ),
     enabled: bookId !== null && ready,
   });
 }
@@ -149,11 +163,20 @@ export function useValidation(bookId: string | null, rendered: boolean) {
 
 export function useMintQuote(bookId: string) {
   return useMutation({
-    mutationFn: ({ mode, chapters }: { mode: RenderMode; chapters: number[] }) =>
+    mutationFn: ({
+      mode,
+      chapters,
+      applyEmotion,
+    }: {
+      mode: RenderMode;
+      chapters: number[];
+      applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
+    }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
         ...(mode === "single" ? { single: {} } : {}),
+        ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
       }),
   });
 }
@@ -210,6 +233,22 @@ export function usePreviewLexicon(bookId: string) {
   return useMutation({
     mutationFn: (entries: LexiconEntry[]) =>
       postJson<LexiconPreviewOut>(`/api/books/${bookId}/lexicon/preview`, { entries }),
+  });
+}
+
+export interface RespellInput {
+  terms?: string[]; // omit/empty -> the backend uses the deterministic hard-name suggestions
+  provider?: string; // override the configured provider ("local" free | "anthropic" PAID)
+  confirm_paid?: boolean; // required when the resolved provider is anthropic (paid)
+}
+
+/** F3 (v1.1): opt-in LLM respelling suggestions for hard terms. ADVISORY — writes nothing; the
+    user folds accepted respellings into the editor (see lib/applyRespellings) and saves. A 402
+    means the resolved provider is anthropic and confirm_paid is required. */
+export function useSuggestRespellings(bookId: string) {
+  return useMutation({
+    mutationFn: (input: RespellInput = {}) =>
+      postJson<RespellSuggestOut>(`/api/books/${bookId}/lexicon/suggest-respellings`, input),
   });
 }
 
@@ -382,6 +421,16 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
 export interface DraftInput {
   strategy?: CastStrategy; // "hash" (legacy) | "smart" (collision-free book cast)
   recast?: boolean; // smart only: overwrite existing auto voices (re-renders them)
+  // F5: character_id -> voice_id inherited from a series; wins over the auto-cast pick. The
+  // smart caster reserves these so a new character is never cast onto a series-pinned voice.
+  overrides?: Record<string, string>;
+  // F4 (v1.1): smart only. Run the opt-in Layer-2 LLM caster for per-character voice-trait
+  // preferences that bias the tie-breaker. cast_book still enforces distinctness/determinism, so
+  // this can only change WHICH distinct voice a character takes. A 402 means the resolved cast
+  // provider is anthropic and confirm_paid is required.
+  use_llm?: boolean;
+  cast_provider?: string; // override the configured cast provider ("local" | "anthropic")
+  confirm_paid?: boolean; // required when the resolved cast provider is anthropic (paid)
 }
 
 export function useDraftAssignment(bookId: string) {
@@ -413,6 +462,69 @@ export function useSaveAssignment(bookId: string) {
         body: JSON.stringify(body),
       }),
     onSuccess: () => invalidateCasting(qc, bookId),
+  });
+}
+
+// -- series / library voice consistency (F5) -------------------------------------------------
+
+/** All declared series (global registry). */
+export function useSeriesList() {
+  return useQuery({ queryKey: ["series"], queryFn: () => api<SeriesListOut>("/api/series") });
+}
+
+/** Create a series SEEDED from a book — its cast becomes the initial voice_links. The book must
+    be attributed and assigned (the backend 409s / 4xx otherwise, surfaced to the caller). */
+export function useCreateSeries() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, bookId }: { name: string; bookId: string }) =>
+      postJson<Series>("/api/series", { name, book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Attach a sibling book to a series (idempotent). Does NOT learn its cast — that is the
+    explicit save-cast action, so precision is preserved. */
+export function useAddBookToSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (bookId: string) =>
+      postJson<Series>(`/api/series/${seriesId}/books`, { book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Cross-book link SUGGESTIONS for a book joining a series: each character whose name matches an
+    existing link, for the user to confirm. Never auto-applied. Scoped to this series only. */
+export function useLinkSuggestions(seriesId: string | null, bookId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["link-suggestions", seriesId, bookId],
+    queryFn: () =>
+      api<LinkSuggestionsOut>(`/api/series/${seriesId}/books/${bookId}/link-suggestions`),
+    enabled: enabled && seriesId !== null && bookId !== null,
+  });
+}
+
+/** Explicit write-back: fold a book's cast into the series' voice_links (last-write-wins). The
+    only path that grows a series' links from a book — nothing is learned silently. */
+export function useSaveCastToSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (bookId: string) =>
+      postJson<SaveCastOut>(`/api/series/${seriesId}/save-cast`, { book_id: bookId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
+  });
+}
+
+/** Remove a character's voice link by identity key (case-insensitive; idempotent). */
+export function useUnlinkSeries(seriesId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) =>
+      api<Series>(`/api/series/${seriesId}/links?name=${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["series"] }),
   });
 }
 

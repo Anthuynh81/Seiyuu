@@ -137,7 +137,11 @@ def build_handlers(
         a refusal (drift, expiry-while-queued, reuse) fails the job with the verbatim
         gate reason in Job.error and never burns the token; a crash AFTER consumption
         requires a re-estimate, and the refusal message says so."""
-        from seiyuu.api.money import compute_estimate, resolve_single
+        from seiyuu.api.money import (
+            compute_estimate,
+            effective_apply_emotion,
+            resolve_single,
+        )
         from seiyuu.normalize.lexicon import load_compiled_lexicon
         from seiyuu.render.gate import CostQuote, verify_quote
         from seiyuu.render.pipeline import render_book, render_book_multivoice
@@ -158,9 +162,13 @@ def build_handlers(
         with gate.hold("job"):
             ctx.check_cancel()
             ctx.progress("verifying cost approval…")
+            # F2b: resolve the effective emotion flag ONCE, from this render's own params, and
+            # feed the SAME value to both the estimate (cost gate) and render below — parity.
+            eff_apply_emotion = effective_apply_emotion(cfg, params.apply_emotion)
             est_ctx = compute_estimate(
-                cfg, registry, book, book_id, mode=params.mode, chapters=chapters, single=single
-            )
+                cfg, registry, book, book_id, mode=params.mode, chapters=chapters, single=single,
+                apply_emotion=params.apply_emotion,
+            )  # fmt: skip
             # The estimate walks every block (seconds on a big book): a cancel filed in
             # that window must land BEFORE consumption, or a job that synthesizes
             # nothing burns the user's single-use approval.
@@ -212,9 +220,10 @@ def build_handlers(
                     check_cancel=ctx.check_cancel,
                     broker=broker,  # lend the resident engine to auditions between segments
                     lexicon=lexicon,
-                    # F2: MUST match compute_estimate's apply_emotion (both read cfg) or the
-                    # verified quote authorizes a different bill than render runs up.
-                    apply_emotion=cfg.apply_emotion,
+                    # F2b: the SAME effective value compute_estimate priced above (per-render
+                    # override, else the cfg default) — the verified quote authorizes exactly
+                    # this emotion-folded bill.
+                    apply_emotion=eff_apply_emotion,
                 )
             else:
                 render_book(

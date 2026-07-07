@@ -81,6 +81,7 @@ def draft_assignment(
     overrides: dict[str, str] | None = None,
     strategy: str = "hash",
     recast: bool = False,
+    trait_hints: dict[str, set[str]] | None = None,
 ) -> VoiceAssignment:
     """Build a VoiceAssignment, creating any missing draft voices in ``library``.
 
@@ -95,6 +96,10 @@ def draft_assignment(
     ``{char_id}_auto``; ``recast=True`` (smart only) OVERWRITES existing auto voices to apply
     the new cast — this changes their blend recipe, so those voices' rendered segments
     re-render (settings_hash drift). ``recast`` on the ``hash`` strategy is a no-op.
+
+    ``trait_hints`` is the OPTIONAL F4 Layer-2 LLM signal (``{char_id -> trait tags}``) forwarded
+    to ``cast_book`` on the ``smart`` path only; it biases the tie-breaker without ever affecting
+    distinctness or determinism, and is ignored by the ``hash`` strategy.
     """
     if narrator_voice_id is None:
         narrator_voice_id = f"narrator_{slugify(default_preset)}"
@@ -124,7 +129,13 @@ def draft_assignment(
         # (F5 seam): overrides win below anyway, so casting them would waste voices.
         castable = [c for c in report.registry.characters if c.id not in override_ids]
         taken = _reserved_presets(library, overrides)
-        cast = cast_book(castable, narrator_preset=default_preset, accent=accent, taken=taken)
+        cast = cast_book(
+            castable,
+            narrator_preset=default_preset,
+            accent=accent,
+            taken=taken,
+            trait_hints=trait_hints,
+        )
         for char in castable:
             voice_id = f"{char.id}_auto"
             if recast or not library.meta_path(voice_id).is_file():
@@ -134,6 +145,11 @@ def draft_assignment(
             assignments[char.id] = voice_id
     else:  # "hash": legacy per-character isolated blend (collision-blind)
         for char in report.registry.characters:
+            # Skip characters the overrides cover (F5 inheritance or an explicit pick): the
+            # override loop below sets their assignment, so creating a throwaway {id}_auto voice
+            # here would just orphan it. Mirrors the smart path's ``castable`` filter.
+            if char.id in override_ids:
+                continue
             voice_id = f"{char.id}_auto"
             if not library.meta_path(voice_id).is_file():
                 recipe = auto_blend_recipe(char.canonical_name, char.gender, accent=accent)
@@ -188,12 +204,14 @@ def suggest_assignment(
     accent: str = "a",
     stage: AssignmentStage = AssignmentStage.DRAFT,
     overrides: dict[str, str] | None = None,
+    trait_hints: dict[str, set[str]] | None = None,
 ) -> CastPreview:
     """Compute the smart cast as a preview WITHOUT saving or creating any voice.
 
     Same shape as a ``strategy="smart"`` :func:`draft_assignment`, but read-only: it returns
     the proposed ``VoiceAssignment`` plus which auto voices it would create vs overwrite, so a
-    UI can show the cost before the user commits via the draft (apply) endpoint.
+    UI can show the cost before the user commits via the draft (apply) endpoint. ``trait_hints``
+    is the same OPTIONAL F4 Layer-2 signal forwarded to ``cast_book`` (tie-breaker only).
     """
     if narrator_voice_id is None:
         narrator_voice_id = f"narrator_{slugify(default_preset)}"

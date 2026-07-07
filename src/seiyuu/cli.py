@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from seiyuu import __version__
+from seiyuu.attribute.models import EmotionLabel
 
 
 @click.group()
@@ -710,6 +711,49 @@ def edit_reassign(
     click.echo(f"reassigned {block_id}[{segment_index}] -> {target} (durable)")
 
 
+@edit.command("set-emotion")
+@click.argument("book_id")
+@click.argument("block_id")
+@click.argument("segment_index", type=int)
+@click.option(
+    "--label",
+    type=click.Choice([e.value for e in EmotionLabel]),
+    default=None,
+    help="Emotion label to set on the segment.",
+)
+@click.option(
+    "--intensity", type=click.IntRange(1, 3), default=2, help="Intensity 1..3 (default 2)."
+)
+@click.option("--clear", is_flag=True, help="Clear the segment's emotion instead of setting one.")
+@_edit_books_dir_option
+def edit_set_emotion(
+    book_id: str,
+    block_id: str,
+    segment_index: int,
+    label: str | None,
+    intensity: int,
+    clear: bool,
+    books_dir: Path | None,
+) -> None:
+    """Set or clear one segment's emotion overlay (SEGMENT_INDEX is 0-based within the block)."""
+    from seiyuu.attribute.models import EmotionVerdict
+    from seiyuu.services import ServiceError, SetEmotion, record_edit
+
+    if clear == (label is not None):  # exactly one of --label or --clear
+        raise click.ClickException("pass exactly one of --label LABEL or --clear")
+    emotion = None if clear else EmotionVerdict(label=EmotionLabel(label), intensity=intensity)
+    book_dir = _edit_book_dir(book_id, books_dir)
+    try:
+        record_edit(
+            book_dir,
+            SetEmotion(block_id=block_id, segment_index=segment_index, emotion=emotion),
+        )
+    except (ServiceError, ValueError) as exc:  # ValueError: pydantic op validation
+        raise click.ClickException(str(exc)) from exc
+    target = "cleared" if clear else f"{label} (intensity {intensity})"
+    click.echo(f"emotion for {block_id}[{segment_index}] -> {target} (durable)")
+
+
 @edit.command("list")
 @click.argument("book_id")
 @_edit_books_dir_option
@@ -856,6 +900,83 @@ def lexicon_suggest(book_id: str, books_dir: Path | None) -> None:
         return
     for s in suggestions:
         click.echo(f"{s.term}  (x{s.count})  …{s.sample}…")
+
+
+@lexicon.command("suggest-ai")
+@click.argument("book_id")
+@click.option(
+    "--term",
+    "terms",
+    multiple=True,
+    help="Term to respell (repeatable). Omit to use the deterministic hard-name suggestions.",
+)
+@click.option(
+    "--provider",
+    default=None,
+    help="Suggestion provider: 'local' (Ollama, free) or 'anthropic' (PAID). Default: settings.",
+)
+@click.option(
+    "--confirm-paid",
+    is_flag=True,
+    default=False,
+    help="Required to run the anthropic (paid) suggester.",
+)
+@_edit_books_dir_option
+def lexicon_suggest_ai(
+    book_id: str,
+    terms: tuple[str, ...],
+    provider: str | None,
+    confirm_paid: bool,
+    books_dir: Path | None,
+) -> None:
+    """ADVISORY LLM respellings for hard terms (opt-in enrichment of `suggest`).
+
+    Prints proposals only — accept one with `seiyuu lexicon set --term ... --respelling ...`.
+    The deterministic `suggest` stays the free default; this adds an LLM layer on top."""
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.normalize.lexicon import load_lexicon, suggest_terms
+    from seiyuu.services.llm_advisory import resolve_advisory, run_respell_suggestions
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _lexicon_book_dir(book_id, books_dir)
+    requested = [t.strip() for t in terms if t.strip()]
+    if not requested:
+        book = NormalizedBook.model_validate_json(
+            (book_dir / "normalized.json").read_text(encoding="utf-8")
+        )
+        lex = load_lexicon(book_dir, book_id=book_id)
+        texts = [b.text for c in book.chapters for b in c.blocks if b.is_speakable]
+        requested = [
+            s.term for s in suggest_terms(texts, existing_terms=[e.term for e in lex.entries])
+        ]
+    if not requested:
+        click.echo("(no candidate terms found)")
+        return
+
+    resolved = resolve_advisory(cfg, cfg.respell_provider, cfg.respell_model, provider)
+    if resolved.is_paid:
+        if not confirm_paid:
+            raise click.ClickException(
+                f"provider {resolved.provider_id!r} is a PAID Anthropic call; "
+                "re-run with --confirm-paid to approve the spend."
+            )
+        if not cfg.anthropic_api_key:
+            raise click.ClickException(
+                "ANTHROPIC_API_KEY not set; required for the anthropic suggester"
+            )
+
+    click.echo(f"suggester: {resolved.provider_id}/{resolved.model}  ({len(requested)} term(s))")
+    try:
+        suggestions = run_respell_suggestions(cfg, resolved, requested)
+    except Exception as exc:
+        raise click.ClickException(f"LLM respell suggester failed: {exc}") from exc
+    if not suggestions:
+        click.echo("(no suggestions returned)")
+        return
+    for s in suggestions:
+        note = f"  # {s.note}" if s.note else ""
+        click.echo(f"{s.term!r} -> {s.respelling!r}{note}")
 
 
 @main.group()
@@ -1267,6 +1388,24 @@ def voice_clone(
     "(re-renders those voices' segments).",
 )
 @click.option(
+    "--use-llm",
+    is_flag=True,
+    default=False,
+    help="smart only: run the opt-in Layer-2 LLM caster for per-character voice-trait "
+    "preferences (biases the tie-breaker; distinctness stays guaranteed).",
+)
+@click.option(
+    "--cast-provider",
+    default=None,
+    help="LLM caster provider: 'local' (free) or 'anthropic' (PAID). Default: settings.",
+)
+@click.option(
+    "--confirm-paid",
+    is_flag=True,
+    default=False,
+    help="Required to run the anthropic (paid) LLM caster.",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -1288,6 +1427,9 @@ def assign(
     maps: tuple[str, ...],
     strategy: str,
     recast: bool,
+    use_llm: bool,
+    cast_provider: str | None,
+    confirm_paid: bool,
     books_dir: Path | None,
     output_dir: Path | None,
     voices_dir: Path | None,
@@ -1295,6 +1437,7 @@ def assign(
     """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
+    from seiyuu.services.llm_advisory import resolve_advisory, run_cast_hints
     from seiyuu.settings import get_settings
     from seiyuu.voices import AssignmentStage, VoiceLibrary
 
@@ -1311,6 +1454,25 @@ def assign(
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     try:
         report, edit_warnings = load_report(book_dir)
+        # F4: opt-in LLM caster. Only meaningful on the smart path; the paid gate mirrors
+        # attribution — anthropic needs --confirm-paid + the key, local is free-but-explicit.
+        trait_hints = None
+        if use_llm and strategy == "smart":
+            resolved = resolve_advisory(cfg, cfg.cast_provider, cfg.cast_model, cast_provider)
+            if resolved.is_paid:
+                if not confirm_paid:
+                    raise click.ClickException(
+                        f"cast provider {resolved.provider_id!r} is a PAID Anthropic call; "
+                        "re-run with --confirm-paid to approve the spend."
+                    )
+                if not cfg.anthropic_api_key:
+                    raise click.ClickException(
+                        "ANTHROPIC_API_KEY not set; required for the anthropic LLM caster"
+                    )
+            castable = [c for c in report.registry.characters if c.id not in overrides]
+            trait_hints = run_cast_hints(cfg, resolved, castable)
+        elif use_llm:
+            click.echo("--use-llm has no effect on the 'hash' strategy; ignoring.")
         assignment = draft_assignment(
             report,
             lib,
@@ -1322,6 +1484,7 @@ def assign(
             overrides=overrides,
             strategy=strategy,
             recast=recast,
+            trait_hints=trait_hints,
         )
     except (ServiceError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2001,11 +2164,262 @@ def delete(
             f"{', '.join(result.survivors)} (a file may be open) — retry after closing them"
         )
     jobs_deleted = store.delete_jobs_for_book(resolved)
+    # Drop the deleted book from any series membership so it leaves no dangling id behind.
+    from seiyuu.voices import drop_book_everywhere
+
+    dropped_from = drop_book_everywhere(cfg.data_dir, resolved)
     click.echo(
         f"deleted {resolved}: "
         f"output={'removed' if result.output_removed else 'absent'}, "
         f"books={'removed' if result.books_removed else 'absent'}, "
         f"job rows removed={jobs_deleted}, paid segments discarded={paid.paid_segment_count}"
+        + (f", series membership removed from {len(dropped_from)}" if dropped_from else "")
+    )
+
+
+@main.group()
+def series() -> None:
+    """Series / library voice consistency (data/series.json): reuse a character's voice across
+    books in a series. Inheritance flows in as `assign --map` overrides — no render change."""
+
+
+def _series_report_and_assignment(cfg, book_id: str):
+    """(report, assignment) for a book contributing its cast to a series (create/save-cast)."""
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import load_assignment, load_report
+
+    book_dir = _resolve_book_dir(
+        cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    report, _warnings = load_report(book_dir)
+    assignment = load_assignment(cfg.output_dir, report.book_id)
+    return report, assignment
+
+
+def _series_report(cfg, book_id: str):
+    """Attributed report for a book inheriting from a series (suggest-links/overrides)."""
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import load_report
+
+    book_dir = _resolve_book_dir(
+        cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    report, _warnings = load_report(book_dir)
+    return report
+
+
+def _get_series_or_fail(registry, series_id: str):
+    series_obj = registry.get(series_id)
+    if series_obj is None:
+        raise click.ClickException(f"series {series_id!r} not found")
+    return series_obj
+
+
+@series.command("create")
+@click.argument("name")
+@click.argument("book_id")
+@click.option("--series-id", default=None, help="Explicit id (default: slug + hex).")
+def series_create(name: str, book_id: str, series_id: str | None) -> None:
+    """Create a series SEEDED from a book's cast (canonical_name -> voice_id)."""
+    from seiyuu.services import ServiceError
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import (
+        Series,
+        load_registry,
+        make_series_id,
+        save_registry,
+        seed_voice_links,
+    )
+
+    cfg = get_settings()
+    try:
+        report, assignment = _series_report_and_assignment(cfg, book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    registry = load_registry(cfg.data_dir)
+    sid = series_id or make_series_id(name)
+    if registry.get(sid) is not None:
+        raise click.ClickException(f"series {sid!r} already exists")
+    obj = Series(
+        series_id=sid,
+        name=name.strip(),
+        book_ids=[report.book_id],
+        voice_links=seed_voice_links(report, assignment),
+    )
+    registry.upsert(obj)
+    save_registry(cfg.data_dir, registry)
+    click.echo(f"created series {sid!r} ({obj.name}) with {len(obj.voice_links)} voice link(s)")
+
+
+@series.command("list")
+def series_list() -> None:
+    """List every declared series."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import load_registry
+
+    registry = load_registry(get_settings().data_dir)
+    if not registry.series:
+        click.echo("(no series)")
+        return
+    for s in registry.series:
+        click.echo(
+            f"{s.series_id}  {s.name!r}  books={len(s.book_ids)}  links={len(s.voice_links)}"
+        )
+
+
+@series.command("show")
+@click.argument("series_id")
+def series_show(series_id: str) -> None:
+    """Print a series' books and voice links."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import load_registry
+
+    registry = load_registry(get_settings().data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    click.echo(f"{s.series_id}  {s.name!r}")
+    click.echo(f"books: {', '.join(s.book_ids) or '(none)'}")
+    if not s.voice_links:
+        click.echo("links: (none)")
+        return
+    click.echo("links:")
+    for key, vid in sorted(s.voice_links.items()):
+        click.echo(f"  {key} -> {vid}")
+
+
+@series.command("add-book")
+@click.argument("series_id")
+@click.argument("book_id")
+def series_add_book(series_id: str, book_id: str) -> None:
+    """Attach a book to the series (does NOT learn its cast — use save-cast for that)."""
+    from seiyuu.repository import RepositoryError, resolve_book_id
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import load_registry, save_registry
+
+    cfg = get_settings()
+    try:
+        resolved = resolve_book_id(book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
+    except RepositoryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    if resolved not in s.book_ids:
+        s.book_ids.append(resolved)
+        registry.upsert(s)
+        save_registry(cfg.data_dir, registry)
+    click.echo(f"series {series_id!r} books: {', '.join(s.book_ids)}")
+
+
+@series.command("remove-book")
+@click.argument("series_id")
+@click.argument("book_id")
+@click.option("--prune", is_flag=True, help="Also drop links whose voice no longer exists.")
+def series_remove_book(series_id: str, book_id: str, prune: bool) -> None:
+    """Drop a book from the series' membership."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceLibrary, load_registry, prune_dangling_links, save_registry
+
+    cfg = get_settings()
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    s.book_ids = [b for b in s.book_ids if b != book_id]
+    pruned: list[str] = []
+    if prune:
+        pruned = prune_dangling_links(s, VoiceLibrary(cfg.voices_dir))
+    registry.upsert(s)
+    save_registry(cfg.data_dir, registry)
+    extra = f", pruned {len(pruned)} dangling link(s)" if pruned else ""
+    click.echo(f"series {series_id!r} books: {', '.join(s.book_ids) or '(none)'}{extra}")
+
+
+@series.command("suggest-links")
+@click.argument("series_id")
+@click.argument("book_id")
+def series_suggest_links(series_id: str, book_id: str) -> None:
+    """Name-match a joining book's characters against the series' voice links (for review)."""
+    from seiyuu.services import ServiceError
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceLibrary, load_registry, suggest_links
+
+    cfg = get_settings()
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    try:
+        report = _series_report(cfg, book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    suggestions = suggest_links(report, s, VoiceLibrary(cfg.voices_dir))
+    if not suggestions:
+        click.echo("(no cross-book links suggested)")
+        return
+    for sug in suggestions:
+        avail = "" if sug.voice_exists else "  [voice missing — will be skipped]"
+        click.echo(f"{sug.character_id} ({sug.canonical_name}) -> {sug.voice_id}{avail}")
+
+
+@series.command("overrides")
+@click.argument("series_id")
+@click.argument("book_id")
+def series_overrides(series_id: str, book_id: str) -> None:
+    """Print resolved inheritance as CHARACTER_ID=VOICE_ID lines (feed to `assign --map`)."""
+    from seiyuu.services import ServiceError
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceLibrary, load_registry, resolve_series_overrides
+
+    cfg = get_settings()
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    try:
+        report = _series_report(cfg, book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    overrides = resolve_series_overrides(report, s, VoiceLibrary(cfg.voices_dir))
+    if not overrides:
+        click.echo("(no inherited voices)")
+        return
+    for char_id, vid in sorted(overrides.items()):
+        click.echo(f"{char_id}={vid}")
+
+
+@series.command("save-cast")
+@click.argument("series_id")
+@click.argument("book_id")
+def series_save_cast(series_id: str, book_id: str) -> None:
+    """Explicit write-back: fold a book's cast into the series' voice links (last-write-wins)."""
+    from seiyuu.services import ServiceError
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import load_registry, save_cast_to_series, save_registry
+
+    cfg = get_settings()
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    try:
+        report, assignment = _series_report_and_assignment(cfg, book_id)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    linked = save_cast_to_series(s, report, assignment)
+    if report.book_id not in s.book_ids:
+        s.book_ids.append(report.book_id)
+    registry.upsert(s)
+    save_registry(cfg.data_dir, registry)
+    click.echo(f"saved {len(linked)} link(s) to series {series_id!r} ({len(s.voice_links)} total)")
+
+
+@series.command("unlink")
+@click.argument("series_id")
+@click.argument("name")
+def series_unlink(series_id: str, name: str) -> None:
+    """Remove a character's voice link by NAME (case-insensitive)."""
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import identity_key, load_registry, save_registry
+
+    cfg = get_settings()
+    registry = load_registry(cfg.data_dir)
+    s = _get_series_or_fail(registry, series_id)
+    removed = s.voice_links.pop(identity_key(name), None)
+    registry.upsert(s)
+    save_registry(cfg.data_dir, registry)
+    click.echo(
+        f"unlinked {name!r} ({removed})" if removed else f"no link for {name!r} in {series_id!r}"
     )
 
 

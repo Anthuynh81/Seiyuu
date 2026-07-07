@@ -8,6 +8,7 @@ const items = [
   { to: "/review", label: "Character Review" },
   { to: "/lexicon", label: "Pronunciation" },
   { to: "/voices", label: "Voice Studio" },
+  { to: "/series", label: "Series" },
   { to: "/render", label: "Render & Jobs" },
 ];
 
