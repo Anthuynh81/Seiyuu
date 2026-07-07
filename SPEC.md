@@ -35,7 +35,7 @@ Python package name: `seiyuu` (NOT `abc` — that shadows the Python stdlib modu
 |---|---|---|---|---|
 | Kokoro-82M | Local, preset | Fast/free drafts, auto voice blends | No | Apache-2.0 |
 | Chatterbox / Turbo | Local, zero-shot | Primary local cloning engine | Yes (~7–20s ref) | MIT |
-| IndexTTS-2 | Local, zero-shot | Accuracy-critical narration (M7) | Yes | Apache-2.0 |
+| IndexTTS-2 | Local, zero-shot | Accuracy-critical narration (M7) | Yes | bilibili Model Use License (code+weights; not Apache-2.0) |
 | ElevenLabs (IVC/PVC) | Cloud | Premium final renders | Yes (IVC API) | Commercial API |
 | Fish Audio S2 (hosted) | Cloud | Cheap final renders | Yes | Commercial API |
 

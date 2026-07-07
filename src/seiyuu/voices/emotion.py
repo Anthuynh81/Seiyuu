@@ -12,8 +12,10 @@ Design invariants (each pinned by a fixture):
   keys it ignores would churn the cache for zero audible change (a cache-stable degrade).
 - Chatterbox exaggeration is CAPPED (``_MAX_EXAGGERATION``): a high-intensity tag must not
   spike the whisper-validation failure/retry rate.
-- IndexTTS-2 is a stub column for M7: the SAME taxonomy will select an emotion-reference clip
-  there, a pure add. Until then it returns ``{}``.
+- IndexTTS-2 (M7) maps the SAME taxonomy to its native 8-dim ``emo_vector`` (one weighted
+  dominant dimension) plus an ``emo_alpha`` strength scalar carrying intensity — a pure add
+  that rides ``settings_hash``'s VALUE like the other columns. NEUTRAL still returns ``{}`` so
+  the engine takes its neutral-from-speaker-clip path (a byte-stable, un-emotive render).
 
 The function is pure and deterministic (no I/O, no state): identical verdicts always yield an
 identical dict, so render and estimate produce identical SegmentKeys.
@@ -52,6 +54,30 @@ _ELEVEN_BASE: dict[EmotionLabel, tuple[float, float]] = {
 }
 
 
+# IndexTTS-2 emotion vector: 8 weights in a FIXED upstream order (infer_v2.py):
+#   [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+# We drive ONE dominant dimension per label (direction) and carry intensity in emo_alpha
+# (IndexTTS-2's native 0..1 strength scalar), NOT by inflating the vector. TENSE -> afraid is a
+# SINGLE dim on purpose: summing two high-arousal dims (afraid+angry) is perceptually unvalidated
+# and compounds unpredictably under alpha scaling — keep it one dim until audition tuning (M7-1).
+# disgusted/surprised/melancholic are left at 0 (harmless; unused dims don't distort the others).
+# The magnitudes below are conservative INITIAL values, tunable by audition after the M7 spike;
+# changing them churns settings_hash for emotive segments only (NEUTRAL stays byte-stable).
+_INDEXTTS2_DIM: dict[EmotionLabel, int] = {
+    EmotionLabel.HAPPY: 0,  # happy
+    EmotionLabel.ANGRY: 1,  # angry
+    EmotionLabel.SAD: 2,  # sad
+    EmotionLabel.FEARFUL: 3,  # afraid
+    EmotionLabel.TENSE: 3,  # afraid (closest single dim)
+    EmotionLabel.TENDER: 7,  # calm
+}
+# Direction weight on the dominant dim — capped well below 1.0 so a high-intensity tag can't
+# overdrive the autoregressive model into hallucination (same discipline as _MAX_EXAGGERATION).
+_INDEXTTS2_WEIGHT = 0.8
+# Intensity 1/2/3 -> emo_alpha (low/medium/high). Bounded to <= 1.0 (the upstream max).
+_INDEXTTS2_ALPHA: dict[int, float] = {1: 0.6, 2: 0.8, 3: 1.0}
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -78,6 +104,13 @@ def map_emotion(engine: str, verdict: EmotionVerdict | None) -> dict[str, Any]:
         stability = _clamp(stability - step * _INTENSITY_STEP, 0.1, 0.9)
         style = _clamp(style + step * _INTENSITY_STEP, 0.0, 1.0)
         return {"stability": round(stability, 3), "style": round(style, 3)}
-    # kokoro: no emotion knob -> cache-stable degrade. indextts2: M7 emotion-reference column
-    # (stub). Any unknown engine: no override.
+    if engine == "indextts2":
+        dim = _INDEXTTS2_DIM.get(verdict.label)
+        if dim is None:  # a label with no clean dim degrades to neutral (byte-stable)
+            return {}
+        vector = [0.0] * 8
+        vector[dim] = _INDEXTTS2_WEIGHT
+        alpha = _INDEXTTS2_ALPHA[verdict.intensity]
+        return {"emo_vector": [round(x, 3) for x in vector], "emo_alpha": round(alpha, 3)}
+    # kokoro: no emotion knob -> cache-stable degrade. Any unknown engine: no override.
     return {}
