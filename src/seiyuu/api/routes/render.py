@@ -83,13 +83,14 @@ def _check_chapters(book: NormalizedBook, chapters: list[int]) -> tuple[int, ...
     return tuple(sorted(set(chapters)))
 
 
-def _estimate_or_http(cfg, registry, book, book_id, *, mode, chapters, single):
+def _estimate_or_http(cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None):
     """compute_estimate with the read-path error mapping (422 unknown voice/engine;
     residual ServiceError = corrupt artifact -> 500; marker checks already ran)."""
     try:
         return compute_estimate(
-            cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single
-        )
+            cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single,
+            apply_emotion=apply_emotion,
+        )  # fmt: skip
     except ValidationError as exc:
         # BEFORE ValueError (its superclass): a corrupt assignments.json is a server
         # data fault, not a malformed request — same 500 GET /assignment gives it.
@@ -171,6 +172,7 @@ def cost_estimate(
     voice: Annotated[str | None, Query()] = None,
     speed: Annotated[float, Query(gt=0)] = 1.0,
     seed: int = 41172,
+    apply_emotion: Annotated[bool | None, Query()] = None,  # F2b: None -> cfg default
 ) -> CostEstimateOut:
     """Pure read: exact frozen SegmentKeys vs the segment cache. No network, no GPU,
     no consent check, and NEVER the signing-key state."""
@@ -187,7 +189,10 @@ def cost_estimate(
         if mode == "single"
         else None
     )
-    ctx = _estimate_or_http(cfg, registry, book, book_id, mode=mode, chapters=wanted, single=single)
+    ctx = _estimate_or_http(
+        cfg, registry, book, book_id, mode=mode, chapters=wanted, single=single,
+        apply_emotion=apply_emotion,
+    )  # fmt: skip
     return CostEstimateOut(
         total_usd=ctx.est.total_usd,
         paid_segments=ctx.est.paid_segments,
@@ -218,8 +223,9 @@ def mint_quote(
     wanted = _check_chapters(book, body.chapters)
     single = _resolve_single_or_422(cfg, body.single) if body.mode == "single" else None
     ctx = _estimate_or_http(
-        cfg, registry, book, book_id, mode=body.mode, chapters=wanted, single=single
-    )
+        cfg, registry, book, book_id, mode=body.mode, chapters=wanted, single=single,
+        apply_emotion=body.apply_emotion,
+    )  # fmt: skip
     if ctx.est.total_usd <= 0:
         raise ApiError(
             409,
@@ -305,8 +311,9 @@ def render_job(
     # unburned; the authoritative consume happens at job start (sign-off Q5).
     single = _resolve_single_or_422(cfg, params.single) if params.mode == "single" else None
     ctx = _estimate_or_http(
-        cfg, registry, book, book_id, mode=params.mode, chapters=wanted, single=single
-    )
+        cfg, registry, book, book_id, mode=params.mode, chapters=wanted, single=single,
+        apply_emotion=params.apply_emotion,
+    )  # fmt: skip
     _preflight_renderability(cfg, params.mode, single, ctx, book_id)
     if ctx.est.total_usd > 0:
         if not params.cost_token:

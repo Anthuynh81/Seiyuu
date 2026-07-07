@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from seiyuu.attribute.models import AttributionReport, SegmentType
+from seiyuu.attribute.models import AttributionReport, EmotionVerdict, SegmentType
 from seiyuu.repository import atomic_write_text
 from seiyuu.services.common import ServiceError
 
@@ -69,7 +69,26 @@ class ReassignSegment(BaseModel):
     text_anchor: str | None = None
 
 
-EditOp = Annotated[RenameCharacter | MergeCharacters | ReassignSegment, Field(discriminator="op")]
+class SetEmotion(BaseModel):
+    """Set or clear ONE segment's emotion (F2a) — a durable overlay on the NON-frozen
+    ``AttributedChapter.segment_emotions``, replayed like a reassign. ``emotion`` is the new
+    verdict (label + intensity) or ``None`` to clear it back to neutral/no-override. The
+    segment is addressed exactly as :class:`ReassignSegment` (block_id + 0-based index within
+    the block) and content-anchored the same way, so a later attribution run that re-splits
+    the block skips the op instead of retagging different text. Additive: older edit logs
+    (no ``set_emotion`` op) parse unchanged; the discriminator picks the right member."""
+
+    op: Literal["set_emotion"] = "set_emotion"
+    block_id: str
+    segment_index: int = Field(ge=0)
+    emotion: EmotionVerdict | None  # required-nullable: None clears, a verdict sets
+    text_anchor: str | None = None  # content anchor, filled by anchor_op (as for reassign)
+
+
+EditOp = Annotated[
+    RenameCharacter | MergeCharacters | ReassignSegment | SetEmotion,
+    Field(discriminator="op"),
+]
 
 
 class EditLog(BaseModel):
@@ -191,6 +210,38 @@ def _apply_reassign(report: AttributionReport, op: ReassignSegment) -> str | Non
     return f"reassign skipped: block {op.block_id!r} not in this attribution"
 
 
+def _apply_set_emotion(report: AttributionReport, op: SetEmotion) -> str | None:
+    """Overlay one segment's emotion onto ``segment_emotions`` (F2a).
+
+    ``segment_emotions`` is index-aligned to the chapter's flat segment list. A pre-emotion
+    (v3/v4) chapter has an empty/short list; we normalize it to all-None first so a single
+    override can't desync the alignment render/estimate rely on. Anchored exactly like a
+    reassign, so a re-split block is skipped rather than silently retagged."""
+    for chapter in report.chapters:
+        in_block = [i for i, s in enumerate(chapter.segments) if s.block_id == op.block_id]
+        if not in_block:
+            continue
+        if op.segment_index >= len(in_block):
+            return (
+                f"set_emotion skipped: block {op.block_id!r} has {len(in_block)} segment(s), "
+                f"index {op.segment_index} no longer exists"
+            )
+        i = in_block[op.segment_index]
+        seg = chapter.segments[i]
+        if op.text_anchor is not None and not _norm_text(seg.text).startswith(op.text_anchor):
+            return (
+                f"set_emotion skipped: {op.block_id!r}[{op.segment_index}] is now different "
+                f"text than when the edit was recorded — re-record it if still wanted"
+            )
+        emotions = list(chapter.segment_emotions)
+        if len(emotions) != len(chapter.segments):  # v3/v4 or desynced: normalize before writing
+            emotions = [None] * len(chapter.segments)
+        emotions[i] = op.emotion
+        chapter.segment_emotions = emotions
+        return None
+    return f"set_emotion skipped: block {op.block_id!r} not in this attribution"
+
+
 def anchor_op(report: AttributionReport, op: EditOp) -> EditOp:
     """Validate ``op`` against the CURRENT effective report and fill its content anchors.
 
@@ -216,7 +267,13 @@ def anchor_op(report: AttributionReport, op: EditOp) -> EditOp:
                 "expected_winner_name": winner.canonical_name,
             }
         )
-    if op.speaker is not None and report.registry.get(op.speaker) is None:
+    # ReassignSegment and SetEmotion both anchor on block_id + segment_index; only reassign
+    # also validates a target speaker.
+    if (
+        isinstance(op, ReassignSegment)
+        and op.speaker is not None
+        and report.registry.get(op.speaker) is None
+    ):
         raise ServiceError(f"unknown character {op.speaker!r}")
     in_block = [
         seg
@@ -251,8 +308,10 @@ def apply_edits(report: AttributionReport, log: EditLog) -> tuple[AttributionRep
             problem = _apply_rename(effective, op)
         elif isinstance(op, MergeCharacters):
             problem = _apply_merge(effective, op)
-        else:
+        elif isinstance(op, ReassignSegment):
             problem = _apply_reassign(effective, op)
+        else:
+            problem = _apply_set_emotion(effective, op)
         if problem:
             warnings.append(problem)
     return effective, warnings

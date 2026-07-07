@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { useBooks, useLexicon, usePreviewLexicon, useSaveLexicon } from "../api/hooks";
+import { ApiError } from "../api/client";
+import {
+  useBooks,
+  useLexicon,
+  usePreviewLexicon,
+  useSaveLexicon,
+  useSuggestRespellings,
+} from "../api/hooks";
 import type { LexiconEntry, SuggestedTerm } from "../api/types";
-import { blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
+import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
 
 /* A per-book pronunciation dictionary: term -> respelling (spoken on every engine), with an
    optional IPA that only the Kokoro engine uses. Editing re-synthesizes only the segments whose
@@ -87,9 +94,11 @@ export function Lexicon() {
   const lexicon = useLexicon(bookId);
   const save = useSaveLexicon(bookId ?? "");
   const preview = usePreviewLexicon(bookId ?? "");
+  const suggestAI = useSuggestRespellings(bookId ?? "");
 
   const [rows, setRows] = useState<LexiconEntry[]>([]);
   const [savedInfo, setSavedInfo] = useState<{ affected: number; total: number } | null>(null);
+  const [allowPaid, setAllowPaid] = useState(false);
 
   // Re-seed the editable rows whenever the server copy (or the selected book) changes.
   const serverSig = lexicon.data ? entriesSig(lexicon.data.entries) : null;
@@ -97,6 +106,7 @@ export function Lexicon() {
     if (lexicon.data) setRows(lexicon.data.entries.map((e) => ({ ...e })));
     setSavedInfo(null);
     preview.reset();
+    suggestAI.reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId, serverSig]);
 
@@ -136,6 +146,23 @@ export function Lexicon() {
         setSavedInfo({ affected: res.affected_blocks, total: res.total_speakable_blocks }),
     });
   };
+
+  // F3: ask the LLM to propose respellings. Send the terms currently in the editor; if there are
+  // none, an empty list lets the backend fall back to its deterministic hard-name suggestions.
+  // The result is ADVISORY — folded into the rows (never clobbering a respelling the user typed),
+  // still requiring an explicit Save.
+  const onSuggestAI = () => {
+    const terms = cleanForSave(
+      rows.filter((r) => r.term.trim()).map((r) => ({ ...r, respelling: r.respelling || "x" })),
+    ).map((r) => r.term);
+    suggestAI.mutate(
+      { terms, confirm_paid: allowPaid },
+      { onSuccess: (res) => setRows((rs) => applyRespellings(rs, res.suggestions)) },
+    );
+  };
+
+  const aiError = suggestAI.error instanceof ApiError ? suggestAI.error : null;
+  const needsPaidConfirm = aiError?.status === 402;
 
   return (
     <section className="screen">
@@ -223,6 +250,16 @@ export function Lexicon() {
             {save.isPending ? "saving…" : "save"}
           </button>
 
+          <span style={{ flex: 1 }} />
+          <button
+            className="key quiet"
+            disabled={suggestAI.isPending}
+            onClick={onSuggestAI}
+            title="ask the LLM to propose grapheme respellings — for the terms above, or (if none) for the book's likely hard names. Advisory: you still review and save."
+          >
+            {suggestAI.isPending ? "asking AI…" : "✨ suggest with AI"}
+          </button>
+
           {dupes.length > 0 && (
             <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
               duplicate term: {dupes.join(", ")}
@@ -243,7 +280,46 @@ export function Lexicon() {
               {(save.error as Error).message}
             </span>
           )}
+          {suggestAI.data && !suggestAI.isPending && (
+            <span className="mono" style={{ color: "var(--ink-2)", fontSize: 11 }}>
+              {suggestAI.data.suggestions.length} respelling
+              {suggestAI.data.suggestions.length === 1 ? "" : "s"} from {suggestAI.data.provider}/
+              {suggestAI.data.model} — review and save
+            </span>
+          )}
+          {aiError && (
+            <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
+              {aiError.message}
+            </span>
+          )}
         </div>
+
+        {needsPaidConfirm && (
+          <div
+            className="row"
+            style={{ gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}
+          >
+            <label
+              className="mono"
+              style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}
+            >
+              <input
+                type="checkbox"
+                checked={allowPaid}
+                onChange={(e) => setAllowPaid(e.target.checked)}
+              />
+              approve the paid (Anthropic) suggester
+            </label>
+            <button
+              className="key quiet"
+              style={{ padding: "3px 9px" }}
+              disabled={!allowPaid || suggestAI.isPending}
+              onClick={onSuggestAI}
+            >
+              retry with AI
+            </button>
+          </div>
+        )}
       </div>
 
       {suggestions.length > 0 && (

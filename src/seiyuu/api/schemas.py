@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from seiyuu.attribute.models import AttributionReport
+from seiyuu.attribute.models import AttributionReport, EmotionVerdict
 from seiyuu.repository import BookStatus, Job
 from seiyuu.services.voices import VoiceReference
 from seiyuu.voices import VoiceAssignment, VoiceMeta
@@ -297,7 +297,22 @@ class ReassignRequest(BaseModel):
     speaker: str | None  # required-nullable: null means narration, omitting it is a 422
 
 
-EditRequest = Annotated[RenameRequest | MergeRequest | ReassignRequest, Field(discriminator="op")]
+class SetEmotionRequest(BaseModel):
+    """F2a: set or clear one segment's emotion overlay. ``emotion`` is required-nullable —
+    a verdict sets it, ``null`` clears it back to neutral; omitting the field is a 422. The
+    server fills the content anchor (text_anchor), so the client can't smuggle a stale one."""
+
+    model_config = {"extra": "forbid"}
+    op: Literal["set_emotion"]
+    block_id: str
+    segment_index: int = Field(ge=0)
+    emotion: EmotionVerdict | None
+
+
+EditRequest = Annotated[
+    RenameRequest | MergeRequest | ReassignRequest | SetEmotionRequest,
+    Field(discriminator="op"),
+]
 
 
 # -- assignment (scoping doc section 4: Assignment) ---------------------------------------
@@ -314,6 +329,14 @@ class AssignmentDraftRequest(BaseModel):
     # smart only: OVERWRITE existing {char_id}_auto voices to apply the new cast (re-renders
     # those voices' segments). Without it, smart stays skip-if-exists like the legacy draft.
     recast: bool = False
+    # F4 (smart only): run the opt-in Layer-2 LLM caster to produce per-character voice-trait
+    # preferences that bias the tie-breaker. cast_book still enforces distinctness/determinism,
+    # so this can only change WHICH distinct voice a character takes. Ignored on the hash path.
+    use_llm: bool = False
+    # Override the configured cast_provider ("local" free / "anthropic" PAID) for this call.
+    cast_provider: str | None = None
+    # Required literal true when the resolved cast provider is anthropic (PAID). Local is free.
+    confirm_paid: bool = False
 
 
 class AssignmentDraftResponse(BaseModel):
@@ -364,6 +387,10 @@ class QuoteRequest(BaseModel):
     mode: Literal["multivoice", "single"] = "multivoice"
     chapters: list[int] = Field(default_factory=list)
     single: SingleSpec | None = None
+    # F2b: per-render emotion override, None -> cfg.apply_emotion. Bound into the quote's
+    # fingerprint (via the estimate), so a quote minted with one value is refused by a render
+    # sent with another — the token authorizes exactly the emotion-folded keys it priced.
+    apply_emotion: bool | None = None
 
     @model_validator(mode="after")
     def _check(self) -> "QuoteRequest":
@@ -407,6 +434,10 @@ class RenderParams(BaseModel):
     cost_token: str | None = None
     confirm_full: bool = False
     single: SingleSpec | None = None
+    # F2b: per-render emotion override, None -> cfg.apply_emotion. The render handler AND the
+    # cost estimate resolve the SAME effective value, so the cost gate authorizes exactly what
+    # render bills (parity). OFF keeps the SegmentKey byte-identical to a no-emotion render.
+    apply_emotion: bool | None = None
 
     @model_validator(mode="after")
     def _check(self) -> "RenderParams":
@@ -610,6 +641,9 @@ class SystemStatus(BaseModel):
     keys: KeyStatus
     limits: ApiLimits
     attribution: AttributionDefaults
+    # F2b: the server-default apply_emotion (per-render overridable). The render config reads
+    # this to default its toggle.
+    apply_emotion: bool
     engines: list[str]
     version: str
 
@@ -628,6 +662,7 @@ class SettingsView(BaseModel):
     attribution_model: str
     attribution_prompt_version: str
     attribution_hybrid: bool
+    apply_emotion: bool  # F2b: server default for the per-render emotion toggle
     narration_wpm: float
     render_max_usd: float
     cost_quote_ttl_seconds: int

@@ -88,6 +88,20 @@ export interface LexiconPreviewOut {
   total_speakable_blocks: number;
 }
 
+/** F3 (v1.1): one ADVISORY LLM-proposed grapheme respelling. The user accepts it into the
+    lexicon (which stays the deterministic source of truth); the LLM never writes it. */
+export interface RespellSuggestion {
+  term: string;
+  respelling: string;
+  note: string | null;
+}
+
+export interface RespellSuggestOut {
+  provider: string;
+  model: string;
+  suggestions: RespellSuggestion[];
+}
+
 // -- delete a book (F3) ----------------------------------------------------------------------
 
 /** DELETE /api/books/{id} success — what was actually torn down. */
@@ -176,6 +190,8 @@ export interface RenderRequest {
   cost_token?: string;
   confirm_full?: boolean;
   single?: { engine?: string; voice?: string; speed?: number; seed?: number };
+  // F2b: per-render emotion override (undefined -> the server default cfg.apply_emotion)
+  apply_emotion?: boolean;
 }
 
 export interface RenderSummaryOut {
@@ -316,7 +332,9 @@ export interface SegmentWords {
 export type EditRequest =
   | { op: "rename"; character_id: string; new_name: string }
   | { op: "merge"; loser_id: string; winner_id: string }
-  | { op: "reassign"; block_id: string; segment_index: number; speaker: string | null };
+  | { op: "reassign"; block_id: string; segment_index: number; speaker: string | null }
+  // F2a: set (verdict) or clear (null) one segment's emotion overlay
+  | { op: "set_emotion"; block_id: string; segment_index: number; emotion: EmotionVerdict | null };
 
 export interface EditLog {
   version: number;
@@ -473,6 +491,7 @@ export interface AttributionDefaults {
 export interface SystemStatusOut {
   attribution: AttributionDefaults;
   keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
+  apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
 }
 
 /** "ch013_b0042" -> 13; null when unparsable. */

@@ -38,6 +38,13 @@ _MALE = {"male", "m", "man", "boy"}
 _YOUNG = {"af_aoede", "af_sky", "am_liam", "bf_lily"}  # "youthful/younger/light" descriptions
 _DEEP = {"am_adam", "am_onyx", "bm_george", "bm_daniel"}  # "deep/resonant/baritone" descriptions
 
+# The CLOSED trait vocabulary the tie-breaker understands. The optional F4 Layer-2 LLM caster
+# (voices/llm_caster.py) emits a per-character trait PREFERENCE; only tags in this set survive
+# (a hallucinated tag is discarded), and even a degenerate all-same preference can only reorder
+# the greedy pick among the already-DISTINCT candidates — never collide two characters. Keep in
+# sync with _voice_traits / _wants below.
+KNOWN_TRAITS = frozenset({"young", "deep"})
+
 # Fixed weight tiers for the blend-fallback voices. Each ordered (primary, secondary) pair at
 # each weight is a UNIQUE canonical recipe, multiplying the combinatorial headroom so even a
 # large single-gender cast never exhausts distinct voices.
@@ -57,6 +64,20 @@ def _wants(char: Character) -> set[str]:
     if any(k in text for k in ("old", "elder", "deep", "gruff", "grave", "gravel", "bass")):
         wants.add("deep")
     return wants
+
+
+def _hinted_wants(char: Character, trait_hints: dict[str, set[str]] | None) -> set[str]:
+    """The traits used as this character's tie-breaker bias.
+
+    F4: when an LLM trait-hint is present for this character it REPLACES the keyword scan (the
+    advisory layer speaking "in place of" the deterministic bias), filtered to :data:`KNOWN_TRAITS`
+    so a hallucinated tag is dropped. With no hint (or the layer off) it falls back to the
+    deterministic :func:`_wants`. Either way the result only feeds the greedy pick among the
+    already-distinct candidates, so it can never change collision-freeness or determinism.
+    """
+    if trait_hints is not None and char.id in trait_hints:
+        return trait_hints[char.id] & KNOWN_TRAITS
+    return _wants(char)
 
 
 def _voice_traits(recipe: Recipe) -> set[str]:
@@ -100,12 +121,19 @@ def cast_book(
     narrator_preset: str,
     accent: str = "a",
     taken: set[str] | None = None,
+    trait_hints: dict[str, set[str]] | None = None,
 ) -> dict[str, Recipe]:
     """Assign each character a distinct Kokoro voice recipe (``[(preset_id, weight), ...]``).
 
     A 1-component recipe is a single preset; a 2-component recipe is a blend (the pool-exhaustion
     fallback). ``narrator_preset`` (and any ``taken`` presets) are excluded from single picks so
     no character shares the narrator's voice. Pure and deterministic.
+
+    ``trait_hints`` is the OPTIONAL F4 Layer-2 signal: ``{char_id -> desired trait tags}``. It only
+    reaches the greedy tie-breaker (via :func:`_hinted_wants`), so any hint — including a degenerate
+    one where every character asks for the same trait, or garbage tags — can at most change WHICH
+    distinct candidate a character takes. Distinctness and determinism are structural (below) and
+    the hint cannot touch them.
     """
     reserved = set(taken or ())
     reserved.add(narrator_preset)  # no character shares the narrator's single voice
@@ -131,7 +159,7 @@ def cast_book(
         # Greedy tie-breaker: each character (id order) takes the best-matching REMAINING
         # candidate; ties fall to the lowest candidate index. Bijective, so collision-free.
         for char in members:
-            wants = _wants(char)
+            wants = _hinted_wants(char, trait_hints)
             best_i, best_score = 0, -1
             for i, cand in enumerate(pending):
                 score = len(wants & _voice_traits(cand))

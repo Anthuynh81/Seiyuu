@@ -86,6 +86,22 @@ class Settings(BaseSettings):
     # intentionally not implemented (highest over-merge risk); this toggles only the table.
     adjudication_use_nicknames: bool = True
 
+    # F3 opt-in LLM respell suggester (advisory enrichment over the deterministic hard-name
+    # surfacer). Runs only on an explicit user action. "local" (Ollama, free) reuses the GPU
+    # through the resource manager; "anthropic" is PAID and gated by confirm_paid + the key.
+    # respell_model defaults per-provider (attribution_model for local, anthropic_model for
+    # anthropic) when left unset.
+    respell_provider: str = "local"
+    respell_model: str | None = None
+    respell_prompt_version: str = "v1"
+
+    # F4 opt-in Layer-2 LLM caster (advisory voice-trait preference over the Phase-0 keyword
+    # bias). Same explicit-action + paid-gate discipline as the respell suggester; cast_book
+    # still enforces distinctness/determinism regardless of the LLM output.
+    cast_provider: str = "local"
+    cast_model: str | None = None
+    cast_prompt_version: str = "v1"
+
     # TTS defaults (M1).
     tts_engine: str = "kokoro"
     kokoro_default_voice: str = "af_heart"

@@ -23,6 +23,7 @@ from seiyuu.api.schemas import (
     AssignmentWrite,
     EditRequest,
     MergeRequest,
+    ReassignRequest,
     RenameRequest,
     SuggestCastResponse,
 )
@@ -32,6 +33,7 @@ from seiyuu.services import (
     ReassignSegment,
     RenameCharacter,
     ServiceError,
+    SetEmotion,
     draft_assignment,
     load_assignment,
     load_edits,
@@ -40,10 +42,42 @@ from seiyuu.services import (
     suggest_assignment,
     undo_edit,
 )
+from seiyuu.services.llm_advisory import resolve_advisory, run_cast_hints
 from seiyuu.settings import Settings
 from seiyuu.voices import AssignmentStage, VoiceAssignment, VoiceLibrary, VoiceLibraryError
 
 router = APIRouter(tags=["review"])
+
+
+def _cast_trait_hints(
+    cfg: Settings, body: AssignmentDraftRequest, report
+) -> dict[str, set[str]] | None:
+    """F4: when ``use_llm`` is set on a SMART cast, run the opt-in Layer-2 LLM caster and return
+    its per-character trait hints. Off (or on the hash path) it returns None so the deterministic
+    keyword bias is used unchanged. Applies the SAME paid gate as attribution: when the resolved
+    cast provider is anthropic it is a PAID call on this HTTP path, so it needs confirm_paid + the
+    key; the local provider is free but still runs only on this explicit action."""
+    if not body.use_llm or body.strategy != "smart":
+        return None
+    resolved = resolve_advisory(cfg, cfg.cast_provider, cfg.cast_model, body.cast_provider)
+    if resolved.is_paid:
+        if not body.confirm_paid:
+            raise ApiError(
+                402,
+                "payment_confirmation_required",
+                "the LLM caster with cast_provider=anthropic calls the paid Anthropic API; "
+                "re-send with confirm_paid=true to approve the spend",
+            )
+        if not cfg.anthropic_api_key:
+            raise ApiError(
+                503, "not_ready", "ANTHROPIC_API_KEY not set; required for the anthropic LLM caster"
+            )
+    override_ids = set(body.overrides or {})
+    castable = [c for c in report.registry.characters if c.id not in override_ids]
+    try:
+        return run_cast_hints(cfg, resolved, castable)
+    except Exception as exc:  # a provider/transport failure must not 500 the whole draft
+        raise ApiError(502, "upstream_error", f"LLM caster failed: {exc}") from exc
 
 
 def _edits_or_500(cfg: Settings, book_id: str) -> EditLog:
@@ -84,9 +118,13 @@ def record_edit_op(
         op = RenameCharacter(character_id=edit.character_id, new_name=edit.new_name)
     elif isinstance(edit, MergeRequest):
         op = MergeCharacters(loser_id=edit.loser_id, winner_id=edit.winner_id)
-    else:
+    elif isinstance(edit, ReassignRequest):
         op = ReassignSegment(
             block_id=edit.block_id, segment_index=edit.segment_index, speaker=edit.speaker
+        )
+    else:
+        op = SetEmotion(
+            block_id=edit.block_id, segment_index=edit.segment_index, emotion=edit.emotion
         )
     try:
         anchored = record_edit(cfg.books_dir / book_id, op)
@@ -158,6 +196,10 @@ def draft(
     report, warnings = effective_report(cfg, book_id, status)
     guard_render_active(store, book_id)
 
+    # F4: resolve the LLM trait hints (with the paid gate) BEFORE taking the voices mutex, so a
+    # network-bound LLM call never holds the lock. Off/hash -> None (deterministic bias unchanged).
+    trait_hints = _cast_trait_hints(cfg, body, report)
+
     with _voices_mutex(request):
         before = _existing_voice_ids(cfg)
         try:
@@ -172,6 +214,7 @@ def draft(
                 overrides=body.overrides,
                 strategy=body.strategy,
                 recast=body.recast,
+                trait_hints=trait_hints,
             )
         except (ServiceError, ValueError) as exc:  # unknown character/voice, exhausted pool
             raise ApiError(422, "invalid", str(exc)) from exc

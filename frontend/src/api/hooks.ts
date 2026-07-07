@@ -26,6 +26,7 @@ import type {
   QuoteResponse,
   LinkSuggestionsOut,
   RenderMode,
+  RespellSuggestOut,
   RenderRequest,
   RenderSummaryOut,
   SaveCastOut,
@@ -125,11 +126,20 @@ function chapterParams(chapters: number[]): string {
   return chapters.map((c) => `&chapters=${c}`).join("");
 }
 
-export function useEstimate(bookId: string | null, mode: RenderMode, chapters: number[], ready: boolean) {
+export function useEstimate(
+  bookId: string | null,
+  mode: RenderMode,
+  chapters: number[],
+  ready: boolean,
+  applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
+) {
+  const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null],
     queryFn: () =>
-      api<CostEstimateOut>(`/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}`),
+      api<CostEstimateOut>(
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}`,
+      ),
     enabled: bookId !== null && ready,
   });
 }
@@ -153,11 +163,20 @@ export function useValidation(bookId: string | null, rendered: boolean) {
 
 export function useMintQuote(bookId: string) {
   return useMutation({
-    mutationFn: ({ mode, chapters }: { mode: RenderMode; chapters: number[] }) =>
+    mutationFn: ({
+      mode,
+      chapters,
+      applyEmotion,
+    }: {
+      mode: RenderMode;
+      chapters: number[];
+      applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
+    }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
         ...(mode === "single" ? { single: {} } : {}),
+        ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
       }),
   });
 }
@@ -214,6 +233,22 @@ export function usePreviewLexicon(bookId: string) {
   return useMutation({
     mutationFn: (entries: LexiconEntry[]) =>
       postJson<LexiconPreviewOut>(`/api/books/${bookId}/lexicon/preview`, { entries }),
+  });
+}
+
+export interface RespellInput {
+  terms?: string[]; // omit/empty -> the backend uses the deterministic hard-name suggestions
+  provider?: string; // override the configured provider ("local" free | "anthropic" PAID)
+  confirm_paid?: boolean; // required when the resolved provider is anthropic (paid)
+}
+
+/** F3 (v1.1): opt-in LLM respelling suggestions for hard terms. ADVISORY — writes nothing; the
+    user folds accepted respellings into the editor (see lib/applyRespellings) and saves. A 402
+    means the resolved provider is anthropic and confirm_paid is required. */
+export function useSuggestRespellings(bookId: string) {
+  return useMutation({
+    mutationFn: (input: RespellInput = {}) =>
+      postJson<RespellSuggestOut>(`/api/books/${bookId}/lexicon/suggest-respellings`, input),
   });
 }
 
@@ -389,6 +424,13 @@ export interface DraftInput {
   // F5: character_id -> voice_id inherited from a series; wins over the auto-cast pick. The
   // smart caster reserves these so a new character is never cast onto a series-pinned voice.
   overrides?: Record<string, string>;
+  // F4 (v1.1): smart only. Run the opt-in Layer-2 LLM caster for per-character voice-trait
+  // preferences that bias the tie-breaker. cast_book still enforces distinctness/determinism, so
+  // this can only change WHICH distinct voice a character takes. A 402 means the resolved cast
+  // provider is anthropic and confirm_paid is required.
+  use_llm?: boolean;
+  cast_provider?: string; // override the configured cast provider ("local" | "anthropic")
+  confirm_paid?: boolean; // required when the resolved cast provider is anthropic (paid)
 }
 
 export function useDraftAssignment(bookId: string) {
