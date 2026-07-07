@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from seiyuu import __version__
+from seiyuu.attribute.models import EmotionLabel
 
 
 @click.group()
@@ -710,6 +711,49 @@ def edit_reassign(
     click.echo(f"reassigned {block_id}[{segment_index}] -> {target} (durable)")
 
 
+@edit.command("set-emotion")
+@click.argument("book_id")
+@click.argument("block_id")
+@click.argument("segment_index", type=int)
+@click.option(
+    "--label",
+    type=click.Choice([e.value for e in EmotionLabel]),
+    default=None,
+    help="Emotion label to set on the segment.",
+)
+@click.option(
+    "--intensity", type=click.IntRange(1, 3), default=2, help="Intensity 1..3 (default 2)."
+)
+@click.option("--clear", is_flag=True, help="Clear the segment's emotion instead of setting one.")
+@_edit_books_dir_option
+def edit_set_emotion(
+    book_id: str,
+    block_id: str,
+    segment_index: int,
+    label: str | None,
+    intensity: int,
+    clear: bool,
+    books_dir: Path | None,
+) -> None:
+    """Set or clear one segment's emotion overlay (SEGMENT_INDEX is 0-based within the block)."""
+    from seiyuu.attribute.models import EmotionVerdict
+    from seiyuu.services import ServiceError, SetEmotion, record_edit
+
+    if clear == (label is not None):  # exactly one of --label or --clear
+        raise click.ClickException("pass exactly one of --label LABEL or --clear")
+    emotion = None if clear else EmotionVerdict(label=EmotionLabel(label), intensity=intensity)
+    book_dir = _edit_book_dir(book_id, books_dir)
+    try:
+        record_edit(
+            book_dir,
+            SetEmotion(block_id=block_id, segment_index=segment_index, emotion=emotion),
+        )
+    except (ServiceError, ValueError) as exc:  # ValueError: pydantic op validation
+        raise click.ClickException(str(exc)) from exc
+    target = "cleared" if clear else f"{label} (intensity {intensity})"
+    click.echo(f"emotion for {block_id}[{segment_index}] -> {target} (durable)")
+
+
 @edit.command("list")
 @click.argument("book_id")
 @_edit_books_dir_option
@@ -856,6 +900,83 @@ def lexicon_suggest(book_id: str, books_dir: Path | None) -> None:
         return
     for s in suggestions:
         click.echo(f"{s.term}  (x{s.count})  …{s.sample}…")
+
+
+@lexicon.command("suggest-ai")
+@click.argument("book_id")
+@click.option(
+    "--term",
+    "terms",
+    multiple=True,
+    help="Term to respell (repeatable). Omit to use the deterministic hard-name suggestions.",
+)
+@click.option(
+    "--provider",
+    default=None,
+    help="Suggestion provider: 'local' (Ollama, free) or 'anthropic' (PAID). Default: settings.",
+)
+@click.option(
+    "--confirm-paid",
+    is_flag=True,
+    default=False,
+    help="Required to run the anthropic (paid) suggester.",
+)
+@_edit_books_dir_option
+def lexicon_suggest_ai(
+    book_id: str,
+    terms: tuple[str, ...],
+    provider: str | None,
+    confirm_paid: bool,
+    books_dir: Path | None,
+) -> None:
+    """ADVISORY LLM respellings for hard terms (opt-in enrichment of `suggest`).
+
+    Prints proposals only — accept one with `seiyuu lexicon set --term ... --respelling ...`.
+    The deterministic `suggest` stays the free default; this adds an LLM layer on top."""
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.normalize.lexicon import load_lexicon, suggest_terms
+    from seiyuu.services.llm_advisory import resolve_advisory, run_respell_suggestions
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _lexicon_book_dir(book_id, books_dir)
+    requested = [t.strip() for t in terms if t.strip()]
+    if not requested:
+        book = NormalizedBook.model_validate_json(
+            (book_dir / "normalized.json").read_text(encoding="utf-8")
+        )
+        lex = load_lexicon(book_dir, book_id=book_id)
+        texts = [b.text for c in book.chapters for b in c.blocks if b.is_speakable]
+        requested = [
+            s.term for s in suggest_terms(texts, existing_terms=[e.term for e in lex.entries])
+        ]
+    if not requested:
+        click.echo("(no candidate terms found)")
+        return
+
+    resolved = resolve_advisory(cfg, cfg.respell_provider, cfg.respell_model, provider)
+    if resolved.is_paid:
+        if not confirm_paid:
+            raise click.ClickException(
+                f"provider {resolved.provider_id!r} is a PAID Anthropic call; "
+                "re-run with --confirm-paid to approve the spend."
+            )
+        if not cfg.anthropic_api_key:
+            raise click.ClickException(
+                "ANTHROPIC_API_KEY not set; required for the anthropic suggester"
+            )
+
+    click.echo(f"suggester: {resolved.provider_id}/{resolved.model}  ({len(requested)} term(s))")
+    try:
+        suggestions = run_respell_suggestions(cfg, resolved, requested)
+    except Exception as exc:
+        raise click.ClickException(f"LLM respell suggester failed: {exc}") from exc
+    if not suggestions:
+        click.echo("(no suggestions returned)")
+        return
+    for s in suggestions:
+        note = f"  # {s.note}" if s.note else ""
+        click.echo(f"{s.term!r} -> {s.respelling!r}{note}")
 
 
 @main.group()
@@ -1267,6 +1388,24 @@ def voice_clone(
     "(re-renders those voices' segments).",
 )
 @click.option(
+    "--use-llm",
+    is_flag=True,
+    default=False,
+    help="smart only: run the opt-in Layer-2 LLM caster for per-character voice-trait "
+    "preferences (biases the tie-breaker; distinctness stays guaranteed).",
+)
+@click.option(
+    "--cast-provider",
+    default=None,
+    help="LLM caster provider: 'local' (free) or 'anthropic' (PAID). Default: settings.",
+)
+@click.option(
+    "--confirm-paid",
+    is_flag=True,
+    default=False,
+    help="Required to run the anthropic (paid) LLM caster.",
+)
+@click.option(
     "--books-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -1288,6 +1427,9 @@ def assign(
     maps: tuple[str, ...],
     strategy: str,
     recast: bool,
+    use_llm: bool,
+    cast_provider: str | None,
+    confirm_paid: bool,
     books_dir: Path | None,
     output_dir: Path | None,
     voices_dir: Path | None,
@@ -1295,6 +1437,7 @@ def assign(
     """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
+    from seiyuu.services.llm_advisory import resolve_advisory, run_cast_hints
     from seiyuu.settings import get_settings
     from seiyuu.voices import AssignmentStage, VoiceLibrary
 
@@ -1311,6 +1454,25 @@ def assign(
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     try:
         report, edit_warnings = load_report(book_dir)
+        # F4: opt-in LLM caster. Only meaningful on the smart path; the paid gate mirrors
+        # attribution — anthropic needs --confirm-paid + the key, local is free-but-explicit.
+        trait_hints = None
+        if use_llm and strategy == "smart":
+            resolved = resolve_advisory(cfg, cfg.cast_provider, cfg.cast_model, cast_provider)
+            if resolved.is_paid:
+                if not confirm_paid:
+                    raise click.ClickException(
+                        f"cast provider {resolved.provider_id!r} is a PAID Anthropic call; "
+                        "re-run with --confirm-paid to approve the spend."
+                    )
+                if not cfg.anthropic_api_key:
+                    raise click.ClickException(
+                        "ANTHROPIC_API_KEY not set; required for the anthropic LLM caster"
+                    )
+            castable = [c for c in report.registry.characters if c.id not in overrides]
+            trait_hints = run_cast_hints(cfg, resolved, castable)
+        elif use_llm:
+            click.echo("--use-llm has no effect on the 'hash' strategy; ignoring.")
         assignment = draft_assignment(
             report,
             lib,
@@ -1322,6 +1484,7 @@ def assign(
             overrides=overrides,
             strategy=strategy,
             recast=recast,
+            trait_hints=trait_hints,
         )
     except (ServiceError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

@@ -41,6 +41,15 @@ class ResolvedSingle:
         return {"speed": self.speed}
 
 
+def effective_apply_emotion(cfg: Settings, override: bool | None) -> bool:
+    """F2b: the per-render apply_emotion override resolved against the server default.
+
+    ``None`` -> ``cfg.apply_emotion`` (the server-global default); an explicit bool wins. The
+    render handler and the cost estimate MUST both resolve through this one helper so the gate
+    authorizes exactly the emotion-folded SegmentKeys render bills (parity)."""
+    return cfg.apply_emotion if override is None else override
+
+
 def resolve_single(cfg: Settings, spec: SingleSpec | None) -> ResolvedSingle:
     spec = spec or SingleSpec()
     engine_id = spec.engine or cfg.tts_engine
@@ -78,6 +87,7 @@ def compute_estimate(
     mode: str,
     chapters: tuple[int, ...],
     single: ResolvedSingle | None,
+    apply_emotion: bool | None = None,
 ) -> EstimateContext:
     """The fresh estimate for a render exactly as the render loop would bill it.
 
@@ -85,6 +95,10 @@ def compute_estimate(
     VoiceLibraryError for unknown voices, ValueError for unknown engines) — callers map
     them to their boundary. Multivoice estimates use the EFFECTIVE report, so a manual
     edit between estimate and render correctly drifts the fingerprint and refuses.
+
+    ``apply_emotion`` (F2b) is the per-render override; ``None`` falls back to
+    ``cfg.apply_emotion``. Resolved via ``effective_apply_emotion`` so estimate and render
+    build the IDENTICAL emotion-folded keys.
     """
     book_output_dir = Path(cfg.output_dir) / book_id
     library = VoiceLibrary(cfg.voices_dir)
@@ -97,9 +111,10 @@ def compute_estimate(
         est = estimate_render_cost(
             report, book, library, assignment, book_output_dir,
             chapters=chapters, lexicon=lexicon,
-            # F2: same opt-in flag the render handler passes to render_book_multivoice, so the
-            # cost gate authorizes exactly the SegmentKeys render will bill.
-            apply_emotion=cfg.apply_emotion,
+            # F2/F2b: the SAME effective flag the render handler passes to render_book_multivoice
+            # (per-render override, else the cfg default), so the cost gate authorizes exactly the
+            # SegmentKeys render will bill.
+            apply_emotion=effective_apply_emotion(cfg, apply_emotion),
         )  # fmt: skip
         return EstimateContext(
             est=est, assignment_hash=hash_assignment(assignment), edit_warnings=warnings

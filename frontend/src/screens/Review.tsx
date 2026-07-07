@@ -17,11 +17,11 @@ import {
   useUndoEdit,
   useVoices,
 } from "../api/hooks";
-import type { EmotionVerdict, SuggestCastResponse } from "../api/types";
+import type { EmotionLabel, EmotionVerdict, SuggestCastResponse } from "../api/types";
 import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
-import { buildEmotionMap, emotionKey, intensityDots } from "../lib/emotion";
+import { buildEmotionMap, EMOTION_LABELS, emotionKey, intensityDots } from "../lib/emotion";
 
 /* -------------------------------------------------- frontier (localStorage, per book) */
 
@@ -121,10 +121,11 @@ function SuggestCastPanel({
 }: {
   preview: SuggestCastResponse;
   applying: boolean;
-  onApply: (recast: boolean) => void;
+  onApply: (opts: { recast: boolean; useLlm: boolean }) => void;
   onDismiss: () => void;
 }) {
   const [recast, setRecast] = useState(false);
+  const [useLlm, setUseLlm] = useState(false);
   const create = preview.would_create_voice_ids.length;
   const existing = preview.would_recast_voice_ids.length;
   const noop = create === 0 && !recast; // every character already cast, recast off
@@ -141,6 +142,14 @@ function SuggestCastPanel({
           re-cast the {existing} existing (re-renders their audio)
         </label>
       )}
+      <label
+        className="mono"
+        style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}
+        title="ask the LLM for per-character voice-trait hints. Voices stay distinct — the hint only nudges which one each character gets."
+      >
+        <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
+        ✨ use AI trait hints
+      </label>
       <span style={{ flex: 1 }} />
       <button className="key quiet" style={{ padding: "3px 9px" }} onClick={onDismiss}>
         dismiss
@@ -150,7 +159,7 @@ function SuggestCastPanel({
         style={{ padding: "3px 12px" }}
         disabled={applying || noop}
         title={noop ? "every character is already cast — enable re-cast to overwrite" : undefined}
-        onClick={() => onApply(recast)}
+        onClick={() => onApply({ recast, useLlm })}
       >
         {applying ? "applying…" : noop ? "nothing to apply" : "apply cast"}
       </button>
@@ -302,6 +311,67 @@ function ReassignPopover({
   );
 }
 
+/* -------------------------------------------------- emotion editor popover */
+
+/** F2a: set or clear ONE segment's emotion as a durable edit overlay (same affordance as the
+    reassign popover). Choosing a label + intensity records a verdict; "clear" records null. */
+function EmotionPopover({
+  row,
+  current,
+  bookId,
+  onClose,
+}: {
+  row: SegmentRow;
+  current: EmotionVerdict | null;
+  bookId: string;
+  onClose: () => void;
+}) {
+  const record = useRecordEdit(bookId);
+  const settable = EMOTION_LABELS.filter((l) => l !== "neutral"); // neutral == no override == clear
+  const [label, setLabel] = useState<EmotionLabel>(
+    current && current.label !== "neutral" ? current.label : settable[0],
+  );
+  const [intensity, setIntensity] = useState(current?.intensity ?? 2);
+  const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
+  const save = (emotion: EmotionVerdict | null) =>
+    record.mutate(
+      { op: "set_emotion", block_id: row.block_id, segment_index: row.segment_index, emotion },
+      { onSuccess: onClose },
+    );
+  return (
+    <span className="popover" onClick={(e) => e.stopPropagation()}>
+      <span className="tag">emotion · {row.block_id} [{row.segment_index}]</span>
+      <span className="row" style={{ display: "flex", gap: 6 }}>
+        <select value={label} onChange={(e) => setLabel(e.target.value as EmotionLabel)}>
+          {settable.map((l) => (
+            <option key={l} value={l}>{l}</option>
+          ))}
+        </select>
+        <select value={intensity} onChange={(e) => setIntensity(Number(e.target.value))}>
+          {[1, 2, 3].map((n) => (
+            <option key={n} value={n}>intensity {n}</option>
+          ))}
+        </select>
+      </span>
+      <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)" }}>
+        voiced at render only when emotion rendering is on
+      </span>
+      {error && <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--clip)", marginTop: 6 }}>{error}</span>}
+      <span className="acts">
+        {current && (
+          <button className="key quiet" disabled={record.isPending} onClick={() => save(null)}>
+            clear
+          </button>
+        )}
+        <button className="key quiet" onClick={onClose}>cancel</button>
+        <button className="key" disabled={record.isPending} onClick={() => save({ label, intensity })}>
+          {record.isPending ? "recording…" : "set emotion"}
+        </button>
+      </span>
+    </span>
+  );
+}
+
 /* -------------------------------------------------- the screen */
 
 export function Review() {
@@ -316,8 +386,8 @@ export function Review() {
 
   const overview = useCharacters(bookId, attributed);
   const segments = useSegments(bookId, chapter, attributed);
-  // F2: the per-segment emotion tags the model captured (read-only here — override needs a
-  // backend edit op that doesn't exist yet). Keyed block_id:ordinal to line up with each row.
+  // F2/F2a: the per-segment emotion tags the model captured, now EDITABLE via the set_emotion
+  // edit overlay (EmotionPopover). Keyed block_id:ordinal to line up with each row.
   const attribution = useChapterAttribution(bookId, chapter, attributed);
   const emotionMap = useMemo(
     () => buildEmotionMap(attribution.data?.report.chapters.find((c) => c.index === chapter)),
@@ -348,6 +418,7 @@ export function Review() {
   const [selectedChar, setSelectedChar] = useState<string | null>(null);
   const [editingChar, setEditingChar] = useState<CharacterSummary | null>(null);
   const [popoverAt, setPopoverAt] = useState<string | null>(null); // `${block_id}:${idx}`
+  const [emoAt, setEmoAt] = useState<string | null>(null); // emotion editor, same key shape
 
   const pageRef = useRef<HTMLDivElement>(null);
 
@@ -552,9 +623,9 @@ export function Review() {
                 <SuggestCastPanel
                   preview={suggestCast.data}
                   applying={draftCast.isPending}
-                  onApply={(recast) =>
+                  onApply={({ recast, useLlm }) =>
                     draftCast.mutate(
-                      { strategy: "smart", recast },
+                      { strategy: "smart", recast, use_llm: useLlm },
                       { onSuccess: () => suggestCast.reset() },
                     )
                   }
@@ -686,18 +757,32 @@ export function Review() {
                     const key = `${s.block_id}:${s.segment_index}`;
                     const low = s.speaker !== null && s.confidence < threshold;
                     const dimmed = spoilerSafe && s.speaker !== null && cast.some((c) => c.id === s.speaker && isMasked(c));
+                    const emotion = emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null;
                     return (
                       <SegmentPair
                         key={key}
                         row={s}
                         low={low}
                         maskedName={dimmed}
-                        emotion={emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null}
+                        emotion={emotion}
                         open={popoverAt === key}
-                        onChip={() => setPopoverAt(popoverAt === key ? null : key)}
+                        onChip={() => {
+                          setEmoAt(null);
+                          setPopoverAt(popoverAt === key ? null : key);
+                        }}
                         popover={
                           popoverAt === key ? (
                             <ReassignPopover row={s} cast={cast} bookId={bookId} onClose={() => setPopoverAt(null)} />
+                          ) : null
+                        }
+                        emoOpen={emoAt === key}
+                        onEmotion={() => {
+                          setPopoverAt(null);
+                          setEmoAt(emoAt === key ? null : key);
+                        }}
+                        emotionPopover={
+                          emoAt === key ? (
+                            <EmotionPopover row={s} current={emotion} bookId={bookId} onClose={() => setEmoAt(null)} />
                           ) : null
                         }
                       />
@@ -729,6 +814,9 @@ function SegmentPair({
   open,
   onChip,
   popover,
+  emoOpen,
+  onEmotion,
+  emotionPopover,
 }: {
   row: SegmentRow;
   low: boolean;
@@ -737,31 +825,57 @@ function SegmentPair({
   open: boolean;
   onChip: () => void;
   popover: React.ReactNode;
+  emoOpen: boolean;
+  onEmotion: () => void;
+  emotionPopover: React.ReactNode;
 }) {
   const dialogueish = row.type !== "narration";
   const chipLabel = row.speaker === null ? "narration" : maskedName ? "▮▮▮▮▮" : (row.speaker_name ?? row.speaker);
   return (
     <>
       <p className={`seg serif ${dialogueish ? "dlg" : ""}`} data-seg={`${row.block_id}:${row.segment_index}`} style={{ position: "relative" }}>
-        {open ? <span className="hl">{row.text}</span> : row.text}
+        {open || emoOpen ? <span className="hl">{row.text}</span> : row.text}
         {popover}
       </p>
-      <div className="margin">
+      <div className="margin" style={{ position: "relative" }}>
         <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={onChip} role="button" tabIndex={0}>
           {row.speaker === null ? chipLabel : chipLabel.toUpperCase()}
         </span>
-        {emotion && (
+        {emotion ? (
           <span
-            className={`emochip ${emotion.label}`}
-            title={`emotion tag from attribution · intensity ${emotion.intensity}/3 — applied to the voice only when emotion rendering is enabled`}
+            className={`emochip ${emotion.label} ${emoOpen ? "on" : ""}`}
+            onClick={onEmotion}
+            role="button"
+            tabIndex={0}
+            title="click to change or clear this line's emotion — voiced at render only when emotion rendering is enabled"
           >
             {emotion.label} {intensityDots(emotion.intensity)}
           </span>
+        ) : (
+          dialogueish && (
+            <button
+              className="emoadd"
+              onClick={onEmotion}
+              title="tag this line with an emotion (voiced at render when emotion rendering is on)"
+              style={{
+                background: "none",
+                border: "1px dashed var(--hairline)",
+                color: "var(--ink-3)",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 10,
+                padding: "1px 6px",
+              }}
+            >
+              + emotion
+            </button>
+          )
         )}
         <span className={`conf ${low ? "low" : ""}`}>
           conf {row.confidence.toFixed(2)}
           {low && " · in review"}
         </span>
+        {emotionPopover}
       </div>
     </>
   );

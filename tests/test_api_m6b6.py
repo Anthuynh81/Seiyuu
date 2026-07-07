@@ -605,8 +605,9 @@ def test_route_surface_is_complete() -> None:
     # the scoping doc's 44 rows + GET cover (M6c-5b) + GET engine preview (mixer
     # demos) + PATCH voice tags (library organization) + DELETE book (F3) + GET
     # segment words (F2 forced alignment) + 3 pronunciation-lexicon routes + F4
-    # smart-cast suggest + 9 F5 series routes
-    assert len(paths) == 62
+    # smart-cast suggest + 9 F5 series routes + v1.1 F3 LLM respell suggester
+    assert ("/api/books/{book_id}/lexicon/suggest-respellings", "POST") in paths
+    assert len(paths) == 63
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
