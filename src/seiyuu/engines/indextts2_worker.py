@@ -16,7 +16,9 @@ Protocol (one JSON object per line, request -> reply):
 - ``{"cmd": "ping"}``       -> ``{"ok": true, "protocol": N}``
 - ``{"cmd": "load"}``       -> ``{"ok": true}`` (loads/keeps the model resident)
 - ``{"cmd": "synthesize", "text", "reference_wav", "out_path", "seed"?, "emo_vector"?,
-     "emo_alpha"?}`` -> ``{"ok": true, "sample_rate": 22050, "path": out_path}``
+     "emo_alpha"?, "gen"?}`` -> ``{"ok": true, "sample_rate": 22050, "path": out_path}``
+  (``gen`` = adapter-whitelisted infer() tunables, e.g. temperature/top_p; identity/output
+  args are protected and stripped — see ``_PROTECTED_INFER_KWARGS``.)
 - any failure -> ``{"ok": false, "error": str, "oom": bool, "traceback": str}``. On a CUDA OOM
   the worker frees what it can and flags ``oom`` so the adapter kills+restarts it (process
   death is the only reliable VRAM reclaim at the 8GB ceiling).
@@ -40,6 +42,16 @@ PROTOCOL_VERSION = 1
 # IndexTTS-2 is hardcoded to 22050 Hz (confirmed against infer_v2.py); the adapter's
 # to_canonical() resamples to the project's canonical 24 kHz.
 SAMPLE_RATE = 22050
+
+# infer() arguments the adapter's `gen` tunables may never override — the worker owns these
+# (identity/emotion/output/determinism). The adapter whitelists on its side; this is the
+# defensive second layer so a malformed message can't hijack the reference or seed discipline.
+_PROTECTED_INFER_KWARGS = frozenset(
+    {
+        "spk_audio_prompt", "text", "output_path", "emo_audio_prompt", "emo_alpha", "emo_vector",
+        "use_emo_text", "emo_text", "use_random", "verbose", "stream_return",
+    }
+)  # fmt: skip
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -85,6 +97,7 @@ class ModelHandle:
         seed: int | None,
         emo_vector: list[float] | None,
         emo_alpha: float | None,
+        gen: dict[str, Any] | None = None,
     ) -> int:
         from contextlib import redirect_stdout
 
@@ -99,6 +112,8 @@ class ModelHandle:
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed_all(int(seed))
             kwargs: dict[str, Any] = {}
+            if gen:  # adapter-whitelisted tunables; never the worker-owned identity args
+                kwargs.update({k: v for k, v in gen.items() if k not in _PROTECTED_INFER_KWARGS})
             if emo_vector is not None:
                 kwargs["emo_vector"] = [float(x) for x in emo_vector]
             if emo_alpha is not None:
@@ -145,6 +160,7 @@ def handle(msg: dict[str, Any], model: ModelHandle) -> dict[str, Any]:
             seed=msg.get("seed"),
             emo_vector=msg.get("emo_vector"),
             emo_alpha=msg.get("emo_alpha"),
+            gen=msg.get("gen"),
         )
         return {"ok": True, "sample_rate": sample_rate, "path": msg["out_path"]}
     return {"ok": False, "error": f"unknown cmd {cmd!r}", "oom": False}

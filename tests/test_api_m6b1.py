@@ -137,13 +137,15 @@ def test_engines_catalog(client) -> None:
     assert by_id["chatterbox"]["requires_validation"] is True
     assert by_id["chatterbox"]["supports_cloning"] is True
 
-    # IndexTTS-2 (M7): local, autoregressive (validated), cloning, free. weights_cached is False
-    # here (no checkpoints dir configured in the test settings), never None.
+    # IndexTTS-2 (M7): local, autoregressive (validated), cloning, free. weights_cached is a
+    # best-effort probe of the GLOBAL settings/machine (like the HF-cache scan for kokoro/
+    # chatterbox), so its True/False depends on whether THIS machine configured checkpoints —
+    # assert only the local-engine invariant: knowable (not None, unlike cloud engines).
     assert by_id["indextts2"]["uses_gpu"] is True
     assert by_id["indextts2"]["requires_validation"] is True
     assert by_id["indextts2"]["supports_cloning"] is True
     assert by_id["indextts2"]["paid"] is False
-    assert by_id["indextts2"]["weights_cached"] is False
+    assert by_id["indextts2"]["weights_cached"] is not None
 
     assert by_id["elevenlabs"]["uses_gpu"] is False
     assert by_id["elevenlabs"]["paid"] is True

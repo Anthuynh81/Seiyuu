@@ -56,6 +56,21 @@ INDEXTTS2_SAMPLE_RATE = 22050
 _FINGERPRINT_CONTENT_SUFFIXES = {".yaml", ".yml", ".json", ".txt", ".cfg"}
 _FINGERPRINT_CONTENT_MAX_BYTES = 1 << 20  # 1 MiB — only hash content of small files
 
+# Per-segment/per-voice tunables forwarded to the worker's infer() (all ride the frozen
+# settings_hash, like Chatterbox's _GEN_KEYS). temperature/top_p/top_k/repetition_penalty flow
+# into the GPT sampling via infer()'s **generation_kwargs; max_text_tokens_per_segment and
+# interval_silence are named infer() params (in-infer chunking / inter-chunk silence ms).
+# Deliberately excluded: do_sample/num_beams (would break the seeded-sampling determinism recipe)
+# and max_mel_tokens (can silently truncate audio, which whisper validation would then flag).
+_GEN_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "repetition_penalty",
+    "max_text_tokens_per_segment",
+    "interval_silence",
+)
+
 
 class WorkerError(SynthesisError):
     """The worker died, hung, timed out, or replied with a failure (incl. OOM)."""
@@ -417,6 +432,9 @@ class IndexTTS2Engine(TTSEngine):
             "seed": settings.get("seed"),
             "emo_vector": settings.get("emo_vector"),  # None -> worker's neutral path
             "emo_alpha": settings.get("emo_alpha"),
+            # whitelisted per-voice tunables (meta.settings["indextts2"]) -> infer() kwargs;
+            # None when a voice sets none, so the default message is byte-identical to before
+            "gen": {k: settings[k] for k in _GEN_KEYS if k in settings} or None,
         }
         # Up to max_restarts extra attempts: a worker OOM/death/timeout kills+restarts the
         # worker (fresh process == clean VRAM) and retries before failing loudly.
