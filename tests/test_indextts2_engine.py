@@ -219,7 +219,9 @@ def test_neutral_settings_send_none_emotion(tmp_path):
     eng.synthesize("Calm.", "hero_1a2b", {"seed": 1})
     synth = next(r for r in transports[0].requests if r["cmd"] == "synthesize")
     assert synth["emo_vector"] is None and synth["emo_alpha"] is None
-    assert synth["gen"] is None  # no tunables set -> no gen payload
+    # no tunables -> the gen key is OMITTED: the default wire message is byte-identical
+    # to the pre-tunables shape
+    assert "gen" not in synth
 
 
 def test_load_is_sent_once_per_worker(tmp_path):

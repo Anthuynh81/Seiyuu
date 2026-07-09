@@ -432,10 +432,13 @@ class IndexTTS2Engine(TTSEngine):
             "seed": settings.get("seed"),
             "emo_vector": settings.get("emo_vector"),  # None -> worker's neutral path
             "emo_alpha": settings.get("emo_alpha"),
-            # whitelisted per-voice tunables (meta.settings["indextts2"]) -> infer() kwargs;
-            # None when a voice sets none, so the default message is byte-identical to before
-            "gen": {k: settings[k] for k in _GEN_KEYS if k in settings} or None,
         }
+        # Whitelisted per-voice tunables (meta.settings["indextts2"]) -> infer() kwargs. The key
+        # is OMITTED when a voice sets none, so the default wire message really is byte-identical
+        # to the pre-tunables shape (the worker reads msg.get("gen") either way).
+        gen = {k: settings[k] for k in _GEN_KEYS if k in settings}
+        if gen:
+            message["gen"] = gen
         # Up to max_restarts extra attempts: a worker OOM/death/timeout kills+restarts the
         # worker (fresh process == clean VRAM) and retries before failing loudly.
         last_error: WorkerError | None = None

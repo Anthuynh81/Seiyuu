@@ -53,6 +53,12 @@ _PROTECTED_INFER_KWARGS = frozenset(
     }
 )  # fmt: skip
 
+# Tunables the SDK requires as ints: transformers' TopKLogitsWarper raises on top_k=50.0 and the
+# tokenizer's over-limit split does range(0, n, max_text_tokens_per_segment). The per-voice
+# storage path (VoiceMeta.settings: dict[str, dict[str, float]]) coerces every number to float,
+# so the worker re-coerces at the SDK boundary — the only place that knows infer()'s types.
+_INT_GEN_KEYS = frozenset({"top_k", "max_text_tokens_per_segment", "interval_silence"})
+
 
 def _is_oom(exc: BaseException) -> bool:
     """True for a CUDA out-of-memory error, however torch spells it across versions."""
@@ -113,7 +119,10 @@ class ModelHandle:
                     torch.cuda.manual_seed_all(int(seed))
             kwargs: dict[str, Any] = {}
             if gen:  # adapter-whitelisted tunables; never the worker-owned identity args
-                kwargs.update({k: v for k, v in gen.items() if k not in _PROTECTED_INFER_KWARGS})
+                for k, v in gen.items():
+                    if k in _PROTECTED_INFER_KWARGS:
+                        continue
+                    kwargs[k] = int(v) if k in _INT_GEN_KEYS else v
             if emo_vector is not None:
                 kwargs["emo_vector"] = [float(x) for x in emo_vector]
             if emo_alpha is not None:

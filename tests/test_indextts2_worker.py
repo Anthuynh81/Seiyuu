@@ -79,7 +79,7 @@ def test_synthesize_neutral_passes_none_emotion():
     )
     call = model.calls[0]
     assert call["emo_vector"] is None and call["emo_alpha"] is None and call["seed"] is None
-    assert call["gen"] is None  # no tunables -> the pre-gen message shape, byte-identical
+    assert call["gen"] is None  # the adapter omits the gen key entirely; msg.get -> None here
 
 
 def test_synthesize_forwards_gen_tunables():
@@ -124,6 +124,44 @@ def test_protected_infer_kwargs_are_stripped_from_gen():
     assert kw["temperature"] == 0.9  # tunable passed through
     assert kw["spk_audio_prompt"] == "real.wav"  # identity NOT hijacked by gen
     assert kw["use_random"] is False  # determinism recipe NOT hijacked by gen
+
+
+def test_int_gen_tunables_are_recoerced_from_float():
+    """VoiceMeta.settings is dict[str, dict[str, float]] — pydantic coerces top_k=50 to 50.0,
+    but transformers' TopKLogitsWarper (and the tokenizer's range-based split) require strict
+    ints. The worker must re-coerce at the SDK boundary or these tunables ALWAYS crash infer()
+    when set through the only supported per-voice path."""
+
+    class _SpyTTS:
+        def __init__(self):
+            self.infer_kwargs = None
+
+        def infer(self, **kwargs):
+            self.infer_kwargs = kwargs
+
+    handle = w.ModelHandle("ckpt", use_fp16=True)
+    handle._tts = spy = _SpyTTS()
+    handle.synthesize(
+        text="Hi.",
+        reference_wav="r.wav",
+        out_path="o.wav",
+        seed=None,
+        emo_vector=None,
+        emo_alpha=None,
+        # exactly what a saved VoiceMeta delivers: every number float-coerced
+        gen={
+            "top_k": 50.0,
+            "max_text_tokens_per_segment": 80.0,
+            "interval_silence": 120.0,
+            "temperature": 0.9,
+        },
+    )
+    kw = spy.infer_kwargs
+    max_tokens = kw["max_text_tokens_per_segment"]
+    assert kw["top_k"] == 50 and type(kw["top_k"]) is int
+    assert max_tokens == 80 and type(max_tokens) is int
+    assert kw["interval_silence"] == 120 and type(kw["interval_silence"]) is int
+    assert kw["temperature"] == 0.9 and type(kw["temperature"]) is float  # floats stay floats
 
 
 def test_unknown_cmd_is_a_structured_error():

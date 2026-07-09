@@ -117,6 +117,11 @@ def main() -> None:
 
     engine = get_engine("indextts2", voices_dir=voices_dir)
     try:
+        # Boot the worker + load the model OUTSIDE the per-clip timers, or clip [1/N] would
+        # report the multi-GB load as ~100x RTF and make a healthy run look broken.
+        load_start = time.monotonic()
+        engine.warm()
+        print(f"worker booted + model loaded in {time.monotonic() - load_start:.0f}s")
         for i, (name, text, override) in enumerate(jobs, start=1):
             start = time.monotonic()
             audio = engine.synthesize(text, "audition", {"seed": args.seed, **override})
