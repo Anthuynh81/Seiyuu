@@ -343,6 +343,10 @@ details.fine summary:hover { color: var(--tungsten); }
   color: var(--paper-ink-2);
   cursor: default;
 }
+/* the "+ emotion" affordance and the clickable emochip share the pill exception */
+.emoadd { border: 1px dashed var(--paper-ink-2); color: var(--paper-ink-2); border-radius: 8px; font-size: 10px; padding: 1px 6px; opacity: 0.7; }
+.emoadd:hover { opacity: 1; border-style: solid; }
+.emochip:hover, .emochip.on { border-color: var(--paper-ink); color: var(--paper-ink); cursor: pointer; }
 .mwarn { background: rgba(240, 210, 100, 0.28); border: 1px solid #b99b33; color: #5c4a00; font-family: var(--mono); font-size: 10.5px; padding: 6px 8px; }
 .popover { position: absolute; left: 0; top: 100%; z-index: 5; background: var(--raised); border: 1px solid var(--hairline-strong); color: var(--ink); font-family: var(--sans); font-size: 12.5px; text-indent: 0; width: 300px; padding: 12px 14px; font-style: normal; }
 .popover .tag { display: block; margin-bottom: 8px; }
@@ -468,6 +472,7 @@ details.fine summary:hover { color: var(--tungsten); }
 .tsel .tsel-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tsel .tsel-caret { color: var(--ink-3); font-size: 10px; margin-left: auto; }
 .tsel.bookpick { background: var(--console); font-size: 13px; min-width: 220px; }
+.tsel.vpick { width: 100%; max-width: 150px; background: var(--booth-0); font-family: var(--mono); font-size: 10.5px; padding: 3px 6px; }
 .tsel-pop { background: var(--raised); border: 1px solid var(--hairline-strong); min-width: var(--trigger-width); max-height: 320px; overflow-y: auto; z-index: 60; }
 .tsel-item { padding: 6px 12px; color: var(--ink-2); font-size: 12.5px; cursor: default; outline: none; }
 .tsel-item[data-hovered], .tsel-item[data-focused] { background: var(--console-hi); color: var(--ink); }
