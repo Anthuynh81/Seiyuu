@@ -35,10 +35,15 @@ def _require_configured():
 
 
 def _reference(tmp_path: Path) -> Path:
+    # explicit env var wins (one-off runs), then the configured clip (settings/.env), then a
+    # synthetic tone (proves plumbing, not voice quality)
     env = os.environ.get("INDEXTTS2_TEST_REFERENCE")
     if env and Path(env).is_file():
         return Path(env)
-    ref = tmp_path / "ref.wav"  # fallback: a short 22.05 kHz tone (proves plumbing, not quality)
+    configured = get_settings().indextts2_test_reference
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    ref = tmp_path / "ref.wav"
     t = np.linspace(0, 3.0, int(3.0 * 22050), endpoint=False)
     sf.write(ref, (0.3 * np.sin(2 * np.pi * 140 * t)).astype(np.float32), 22050, subtype="PCM_16")
     return ref

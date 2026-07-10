@@ -353,6 +353,25 @@ def test_map_emotion_indextts2_intensity_scales_alpha_not_direction():
     assert low["emo_vector"] == mid["emo_vector"] == high["emo_vector"]
 
 
+def test_map_emotion_indextts2_audition_tuned_values():
+    """Pins the 2026-07-10 audition verdicts (output/emotion_audition): angry = full-strength
+    vector with alpha capped at 0.8 (the w1.0×a0.8 sweep cell won); sad/tense ladders top at
+    0.8 (alpha 1.0 overacted); happy/fearful/tender keep the initial values, so their overrides
+    stay byte-identical (cache-stable) across the tuning change."""
+    angry_hi = map_emotion("indextts2", EmotionVerdict(label=EmotionLabel.ANGRY, intensity=3))
+    assert angry_hi["emo_vector"][1] == 1.0 and angry_hi["emo_alpha"] == 0.8
+
+    for label in (EmotionLabel.SAD, EmotionLabel.TENSE):
+        hi = map_emotion("indextts2", EmotionVerdict(label=label, intensity=3))
+        assert hi["emo_alpha"] == 0.8, f"{label} ladder must top at the approved i2 sound"
+
+    for label in (EmotionLabel.HAPPY, EmotionLabel.FEARFUL, EmotionLabel.TENDER):
+        hi = map_emotion("indextts2", EmotionVerdict(label=label, intensity=3))
+        lo = map_emotion("indextts2", EmotionVerdict(label=label, intensity=1))
+        assert hi["emo_alpha"] == 1.0 and lo["emo_alpha"] == 0.6  # unchanged initial ladder
+        assert max(hi["emo_vector"]) == 0.8
+
+
 def test_map_emotion_indextts2_is_pure_and_rounded():
     v = EmotionVerdict(label=EmotionLabel.SAD, intensity=3)
     out = map_emotion("indextts2", v)

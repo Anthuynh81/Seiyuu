@@ -22,7 +22,7 @@ class _FakeModel:
     def load(self):
         self.loaded = True
 
-    def synthesize(self, *, text, reference_wav, out_path, seed, emo_vector, emo_alpha):
+    def synthesize(self, *, text, reference_wav, out_path, seed, emo_vector, emo_alpha, gen=None):
         self.calls.append(
             {
                 "text": text,
@@ -31,6 +31,7 @@ class _FakeModel:
                 "seed": seed,
                 "emo_vector": emo_vector,
                 "emo_alpha": emo_alpha,
+                "gen": gen,
             }
         )
         if self._oom:
@@ -78,6 +79,89 @@ def test_synthesize_neutral_passes_none_emotion():
     )
     call = model.calls[0]
     assert call["emo_vector"] is None and call["emo_alpha"] is None and call["seed"] is None
+    assert call["gen"] is None  # the adapter omits the gen key entirely; msg.get -> None here
+
+
+def test_synthesize_forwards_gen_tunables():
+    model = _FakeModel()
+    w.handle(
+        {
+            "cmd": "synthesize",
+            "text": "Hi.",
+            "reference_wav": "r",
+            "out_path": "o",
+            "gen": {"temperature": 0.9, "top_p": 0.85},
+        },
+        model,
+    )
+    assert model.calls[0]["gen"] == {"temperature": 0.9, "top_p": 0.85}
+
+
+def test_protected_infer_kwargs_are_stripped_from_gen():
+    """A gen dict may never override the worker-owned identity/output/determinism args.
+    Drives the REAL ModelHandle.synthesize with a stubbed _tts (load() short-circuits, so the
+    SDK never imports; torch exists in this venv) and asserts what reaches infer()."""
+
+    class _SpyTTS:
+        def __init__(self):
+            self.infer_kwargs = None
+
+        def infer(self, **kwargs):
+            self.infer_kwargs = kwargs
+
+    handle = w.ModelHandle("ckpt", use_fp16=True)
+    handle._tts = spy = _SpyTTS()
+    handle.synthesize(
+        text="Hi.",
+        reference_wav="real.wav",
+        out_path="out.wav",
+        seed=7,
+        emo_vector=None,
+        emo_alpha=None,
+        gen={"temperature": 0.9, "spk_audio_prompt": "evil.wav", "use_random": True},
+    )
+    kw = spy.infer_kwargs
+    assert kw["temperature"] == 0.9  # tunable passed through
+    assert kw["spk_audio_prompt"] == "real.wav"  # identity NOT hijacked by gen
+    assert kw["use_random"] is False  # determinism recipe NOT hijacked by gen
+
+
+def test_int_gen_tunables_are_recoerced_from_float():
+    """VoiceMeta.settings is dict[str, dict[str, float]] — pydantic coerces top_k=50 to 50.0,
+    but transformers' TopKLogitsWarper (and the tokenizer's range-based split) require strict
+    ints. The worker must re-coerce at the SDK boundary or these tunables ALWAYS crash infer()
+    when set through the only supported per-voice path."""
+
+    class _SpyTTS:
+        def __init__(self):
+            self.infer_kwargs = None
+
+        def infer(self, **kwargs):
+            self.infer_kwargs = kwargs
+
+    handle = w.ModelHandle("ckpt", use_fp16=True)
+    handle._tts = spy = _SpyTTS()
+    handle.synthesize(
+        text="Hi.",
+        reference_wav="r.wav",
+        out_path="o.wav",
+        seed=None,
+        emo_vector=None,
+        emo_alpha=None,
+        # exactly what a saved VoiceMeta delivers: every number float-coerced
+        gen={
+            "top_k": 50.0,
+            "max_text_tokens_per_segment": 80.0,
+            "interval_silence": 120.0,
+            "temperature": 0.9,
+        },
+    )
+    kw = spy.infer_kwargs
+    max_tokens = kw["max_text_tokens_per_segment"]
+    assert kw["top_k"] == 50 and type(kw["top_k"]) is int
+    assert max_tokens == 80 and type(max_tokens) is int
+    assert kw["interval_silence"] == 120 and type(kw["interval_silence"]) is int
+    assert kw["temperature"] == 0.9 and type(kw["temperature"]) is float  # floats stay floats
 
 
 def test_unknown_cmd_is_a_structured_error():

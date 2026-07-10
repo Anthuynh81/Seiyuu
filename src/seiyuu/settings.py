@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     # OOM-safe: on a CUDA OOM (or dead/hung worker) kill + restart the worker and retry this many
     # times. Peak sits at the 8GB edge, so a long block can tip over; a fresh process == clean VRAM.
     indextts2_worker_max_restarts: int = 1
+    # A real speech clip for the gated GPU smoke test (and the emotion audition script). Optional:
+    # unset falls back to a synthetic tone, which proves plumbing but not voice quality.
+    indextts2_test_reference: Path | None = None
 
     # Per-segment emotion (F2). Opt-in, default OFF: when off, render/estimate IGNORE the
     # attribution's segment_emotions and settings stay byte-identical to a no-emotion render

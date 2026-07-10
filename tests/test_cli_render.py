@@ -69,11 +69,19 @@ def test_render_command_unknown_book(tmp_path) -> None:
     assert "seiyuu ingest" in result.output
 
 
-def test_estimate_cost_indextts2_missing_checkpoints_is_clean_error(ingested_book) -> None:
+def test_estimate_cost_indextts2_missing_checkpoints_is_clean_error(
+    ingested_book, monkeypatch
+) -> None:
     """indextts2 is the only engine whose model_version can raise (SynthesisError when
     checkpoints aren't configured). The single-voice estimate path must surface that as a clean
-    click error, not an uncaught traceback (real engine, not mocked; no checkpoints in defaults)."""
+    click error, not an uncaught traceback (real engine, not mocked). The settings fallback is
+    pinned to pure defaults (no .env) so a developer machine with real checkpoints configured
+    still exercises the unconfigured path."""
     from seiyuu.engines.base import SynthesisError
+    from seiyuu.settings import Settings
+
+    defaults = Settings(_env_file=None)  # ignore this machine's .env: indextts2_* stay None
+    monkeypatch.setattr("seiyuu.settings.get_settings", lambda: defaults)
 
     books_dir, output_dir, book_id = ingested_book
     result = CliRunner().invoke(

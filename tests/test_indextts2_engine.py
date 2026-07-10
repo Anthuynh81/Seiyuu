@@ -196,6 +196,22 @@ def test_seed_and_emotion_are_forwarded_to_the_worker(tmp_path):
     assert synth["out_path"].endswith(".wav")
 
 
+def test_gen_tunables_are_whitelisted_into_the_message(tmp_path):
+    """Per-voice tunables (meta.settings["indextts2"]) reach the worker via the gen dict —
+    but ONLY whitelisted keys; seed/emo ride their own fields and junk keys never leak."""
+    _voice(tmp_path)
+    transports: list[FakeTransport] = []
+    eng = _engine(tmp_path, lambda: transports.append(t := FakeTransport(_happy_behavior)) or t)
+    eng.synthesize(
+        "Hi.",
+        "hero_1a2b",
+        {"seed": 1, "temperature": 0.9, "interval_silence": 120, "exaggeration": 0.7},
+    )
+    synth = next(r for r in transports[0].requests if r["cmd"] == "synthesize")
+    assert synth["gen"] == {"temperature": 0.9, "interval_silence": 120}  # exaggeration: not ours
+    assert synth["seed"] == 1  # seed stays a top-level field, not a gen tunable
+
+
 def test_neutral_settings_send_none_emotion(tmp_path):
     _voice(tmp_path)
     transports: list[FakeTransport] = []
@@ -203,6 +219,9 @@ def test_neutral_settings_send_none_emotion(tmp_path):
     eng.synthesize("Calm.", "hero_1a2b", {"seed": 1})
     synth = next(r for r in transports[0].requests if r["cmd"] == "synthesize")
     assert synth["emo_vector"] is None and synth["emo_alpha"] is None
+    # no tunables -> the gen key is OMITTED: the default wire message is byte-identical
+    # to the pre-tunables shape
+    assert "gen" not in synth
 
 
 def test_load_is_sent_once_per_worker(tmp_path):
