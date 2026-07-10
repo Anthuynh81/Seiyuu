@@ -262,7 +262,7 @@ export function Listen() {
     <section className="screen">
       <div className="readerhead">
         <button className="key quiet" onClick={() => setParams({})}>‹ shelf</button>
-        <h1 style={{ margin: 0 }}>{book.data?.status.title ?? bookId}</h1>
+        <h1 className="m-0">{book.data?.status.title ?? bookId}</h1>
         <div className="tocwrap">
           <button className="key quiet" onClick={() => setTocOpen(!tocOpen)}>
             contents ▾
@@ -277,26 +277,26 @@ export function Listen() {
                   onClick={() => setChapter(c.index)}
                 >
                   <i className={`led ${renderedChapters.has(c.index) ? "ok" : "off"}`} />
-                  <span className="mono" style={{ width: 34 }}>{c.index}</span>
+                  <span className="mono w-[34px]">{c.index}</span>
                   <span className="toctitle">{c.title}</span>
                 </button>
               ))}
             </div>
           )}
         </div>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         <span className="tag">page</span>
         {(["paper", "sepia", "dark"] as const).map((t) => (
           <button key={t} className={`swatch sw-${t} ${prefs.theme === t ? "on" : ""}`} title={t} onClick={() => setPrefs({ theme: t })} />
         ))}
-        <span className="tag" style={{ marginLeft: 10 }}>text</span>
+        <span className="tag ml-2.5">text</span>
         {(["s", "m", "l"] as const).map((s) => (
-          <button key={s} className={`chap ${prefs.size === s ? "on" : ""}`} style={{ padding: "2px 8px" }} onClick={() => setPrefs({ size: s })}>
+          <button key={s} className={`chap px-2 py-[2px] ${prefs.size === s ? "on" : ""}`} onClick={() => setPrefs({ size: s })}>
             {s === "s" ? "A" : s === "m" ? "A+" : "A++"}
           </button>
         ))}
       </div>
-      <p className="sub" style={{ marginTop: 6 }}>
+      <p className="sub mt-1.5">
         {chapterTitles.get(effectiveChapter) ?? `Chapter ${effectiveChapter}`} — click any word to play from there; the
         transport below seeks, pauses, and holds the volume.
       </p>
@@ -310,7 +310,7 @@ export function Listen() {
               : "single voice"}
           </span>
           {summary.data.mode === "single" && book.data?.status.assigned && (
-            <span className="mono" style={{ color: "var(--caution)", fontSize: 11 }}>
+            <span className="mono text-[11px] text-caution">
               this audio predates your casting — re-render in multivoice to hear it
             </span>
           )}
@@ -323,17 +323,16 @@ export function Listen() {
       )}
       <div className={`page-wrap rt-${prefs.theme} sz-${prefs.size}`} ref={pageRef}>
         {segments.data && (
-          <div className="paper page" style={{ gridTemplateColumns: "minmax(auto,66ch) 150px" }}>
+          <div className="paper page grid-cols-[minmax(auto,66ch)_150px]">
             {segments.data.segments.map((row) => {
               const seek = rowSeek.current.get(`${row.block_id}:${row.segment_index}`);
               const playable = row.has_audio && row.duration_seconds !== null;
               return (
-                <div key={`${row.block_id}:${row.segment_index}`} style={{ display: "contents" }}>
+                <div key={`${row.block_id}:${row.segment_index}`} className="contents">
                   <p
-                    className={`seg serif ${row.type !== "narration" ? "dlg" : ""}`}
+                    className={`seg serif ${row.type !== "narration" ? "dlg" : ""} ${playable ? "cursor-pointer" : "cursor-default opacity-50"}`}
                     data-seg={`${row.block_id}:${row.segment_index}`}
                     onClick={() => playable && seek && player?.seekClip(seek.clip, seek.offset)}
-                    style={{ cursor: playable ? "pointer" : "default", opacity: playable ? 1 : 0.5 }}
                   >
                     <span className="segtext">{row.text}</span>
                   </p>
