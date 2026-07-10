@@ -179,8 +179,9 @@
 .key[disabled] { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
 .key.quiet { border-color: var(--hairline); color: var(--ink-2); }
 .key.quiet:hover { background: var(--console-hi); color: var(--ink); }
-a.link { color: var(--tungsten); text-decoration: none; }
-a.link:hover { text-decoration: underline; }
+.link { color: var(--tungsten); text-decoration: none; background: none; border: none; cursor: pointer; padding: 0; font: inherit; }
+.link:hover { text-decoration: underline; }
+.link[disabled] { color: var(--ink-3); cursor: default; text-decoration: none; }
 
 /* LED grammar: shape + mono label always; hollow=queued, pulse=active, solid=terminal */
 .led { display: inline-block; width: 7px; height: 7px; vertical-align: 1px; flex: none; }

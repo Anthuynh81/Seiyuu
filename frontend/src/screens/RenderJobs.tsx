@@ -22,6 +22,9 @@ import type {
   RenderMode,
   ValidationRow,
 } from "../api/types";
+import { TalkDialog } from "../components/Dialog";
+import { TalkSelect } from "../components/Select";
+import { Tip } from "../components/Tooltip";
 import { classifyRenderFailure } from "../lib/money";
 import { continueRange, scopeChapters, type Scope } from "../lib/scope";
 
@@ -105,9 +108,9 @@ function QuoteTicket({
         <div className="line"><span>chapters</span><span>{quote.chapters.length ? quote.chapters.join(", ") : "all"}</span></div>
         <div className="line"><span>paid segments</span><span>{quote.paid_segments}</span></div>
         <div className="line"><span>ceiling</span><span>${quote.max_usd_ceiling.toFixed(2)} ok</span></div>
-        {dead && <div className="line" style={{ color: "var(--clip)" }}><span>refusal</span><span>{state.message}</span></div>}
+        {dead && <div className="line text-clip"><span>refusal</span><span>{state.message}</span></div>}
         <div className="total">
-          <span className="tag" style={{ color: "var(--paper-ink-2)" }}>
+          <span className="tag text-paper-ink-2">
             {dead ? "token intact — mint a fresh quote" : "step 3 — the render never bills past this"}
           </span>
           <b>${quote.total_usd.toFixed(2)}</b>
@@ -183,14 +186,11 @@ function ScopeRow({
             />
           </label>
           {cont && (
-            <button
-              className="key quiet"
-              style={{ padding: "3px 9px" }}
-              title="the next ten chapters without rendered audio"
-              onClick={() => setScope(cont)}
-            >
-              continue · next 10 from ch {cont.from}
-            </button>
+            <Tip content="the next ten chapters without rendered audio">
+              <button className="key quiet px-[9px] py-[3px]" onClick={() => setScope(cont)}>
+                continue · next 10 from ch {cont.from}
+              </button>
+            </Tip>
           )}
         </>
       )}
@@ -228,10 +228,10 @@ function EstimateCard({
       ? "Everything is already cached — re-rendering is instant and free."
       : "This render is entirely free: local voices only.";
   return (
-    <div className="panel est" style={{ marginBottom: 0 }}>
+    <div className="panel est mb-0">
       <div className="panel-h">
         <b>Step 1 — Estimate</b>
-        <span className="tag" style={{ marginLeft: "auto" }}>{mode} · {est.chapters.length ? `ch ${est.chapters.join(",")}` : "whole book"}</span>
+        <span className="tag ml-auto">{mode} · {est.chapters.length ? `ch ${est.chapters.join(",")}` : "whole book"}</span>
       </div>
       <div className="humanline">{human}</div>
       <div className="estbar">
@@ -257,7 +257,7 @@ function EstimateCard({
           <button className="key" onClick={onFreeRender}>render {mode} — free, nothing to approve</button>
         )}
       </div>
-      {error && <div className="errline" style={{ margin: "0 14px 12px" }}>{error}</div>}
+      {error && <div className="errline mx-3.5 mb-3">{error}</div>}
     </div>
   );
 }
@@ -280,9 +280,7 @@ function JobRow({ job }: { job: JobOut }) {
         <span className="what">
           {job.kind}
           {typeof job.params?.mode === "string" && (
-            <span className="mono" style={{ color: "var(--ink-3)", fontSize: 10.5, marginLeft: 6 }}>
-              {job.params.mode}
-            </span>
+            <span className="mono ml-1.5 text-[10.5px] text-ink-3">{job.params.mode}</span>
           )}
           {detail && <span className="more">why? ▸</span>}
         </span>
@@ -290,7 +288,7 @@ function JobRow({ job }: { job: JobOut }) {
         <span className="when">{new Date(job.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
       {job.state === "running" && job.progress_text && (
-        <div className="mono" style={{ fontSize: 11, color: "var(--ink-2)", marginTop: 6 }}>{job.progress_text}</div>
+        <div className="mono mt-1.5 text-[11px] text-ink-2">{job.progress_text}</div>
       )}
       {detail && <div className="jdetail"><div className="errblock">{detail}</div></div>}
     </div>
@@ -305,16 +303,16 @@ function ValidationFailure({ bookId, row }: { bookId: string; row: ValidationRow
       <div className="vhead">
         <i className="led warn" />
         ch{row.chapter_index} · {row.block_id}[{row.segment_index}] · score {row.score.toFixed(2)}
-        {row.voice_id && <span style={{ color: "var(--ink-3)" }}>· {row.voice_id}</span>}
-        <button className="key quiet" style={{ marginLeft: "auto", padding: "2px 8px" }} onClick={() => setPlaying(!playing)}>
+        {row.voice_id && <span className="text-ink-3">· {row.voice_id}</span>}
+        <button className="key quiet ml-auto px-2 py-[2px]" onClick={() => setPlaying(!playing)}>
           {playing ? "hide player" : "▶ play segment"}
         </button>
       </div>
       <div className="vdiff">
-        <div className="paper exp"><span className="cap" style={{ color: "var(--paper-ink-2)" }}>expected (book)</span>{row.expected}</div>
-        <div className="got"><span className="cap" style={{ color: "var(--ink-3)" }}>whisper heard</span>{row.transcript}</div>
+        <div className="paper exp"><span className="cap text-paper-ink-2">expected (book)</span>{row.expected}</div>
+        <div className="got"><span className="cap text-ink-3">whisper heard</span>{row.transcript}</div>
       </div>
-      {playing && <audio controls autoPlay src={src} style={{ width: "100%", marginTop: 8, height: 32 }} />}
+      {playing && <audio controls autoPlay src={src} className="mt-2 h-8 w-full" />}
     </div>
   );
 }
@@ -332,22 +330,22 @@ function ConfirmFullDialog({
 }) {
   const hours = detail.runtime_estimate_seconds / 3600;
   return (
-    <div className="overlay on">
-      <div className="dialog">
-        <div className="dh"><b>Full-book render</b><button className="key quiet" onClick={onCancel}>esc</button></div>
-        <div className="db">
-          <p style={{ margin: 0, color: "var(--ink-2)" }}>
-            This renders <b className="mono">{detail.speakable_blocks.toLocaleString()}</b> segments — roughly{" "}
-            <b className="mono">{hours.toFixed(1)} h</b> of audio to synthesize. A long GPU job; you can cancel it
-            anytime from the transport bar and re-runs resume from the cache.
-          </p>
-        </div>
-        <div className="df">
+    <TalkDialog
+      title="Full-book render"
+      onClose={onCancel}
+      footer={
+        <>
           <button className="key quiet" onClick={onCancel}>not now</button>
           <button className="key" onClick={onConfirm}>render the whole book</button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <p className="m-0 text-ink-2">
+        This renders <b className="mono">{detail.speakable_blocks.toLocaleString()}</b> segments — roughly{" "}
+        <b className="mono">{hours.toFixed(1)} h</b> of audio to synthesize. A long GPU job; you can cancel it
+        anytime from the transport bar and re-runs resume from the cache.
+      </p>
+    </TalkDialog>
   );
 }
 
@@ -479,18 +477,15 @@ export function RenderJobs() {
 
   return (
     <section className="screen">
-      <h1 style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
+      <h1 className="flex items-baseline gap-3.5">
         Render &amp; Jobs
-        <select
+        <TalkSelect
           className="bookpick"
+          ariaLabel="book"
           value={bookId}
-          onChange={(e) => setParams({ book: e.target.value })}
-          aria-label="book"
-        >
-          {books.data.books.map((b) => (
-            <option key={b.book_id} value={b.book_id}>{b.title ?? b.book_id}</option>
-          ))}
-        </select>
+          onChange={(v) => setParams({ book: v })}
+          options={books.data.books.map((b) => ({ value: b.book_id, label: b.title ?? b.book_id }))}
+        />
       </h1>
       <p className="sub">
         Turn the reviewed book into audio. Free renders start with one click; anything that costs money asks you to
@@ -511,7 +506,7 @@ export function RenderJobs() {
             </button>
           </div>
           {!ready && status && (
-            <div className="refusal" style={{ marginBottom: 16 }}>
+            <div className="refusal mb-4">
               <span className="tag">stage_prerequisite</span>
               <p>
                 {!status.ingested
@@ -521,15 +516,11 @@ export function RenderJobs() {
             </div>
           )}
           {status?.assigned && mode === "single" && (
-            <div className="refusal" style={{ marginBottom: 14 }}>
+            <div className="refusal mb-3.5">
               <span className="tag">casting ignored</span>
               <p>
                 this book HAS a casting, but single-voice renders everything with one voice —{" "}
-                <button
-                  className="link"
-                  style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
-                  onClick={() => setModeChoice("multivoice")}
-                >
+                <button className="link" onClick={() => setModeChoice("multivoice")}>
                   switch to multivoice
                 </button>
               </p>
@@ -542,8 +533,7 @@ export function RenderJobs() {
             <div className="scoperow">
               <span className="tag">emotion</span>
               <label
-                className="mono"
-                style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}
+                className="mono flex items-center gap-1.5 text-xs"
                 title="voice each dialogue line with the emotion attribution tagged it. Off keeps delivery flat and the render cache byte-identical to a no-emotion render."
               >
                 <input
@@ -565,72 +555,63 @@ export function RenderJobs() {
             book.data?.active_job?.kind === "attribute" ? (
               <div className="drainstrip">
                 <span className="state"><i className="led run" />attribution running</span>
-                <span className="mono" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
+                <span className="mono text-[11.5px] text-ink-2">
                   follow it in the transport bar — Character Review and the Listen read-along unlock when it lands
                 </span>
               </div>
             ) : (
-              <div className="refusal" style={{ marginBottom: 14 }}>
+              <div className="refusal mb-3.5">
                 <span className="tag">not attributed</span>
                 <p>
                   no speaker attribution yet — multivoice, Character Review, and the Listen read-along all need it
                   (a bare single-voice render doesn't).{" "}
-                  <button
-                    className="link"
-                    style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
-                    disabled={attribute.isPending}
-                    onClick={() => startAttribute()}
-                  >
+                  <button className="link" disabled={attribute.isPending} onClick={() => startAttribute()}>
                     {attribute.isPending
                       ? "starting…"
                       : `attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
                   </button>
                 </p>
-                <p className="mono" style={{ fontSize: 11, color: "var(--ink-2)", marginTop: 6 }}>
+                <p className="mono mt-1.5 text-[11px] text-ink-2">
                   reader: {effLlm ? `${effLlm.provider} · ${effLlm.model}` : "…"}
                   {effLlm?.provider === "local" && " (ollama must be running)"}{" "}
-                  <button
-                    className="link"
-                    style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
-                    onClick={() => setLlmOpen(!llmOpen)}
-                  >
+                  <button className="link" onClick={() => setLlmOpen(!llmOpen)}>
                     {llmOpen ? "done" : "change"}
                   </button>
                 </p>
                 {llmOpen && effLlm && attrDefaults && (
-                  <p style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                    <select
+                  <p className="mt-1.5 flex items-center gap-2">
+                    <TalkSelect
+                      ariaLabel="attribution provider"
                       value={effLlm.provider}
-                      onChange={(e) => {
-                        const p = e.target.value as "local" | "anthropic";
+                      onChange={(v) => {
+                        const p = v as "local" | "anthropic";
                         setLlm({ provider: p, model: p === "local" ? attrDefaults.model : attrDefaults.anthropic_model });
                       }}
-                    >
-                      <option value="local">local (ollama) — free</option>
-                      <option value="anthropic" disabled={!system.data?.keys.anthropic_configured}>
-                        anthropic — paid{system.data?.keys.anthropic_configured ? "" : " (no key configured)"}
-                      </option>
-                    </select>
+                      options={[
+                        { value: "local", label: "local (ollama) — free" },
+                        {
+                          value: "anthropic",
+                          label: `anthropic — paid${system.data?.keys.anthropic_configured ? "" : " (no key configured)"}`,
+                          disabled: !system.data?.keys.anthropic_configured,
+                        },
+                      ]}
+                    />
                     <input
                       type="text"
                       value={effLlm.model}
                       aria-label="model id"
                       onChange={(e) => setLlm({ provider: effLlm.provider, model: e.target.value })}
-                      style={{ background: "var(--booth)", border: "1px solid var(--hairline)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 11.5, padding: "5px 8px", width: 180 }}
+                      className="mono w-[180px] border border-hairline bg-booth-0 px-2 py-[5px] text-[11.5px] text-ink"
                     />
                   </p>
                 )}
                 {attrErr && (
-                  <p className="mono" style={{ color: "var(--clip)", fontSize: 11, marginTop: 6 }}>
+                  <p className="mono mt-1.5 text-[11px] text-clip">
                     {attrErr.message}
                     {attrErr.code === "payment_confirmation_required" && (
                       <>
                         {" — "}
-                        <button
-                          className="link"
-                          style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }}
-                          onClick={() => startAttribute(true)}
-                        >
+                        <button className="link" onClick={() => startAttribute(true)}>
                           confirm the paid run
                         </button>
                       </>
@@ -672,20 +653,20 @@ export function RenderJobs() {
 
         <div>
           <div className="panel joblist">
-            <div className="panel-h"><b>Jobs</b><span className="tag" style={{ marginLeft: "auto" }}>live</span></div>
+            <div className="panel-h"><b>Jobs</b><span className="tag ml-auto">live</span></div>
             <div className="panel-sub">Everything the machine is doing or has done for this book, newest first. Click a failed row for its reason.</div>
-            {jobs.data?.jobs.length === 0 && <div className="loadline" style={{ padding: "14px" }}>no jobs yet</div>}
+            {jobs.data?.jobs.length === 0 && <div className="loadline p-3.5">no jobs yet</div>}
             {jobs.data?.jobs.map((j) => <JobRow key={j.job_id} job={j} />)}
           </div>
 
           <div className="panel dl">
             <div className="panel-h">
               <b>Outputs</b>
-              <button className="key quiet" style={{ marginLeft: "auto" }} disabled={!status?.rendered || assemble.isPending}
+              <button className="key quiet ml-auto" disabled={!status?.rendered || assemble.isPending}
                 onClick={() => assemble.mutate({})}>
                 assemble
               </button>
-              <button className="key" style={{ marginLeft: 10 }} disabled={!status?.rendered || master.isPending}
+              <button className="key ml-2.5" disabled={!status?.rendered || master.isPending}
                 onClick={() => master.mutate({})}>
                 master m4b
               </button>
@@ -694,13 +675,13 @@ export function RenderJobs() {
               After a render: <b>assemble</b> makes per-chapter MP3s, <b>master</b> makes the final chaptered .m4b audiobook.
             </div>
             {(assemble.error || master.error) && (
-              <div className="errline" style={{ margin: 12 }}>{(assemble.error ?? master.error)?.message}</div>
+              <div className="errline m-3">{(assemble.error ?? master.error)?.message}</div>
             )}
             <table>
               <tbody>
                 <tr>
                   <td className="mono">{bookId}.m4b</td>
-                  <td className="mono" style={{ color: book.data?.downloads.m4b ? "var(--ink-2)" : "var(--ink-3)" }}>
+                  <td className={`mono ${book.data?.downloads.m4b ? "text-ink-2" : "text-ink-3"}`}>
                     {book.data?.downloads.m4b ? `${(book.data.downloads.m4b.bytes / 1048576).toFixed(1)} MB` : "not yet mastered"}
                   </td>
                   <td>{book.data?.downloads.m4b ? <a className="link" href={book.data.downloads.m4b.url}>download</a> : "—"}</td>
@@ -708,7 +689,7 @@ export function RenderJobs() {
                 {book.data?.downloads.chapter_mp3s.map((c) => (
                   <tr key={c.index}>
                     <td className="mono">chapters/ch{String(c.index).padStart(3, "0")}.mp3</td>
-                    <td className="mono" style={{ color: "var(--ink-2)" }}>{(c.bytes / 1048576).toFixed(1)} MB</td>
+                    <td className="mono text-ink-2">{(c.bytes / 1048576).toFixed(1)} MB</td>
                     <td><a className="link" href={c.url}>download</a></td>
                   </tr>
                 ))}
@@ -720,7 +701,7 @@ export function RenderJobs() {
             <div className="panel">
               <div className="panel-h">
                 <b>Audio checks</b>
-                <span className="tag" style={{ marginLeft: "auto" }}>
+                <span className="tag ml-auto">
                   {validation.data.validation_failures} failed of {validation.data.validated_segments} checked
                 </span>
               </div>
@@ -728,7 +709,7 @@ export function RenderJobs() {
                 Cloned-voice segments are transcribed back by whisper; a mismatch means the voice may have misread.
                 Listen before shipping.
               </div>
-              <div style={{ padding: "0 14px 14px" }}>
+              <div className="px-3.5 pb-3.5">
                 {validation.data.results.length === 0 && <div className="loadline">all checked segments read clean</div>}
                 {validation.data.results.map((r) => (
                   <ValidationFailure key={`${r.block_id}-${r.segment_index}`} bookId={bookId} row={r} />
