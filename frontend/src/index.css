@@ -179,6 +179,8 @@
 .key[disabled] { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
 .key.quiet { border-color: var(--hairline); color: var(--ink-2); }
 .key.quiet:hover { background: var(--console-hi); color: var(--ink); }
+.key.danger { border-color: var(--clip); color: var(--clip); }
+.key.danger:hover { background: var(--clip); color: var(--booth); border-color: var(--clip); }
 .link { color: var(--tungsten); text-decoration: none; background: none; border: none; cursor: pointer; padding: 0; font: inherit; }
 .link:hover { text-decoration: underline; }
 .link[disabled] { color: var(--ink-3); cursor: default; text-decoration: none; }
