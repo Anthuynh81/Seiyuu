@@ -2,6 +2,8 @@ import { useLocation } from "react-router-dom";
 
 import { useCancelJob, useLiveJobs } from "../api/hooks";
 import type { JobOut } from "../api/types";
+import { TalkSlider } from "../components/Slider";
+import { Tip } from "../components/Tooltip";
 import { usePlayer } from "./usePlayer";
 
 function ledFor(job: JobOut): string {
@@ -41,13 +43,10 @@ function AudioTransport() {
       <span className="mono" style={{ color: "var(--ink-3)" }}>{clip?.speaker ?? "—"}</span>
       <span className="vol">
         <span className="tag">vol</span>
-        <input
-          type="range"
-          min={0}
-          max={100}
+        <TalkSlider
           value={Math.round(player.volume * 100)}
-          onChange={(e) => player.setVolume(Number(e.target.value) / 100)}
-          aria-label="volume"
+          onChange={(v) => player.setVolume(v / 100)}
+          ariaLabel="volume"
         />
       </span>
     </div>
@@ -84,15 +83,21 @@ export function TransportBar() {
   // a running render can lend the GPU to a voice audition between segments — it stays RUNNING
   // the whole time, so nothing here should read as if the render paused or stopped
   const borrowable = job.kind === "render" && job.state === "running" && !canceling;
+  const stateChip = (
+    <span className="state">
+      <i className={`led ${ledFor(job)}`} />
+      {canceling ? "canceling" : job.state}
+    </span>
+  );
   return (
     <div className="transport">
-      <span
-        className="state"
-        title={borrowable ? "still running — a voice audition may borrow the GPU between segments without stopping this render" : undefined}
-      >
-        <i className={`led ${ledFor(job)}`} />
-        {canceling ? "canceling" : job.state}
-      </span>
+      {borrowable ? (
+        <Tip content="still running — a voice audition may borrow the GPU between segments without stopping this render">
+          {stateChip}
+        </Tip>
+      ) : (
+        stateChip
+      )}
       <span style={{ color: "var(--ink-2)" }}>
         {job.kind} · {job.book_id}
       </span>

@@ -13,6 +13,7 @@ import {
   useUnlinkSeries,
 } from "../api/hooks";
 import type { LinkSuggestion, Series } from "../api/types";
+import { TalkSelect } from "../components/Select";
 import { applicableCount, confirmedOverrides, defaultConfirmed } from "../lib/series";
 
 /* Series / library voice consistency (F5). Reuse a returning character's voice across the books
@@ -38,7 +39,7 @@ function CreateSeries({ bookId, disabled }: { bookId: string; disabled: boolean 
   const create = useCreateSeries();
   const [name, setName] = useState("");
   return (
-    <div className="panel" style={{ margin: 0 }}>
+    <div className="panel m-0">
       <div className="panel-h">
         <b>New series from this book</b>
       </div>
@@ -46,10 +47,9 @@ function CreateSeries({ bookId, disabled }: { bookId: string; disabled: boolean 
         Seeds the series with this book&apos;s cast — every assigned character&apos;s voice becomes
         a cross-book link. The book must be attributed and cast.
       </div>
-      <div className="row" style={{ gap: 10, padding: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <div className="flex flex-wrap items-center gap-2.5 p-3">
         <input
-          className="taginput"
-          style={{ minWidth: 220 }}
+          className="taginput min-w-[220px] flex-none"
           placeholder="series name (e.g. Mistborn)"
           value={name}
           aria-label="series name"
@@ -66,14 +66,10 @@ function CreateSeries({ bookId, disabled }: { bookId: string; disabled: boolean 
           {create.isPending ? "creating…" : "create series"}
         </button>
         {disabled && (
-          <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-            cast this book in Character Review first
-          </span>
+          <span className="mono text-[11px] text-ink-3">cast this book in Character Review first</span>
         )}
         {create.error && (
-          <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-            {errText(create.error)}
-          </span>
+          <span className="mono text-[11px] text-clip">{errText(create.error)}</span>
         )}
       </div>
     </div>
@@ -123,10 +119,10 @@ function SuggestionsPanel({
   };
 
   return (
-    <div className="panel" style={{ margin: 0 }}>
+    <div className="panel m-0">
       <div className="panel-h">
         <b>Suggested cross-book links</b>
-        <span className="tag" style={{ marginLeft: 8 }}>{rows.length}</span>
+        <span className="tag ml-2">{rows.length}</span>
       </div>
       <div className="panel-sub">
         Name matches within <b>{series.name}</b> — confirm which returning characters inherit their
@@ -135,22 +131,22 @@ function SuggestionsPanel({
       </div>
 
       {!attributed && (
-        <div className="refusal" style={{ margin: 12 }}>
+        <div className="refusal m-3">
           <span className="tag">stage_prerequisite</span>
           <p>this book has no attribution yet — run it from Render &amp; Jobs to match characters</p>
         </div>
       )}
       {suggestions.isPending && attributed && (
-        <div className="loadline" style={{ padding: 14 }}>matching returning characters…</div>
+        <div className="loadline p-3.5">matching returning characters…</div>
       )}
       {suggestions.error && (
-        <div className="refusal" style={{ margin: 12 }}>
+        <div className="refusal m-3">
           <span className="tag">error</span>
           <p>{errText(suggestions.error)}</p>
         </div>
       )}
       {suggestions.data && rows.length === 0 && (
-        <div className="sub" style={{ padding: 14 }}>
+        <div className="sub p-3.5">
           No returning characters matched by name in this series yet. Cast another book and use
           “save cast to series” to teach it, then a sibling book will match here.
         </div>
@@ -158,20 +154,20 @@ function SuggestionsPanel({
 
       {rows.length > 0 && (
         <>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
               <thead>
-                <tr className="mono" style={{ textAlign: "left", color: "var(--ink-3)", fontSize: 11 }}>
-                  <th style={{ padding: "4px 10px" }}>inherit</th>
-                  <th style={{ padding: "4px 6px" }}>character</th>
-                  <th style={{ padding: "4px 6px" }}>series voice</th>
-                  <th style={{ padding: "4px 6px" }}>status</th>
+                <tr className="mono text-left text-[11px] text-ink-3">
+                  <th className="px-2.5 py-1 font-semibold">inherit</th>
+                  <th className="px-1.5 py-1 font-semibold">character</th>
+                  <th className="px-1.5 py-1 font-semibold">series voice</th>
+                  <th className="px-1.5 py-1 font-semibold">status</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.character_id} style={{ opacity: r.voice_exists ? 1 : 0.55 }}>
-                    <td style={{ padding: "4px 10px", textAlign: "center" }}>
+                  <tr key={r.character_id} className={r.voice_exists ? "" : "opacity-55"}>
+                    <td className="px-2.5 py-1 text-center">
                       <input
                         type="checkbox"
                         checked={confirmed.has(r.character_id) && r.voice_exists}
@@ -180,15 +176,13 @@ function SuggestionsPanel({
                         onChange={() => toggle(r.character_id)}
                       />
                     </td>
-                    <td style={{ padding: "4px 6px" }}>{r.canonical_name}</td>
-                    <td className="mono" style={{ padding: "4px 6px", fontSize: 11, color: "var(--ink-2)" }}>
-                      {r.voice_id}
-                    </td>
-                    <td className="mono" style={{ padding: "4px 6px", fontSize: 11 }}>
+                    <td className="px-1.5 py-1">{r.canonical_name}</td>
+                    <td className="mono px-1.5 py-1 text-[11px] text-ink-2">{r.voice_id}</td>
+                    <td className="mono px-1.5 py-1 text-[11px]">
                       {r.voice_exists ? (
-                        <span style={{ color: "var(--ink-3)" }}>available</span>
+                        <span className="text-ink-3">available</span>
                       ) : (
-                        <span style={{ color: "var(--clip)" }}>voice deleted</span>
+                        <span className="text-clip">voice deleted</span>
                       )}
                     </td>
                   </tr>
@@ -197,7 +191,7 @@ function SuggestionsPanel({
             </table>
           </div>
 
-          <div className="row" style={{ gap: 12, padding: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <div className="flex flex-wrap items-center gap-3 p-3">
             <button
               className="key"
               disabled={draft.isPending || inheritCount === 0}
@@ -206,19 +200,15 @@ function SuggestionsPanel({
             >
               {draft.isPending ? "applying…" : `apply ${inheritCount} inherited voice(s)`}
             </button>
-            <span className="mono" style={{ fontSize: 11, color: "var(--ink-2)" }}>
+            <span className="mono text-[11px] text-ink-2">
               inherits the confirmed voices, then casts the remaining characters distinct
             </span>
             {applied !== null && !draft.isPending && (
-              <span className="mono" style={{ fontSize: 11, color: "var(--ok)" }}>
+              <span className="mono text-[11px] text-ok">
                 applied · {applied} inherited into this book&apos;s cast (review in Character Review)
               </span>
             )}
-            {draft.error && (
-              <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-                {errText(draft.error)}
-              </span>
-            )}
+            {draft.error && <span className="mono text-[11px] text-clip">{errText(draft.error)}</span>}
           </div>
         </>
       )}
@@ -251,33 +241,30 @@ function SeriesDetail({
 
   return (
     <>
-      <div className="panel" style={{ margin: 0 }}>
+      <div className="panel m-0">
         <div className="panel-h">
           <b>{series.name}</b>
-          <span className="tag" style={{ marginLeft: 8 }}>{series.book_ids.length} book(s)</span>
+          <span className="tag ml-2">{series.book_ids.length} book(s)</span>
           <span className="tag">{links.length} linked voice(s)</span>
         </div>
 
         <div className="panel-sub">
           <b>Books in this series</b>
         </div>
-        <div className="row" style={{ gap: 8, padding: "10px 12px", flexWrap: "wrap" }}>
-          {series.book_ids.length === 0 && (
-            <span className="sub" style={{ margin: 0 }}>no books yet</span>
-          )}
+        <div className="flex flex-wrap gap-2 px-3 py-2.5">
+          {series.book_ids.length === 0 && <span className="sub m-0">no books yet</span>}
           {series.book_ids.map((id) => (
             <span
               key={id}
-              className="chip"
-              style={id === bookId ? { borderColor: "var(--tungsten)", cursor: "default" } : { cursor: "default" }}
+              className={`chip cursor-default ${id === bookId ? "border-tungsten" : ""}`}
             >
               {bookLabel(books, id)}
-              {id === bookId && <span className="mono" style={{ color: "var(--ink-3)" }}> · current</span>}
+              {id === bookId && <span className="mono text-ink-3"> · current</span>}
             </span>
           ))}
         </div>
 
-        <div className="row" style={{ gap: 12, padding: "0 12px 12px", alignItems: "center", flexWrap: "wrap" }}>
+        <div className="flex flex-wrap items-center gap-3 px-3 pb-3">
           {!isMember ? (
             <>
               <button
@@ -288,7 +275,7 @@ function SeriesDetail({
               >
                 {addBook.isPending ? "adding…" : "add this book to the series"}
               </button>
-              <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+              <span className="mono text-[11px] text-ink-3">
                 adding only joins membership — it never learns this book&apos;s cast silently
               </span>
             </>
@@ -308,55 +295,48 @@ function SeriesDetail({
               >
                 {saveCast.isPending ? "saving…" : "save cast to series"}
               </button>
-              <span className="mono" style={{ fontSize: 11, color: "var(--ink-2)" }}>
+              <span className="mono text-[11px] text-ink-2">
                 explicit write-back — this book&apos;s voices become series links (last-write-wins)
               </span>
               {saved !== null && !saveCast.isPending && (
-                <span className="mono" style={{ fontSize: 11, color: "var(--ok)" }}>
-                  saved · {saved} link(s) added / updated
-                </span>
+                <span className="mono text-[11px] text-ok">saved · {saved} link(s) added / updated</span>
               )}
             </>
           )}
           {(addBook.error || saveCast.error) && (
-            <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-              {errText(addBook.error ?? saveCast.error)}
-            </span>
+            <span className="mono text-[11px] text-clip">{errText(addBook.error ?? saveCast.error)}</span>
           )}
         </div>
       </div>
 
-      <div style={{ height: 16 }} />
+      <div className="h-4" />
       <SuggestionsPanel series={series} bookId={bookId} attributed={attributed} />
 
-      <div style={{ height: 16 }} />
-      <div className="panel" style={{ margin: 0 }}>
+      <div className="h-4" />
+      <div className="panel m-0">
         <div className="panel-h">
           <b>Voice links</b>
-          <span className="tag" style={{ marginLeft: 8 }}>{links.length}</span>
+          <span className="tag ml-2">{links.length}</span>
         </div>
         <div className="panel-sub">
           The series&apos; learned cast — one voice per returning character, keyed by name. Unlink
           to stop a character inheriting across the series.
         </div>
         {links.length === 0 ? (
-          <div className="sub" style={{ padding: 14 }}>
+          <div className="sub p-3.5">
             no voice links yet — “save cast to series” on a cast book teaches the series its voices
           </div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
               <tbody>
                 {links.map(([key, voiceId]) => (
                   <tr key={key}>
-                    <td style={{ padding: "4px 10px" }}>{key}</td>
-                    <td className="mono" style={{ padding: "4px 6px", fontSize: 11, color: "var(--ink-2)" }}>
-                      {voiceId}
-                    </td>
-                    <td style={{ padding: "4px 10px", textAlign: "right" }}>
+                    <td className="px-2.5 py-1">{key}</td>
+                    <td className="mono px-1.5 py-1 text-[11px] text-ink-2">{voiceId}</td>
+                    <td className="px-2.5 py-1 text-right">
                       <button
-                        className="key quiet"
-                        style={{ padding: "2px 8px" }}
+                        className="key quiet px-2 py-[2px]"
                         disabled={unlink.isPending}
                         onClick={() => unlink.mutate(key)}
                         aria-label={`unlink ${key}`}
@@ -372,9 +352,7 @@ function SeriesDetail({
           </div>
         )}
         {unlink.error && (
-          <div className="mono" style={{ color: "var(--clip)", fontSize: 11, padding: "0 12px 12px" }}>
-            {errText(unlink.error)}
-          </div>
+          <div className="mono px-3 pb-3 text-[11px] text-clip">{errText(unlink.error)}</div>
         )}
       </div>
     </>
@@ -426,20 +404,15 @@ export function Series() {
 
   return (
     <section className="screen">
-      <h1 style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
+      <h1 className="flex items-baseline gap-3.5">
         Series
-        <select
+        <TalkSelect
           className="bookpick"
+          ariaLabel="book"
           value={bookId}
-          onChange={(e) => setBook(e.target.value)}
-          aria-label="book"
-        >
-          {pickBooks.map((b) => (
-            <option key={b.book_id} value={b.book_id}>
-              {b.title ?? b.book_id}
-            </option>
-          ))}
-        </select>
+          onChange={setBook}
+          options={pickBooks.map((b) => ({ value: b.book_id, label: b.title ?? b.book_id }))}
+        />
       </h1>
       <p className="sub">
         Keep a character&apos;s voice consistent across the books of a series. Cross-book linking is
@@ -449,26 +422,19 @@ export function Series() {
 
       <div className="drainstrip">
         <span className="tag">series</span>
-        <select
+        <TalkSelect
           className="bookpick"
-          value={selectedId ?? ""}
-          onChange={(e) => setSeries(e.target.value || null)}
-          aria-label="series"
-        >
-          <option value="">— pick a series —</option>
-          {allSeries.map((s) => (
-            <option key={s.series_id} value={s.series_id}>
-              {s.name} ({s.book_ids.length})
-            </option>
-          ))}
-        </select>
-        <span className="mono" style={{ fontSize: 11, color: "var(--ink-2)" }}>
-          {allSeries.length} series in the library
-        </span>
+          ariaLabel="series"
+          value={selectedId ?? "__none__"}
+          onChange={(v) => setSeries(v === "__none__" ? null : v)}
+          options={[
+            { value: "__none__", label: "— pick a series —" },
+            ...allSeries.map((s) => ({ value: s.series_id, label: `${s.name} (${s.book_ids.length})` })),
+          ]}
+        />
+        <span className="mono text-[11px] text-ink-2">{allSeries.length} series in the library</span>
         {seriesList.error && (
-          <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-            {errText(seriesList.error)}
-          </span>
+          <span className="mono text-[11px] text-clip">{errText(seriesList.error)}</span>
         )}
       </div>
 
@@ -483,7 +449,7 @@ export function Series() {
             attributed={attributed}
             assigned={assigned}
           />
-          <div style={{ height: 16 }} />
+          <div className="h-4" />
           <CreateSeries bookId={bookId} disabled={!assigned} />
         </>
       )}

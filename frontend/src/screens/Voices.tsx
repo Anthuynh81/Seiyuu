@@ -14,10 +14,12 @@ import {
   useWarmup,
 } from "../api/hooks";
 import type { VoiceCreate, VoiceOut } from "../api/types";
+import { TalkDialog } from "../components/Dialog";
+import { TalkSelect } from "../components/Select";
+import { TalkSlider } from "../components/Slider";
 
 /* -------------------------------------------------- audition control */
 
-const linkBtnStyle = { background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 } as const;
 const BORROW_RETRY_MAX = 3; // bounded auto-retries while a render lends the GPU between segments
 
 function AuditionControl({ voice }: { voice: VoiceOut }) {
@@ -76,7 +78,6 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           return (
             <button
               className="link"
-              style={linkBtnStyle}
               disabled={warmup.isPending}
               onClick={() => warmup.mutate(voice.engine, { onSuccess: () => audition.reset() })}
             >
@@ -85,7 +86,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           );
         case "payment_confirmation_required":
           return (
-            <button className="link" style={linkBtnStyle} onClick={() => startAudition(true)}>
+            <button className="link" onClick={() => startAudition(true)}>
               confirm ~${Number(detail.estimated_usd ?? 0).toFixed(4)} &amp; play
             </button>
           );
@@ -94,17 +95,17 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           return (
             <span>
               the render keeps running — it hasn't yielded the GPU yet;{" "}
-              <button className="link" style={linkBtnStyle} onClick={() => startAudition(audition.variables ?? false)}>
+              <button className="link" onClick={() => startAudition(audition.variables ?? false)}>
                 retry
               </button>
             </span>
           );
         case "gpu_busy":
         case "cloud_busy":
-          return <span>wait for the job in the transport bar, or cancel it — <button className="link" style={linkBtnStyle} onClick={() => audition.reset()}>retry</button></span>;
+          return <span>wait for the job in the transport bar, or cancel it — <button className="link" onClick={() => audition.reset()}>retry</button></span>;
         default:
           return (
-            <button className="link" style={linkBtnStyle} onClick={() => audition.reset()}>
+            <button className="link" onClick={() => audition.reset()}>
               dismiss
             </button>
           );
@@ -122,13 +123,12 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
 
   return (
     <div>
-      <div className="audit" role="button" tabIndex={0} onClick={() => startAudition(false)} style={{ cursor: "pointer" }}>
+      <div className="audit cursor-pointer" role="button" tabIndex={0} onClick={() => startAudition(false)}>
         <span className="play" />
         <span className="lbl">audition</span>
         {voice.has_audition && (
           <button
-            className="key quiet"
-            style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 10.5 }}
+            className="key quiet ml-auto px-2 py-px text-[10.5px]"
             onClick={(e) => {
               e.stopPropagation();
               setPlayerOpen(!playerOpen);
@@ -143,7 +143,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
           controls
           autoPlay={audition.isSuccess}
           src={`/api/voices/${voice.voice_id}/audition.wav?t=${audition.isSuccess ? Date.now() : 0}`}
-          style={{ width: "100%", marginTop: 8, height: 30 }}
+          className="mt-2 h-[30px] w-full"
         />
       )}
     </div>
@@ -168,8 +168,7 @@ function TagEditor({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: strin
           <span key={t} className="tagchip" title={t}>{titleFor(t)}</span>
         ))}
         <button
-          className="rowedit"
-          style={{ visibility: "visible", marginLeft: 0 }}
+          className="rowedit visible ml-0"
           title="edit tags"
           onClick={() => {
             setDraft(voice.tags.join(", "));
@@ -194,12 +193,10 @@ function TagEditor({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: strin
           if (e.key === "Escape") setEditing(false);
         }}
       />
-      <button className="key quiet" style={{ padding: "2px 8px" }} disabled={setTags.isPending} onClick={save}>
+      <button className="key quiet px-2 py-[2px]" disabled={setTags.isPending} onClick={save}>
         save
       </button>
-      {setTags.error && (
-        <span className="mono" style={{ color: "var(--clip)", fontSize: 10 }}>{setTags.error.message}</span>
-      )}
+      {setTags.error && <span className="mono text-[10px] text-clip">{setTags.error.message}</span>}
     </div>
   );
 }
@@ -220,8 +217,7 @@ function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: s
       <span className="eng">
         {voice.engine} · {voice.kind}
         <button
-          className="rowedit"
-          style={{ float: "right", visibility: "visible" }}
+          className="rowedit visible float-right"
           title="delete voice"
           disabled={del.isPending}
           onClick={() => del.mutate(voice.voice_id)}
@@ -244,9 +240,7 @@ function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: s
           </span>
         )
       ) : (
-        <span className="consent" style={{ visibility: "hidden" }}>
-          .
-        </span>
+        <span className="consent invisible">.</span>
       )}
       <TagEditor voice={voice} titleFor={titleFor} />
       {delErr && (
@@ -356,15 +350,13 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
     presets.data?.voices ??
     [{ id: "af_heart", name: "Heart", language: "en-US", gender: "female", description: null }];
   const describe = (id: string) => catalog.find((p) => p.id === id)?.description;
-  const presetOptions = catalog.map((p) => (
-    <option key={p.id} value={p.id}>
-      {p.id} — {p.gender ?? "?"} {p.language ?? ""}{p.description ? ` · ${p.description}` : ""}
-    </option>
-  ));
+  const presetOptions = catalog.map((p) => ({
+    value: p.id,
+    label: `${p.id} — ${p.gender ?? "?"} ${p.language ?? ""}${p.description ? ` · ${p.description}` : ""}`,
+  }));
   const demoKey = (url: string, label = "▶") => (
     <button
-      className="key quiet"
-      style={{ padding: "3px 9px" }}
+      className="key quiet px-[9px] py-[3px]"
       disabled={demo.busy !== null}
       title="hear this on the standard audition line"
       onClick={() => demo.play(url)}
@@ -393,124 +385,11 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
   const blendInvalid = kind === "blend" && manual && (active.length < 2 || familyMix);
 
   return (
-    <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog">
-        <div className="dh">
-          <b>Add voice</b>
-          <button className="key quiet" onClick={onClose}>esc</button>
-        </div>
-        <div className="db">
-          <div className="modewrap" style={{ marginBottom: 4 }}>
-            <button className={`chap ${kind === "preset" ? "on" : ""}`} onClick={() => setKind("preset")}>preset</button>
-            <button className={`chap ${kind === "blend" ? "on" : ""}`} onClick={() => setKind("blend")}>blend</button>
-          </div>
-          <label>voice name</label>
-          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Narrator" />
-          {kind === "preset" ? (
-            <>
-              <label>engine</label>
-              <select value={engine} onChange={(e) => setEngine(e.target.value)}>
-                <option value="kokoro">kokoro — local, free</option>
-                <option value="elevenlabs">elevenlabs — cloud stock voice, paid to render</option>
-              </select>
-              {engine === "kokoro" ? (
-                <>
-                  <label>preset</label>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <select value={presetId} onChange={(e) => setPresetId(e.target.value)} style={{ flex: 1 }}>
-                      {presetOptions}
-                    </select>
-                    {demoKey(presetPreviewUrl(presetId), "▶ demo")}
-                  </div>
-                  {describe(presetId) && <div className="voicenote">{describe(presetId)}</div>}
-                </>
-              ) : (
-                <>
-                  <label>elevenlabs voice id (from their voice library)</label>
-                  <input type="text" value={cloudId} onChange={(e) => setCloudId(e.target.value)} placeholder="EXAVITQu…" />
-                </>
-              )}
-            </>
-          ) : (
-            <>
-              <label>recipe</label>
-              <div className="modewrap" style={{ marginBottom: 6 }}>
-                <button className={`chap ${!manual ? "on" : ""}`} onClick={() => setManual(false)}>auto — from name</button>
-                <button className={`chap ${manual ? "on" : ""}`} onClick={() => setManual(true)}>manual mix</button>
-              </div>
-              {!manual ? (
-                <>
-                  <label>gender hint for the recipe (optional)</label>
-                  <select value={gender} onChange={(e) => setGender(e.target.value)}>
-                    <option value="">unknown</option>
-                    <option value="female">female</option>
-                    <option value="male">male</option>
-                  </select>
-                  <label>accent</label>
-                  <select value={accent} onChange={(e) => setAccent(e.target.value as "a" | "b")}>
-                    <option value="a">American</option>
-                    <option value="b">British</option>
-                  </select>
-                </>
-              ) : (
-                <>
-                  {layers.map((l, i) => (
-                    <div key={i}>
-                      <div className="mixrow">
-                        {demoKey(presetPreviewUrl(l.preset_id))}
-                        <select value={l.preset_id} onChange={(e) => setLayer(i, { preset_id: e.target.value })}>
-                          {presetOptions}
-                        </select>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={l.weight}
-                          aria-label={`weight of ${l.preset_id}`}
-                          onChange={(e) => setLayer(i, { weight: Number(e.target.value) })}
-                        />
-                        <span className="pct">{Math.round((100 * l.weight) / totalWeight)}%</span>
-                        <button
-                          className="rowedit"
-                          style={{ visibility: "visible" }}
-                          title="remove layer"
-                          disabled={layers.length <= 2}
-                          onClick={() => setLayers(layers.filter((_, k) => k !== i))}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      {describe(l.preset_id) && <div className="voicenote">{describe(l.preset_id)}</div>}
-                    </div>
-                  ))}
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-                    <button
-                      className="key quiet"
-                      style={{ padding: "3px 9px" }}
-                      onClick={() => setLayers([...layers, { preset_id: catalog[0].id, weight: 30 }])}
-                    >
-                      + add layer
-                    </button>
-                    {!blendInvalid && demoKey(mixPreviewUrl(active), "▶ demo mix")}
-                    <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-3)" }}>
-                      faders are ratios — the mix normalizes itself
-                    </span>
-                  </div>
-                  {blendInvalid && (
-                    <div className="mono" style={{ fontSize: 11, color: "var(--caution)", marginTop: 6 }}>
-                      {familyMix
-                        ? "kokoro can't blend across accents — keep every layer American (a…) or every layer British (b…)"
-                        : "a blend needs at least two layers with weight"}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-          {demo.error && <div className="errline" style={{ marginTop: 12 }}>{demo.error}</div>}
-          {error && <div className="errline" style={{ marginTop: 12 }}>{error}</div>}
-        </div>
-        <div className="df">
+    <TalkDialog
+      title="Add voice"
+      onClose={onClose}
+      footer={
+        <>
           <button className="key quiet" onClick={onClose}>cancel</button>
           <button
             className="key"
@@ -524,9 +403,132 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
           >
             add voice
           </button>
-        </div>
+        </>
+      }
+    >
+      <div className="modewrap mb-1">
+        <button className={`chap ${kind === "preset" ? "on" : ""}`} onClick={() => setKind("preset")}>preset</button>
+        <button className={`chap ${kind === "blend" ? "on" : ""}`} onClick={() => setKind("blend")}>blend</button>
       </div>
-    </div>
+      <label>voice name</label>
+      <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Narrator" />
+      {kind === "preset" ? (
+        <>
+          <label>engine</label>
+          <TalkSelect
+            ariaLabel="engine"
+            value={engine}
+            onChange={setEngine}
+            options={[
+              { value: "kokoro", label: "kokoro — local, free" },
+              { value: "elevenlabs", label: "elevenlabs — cloud stock voice, paid to render" },
+            ]}
+          />
+          {engine === "kokoro" ? (
+            <>
+              <label>preset</label>
+              <div className="flex items-center gap-2">
+                <TalkSelect className="flex-1" ariaLabel="preset" value={presetId} onChange={setPresetId} options={presetOptions} />
+                {demoKey(presetPreviewUrl(presetId), "▶ demo")}
+              </div>
+              {describe(presetId) && <div className="voicenote">{describe(presetId)}</div>}
+            </>
+          ) : (
+            <>
+              <label>elevenlabs voice id (from their voice library)</label>
+              <input type="text" value={cloudId} onChange={(e) => setCloudId(e.target.value)} placeholder="EXAVITQu…" />
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <label>recipe</label>
+          <div className="modewrap mb-1.5">
+            <button className={`chap ${!manual ? "on" : ""}`} onClick={() => setManual(false)}>auto — from name</button>
+            <button className={`chap ${manual ? "on" : ""}`} onClick={() => setManual(true)}>manual mix</button>
+          </div>
+          {!manual ? (
+            <>
+              <label>gender hint for the recipe (optional)</label>
+              <TalkSelect
+                ariaLabel="gender hint"
+                value={gender || "unknown"}
+                onChange={(v) => setGender(v === "unknown" ? "" : v)}
+                options={[
+                  { value: "unknown", label: "unknown" },
+                  { value: "female", label: "female" },
+                  { value: "male", label: "male" },
+                ]}
+              />
+              <label>accent</label>
+              <TalkSelect
+                ariaLabel="accent"
+                value={accent}
+                onChange={(v) => setAccent(v as "a" | "b")}
+                options={[
+                  { value: "a", label: "American" },
+                  { value: "b", label: "British" },
+                ]}
+              />
+            </>
+          ) : (
+            <>
+              {layers.map((l, i) => (
+                <div key={i}>
+                  <div className="mixrow">
+                    {demoKey(presetPreviewUrl(l.preset_id))}
+                    <TalkSelect
+                      className="w-[190px]"
+                      ariaLabel={`layer ${i + 1} preset`}
+                      value={l.preset_id}
+                      onChange={(v) => setLayer(i, { preset_id: v })}
+                      options={presetOptions}
+                    />
+                    <TalkSlider
+                      className="flex-1"
+                      value={l.weight}
+                      onChange={(w) => setLayer(i, { weight: w })}
+                      ariaLabel={`weight of ${l.preset_id}`}
+                    />
+                    <span className="pct">{Math.round((100 * l.weight) / totalWeight)}%</span>
+                    <button
+                      className="rowedit visible"
+                      title="remove layer"
+                      disabled={layers.length <= 2}
+                      onClick={() => setLayers(layers.filter((_, k) => k !== i))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {describe(l.preset_id) && <div className="voicenote">{describe(l.preset_id)}</div>}
+                </div>
+              ))}
+              <div className="mt-1.5 flex items-center gap-2.5">
+                <button
+                  className="key quiet px-[9px] py-[3px]"
+                  onClick={() => setLayers([...layers, { preset_id: catalog[0].id, weight: 30 }])}
+                >
+                  + add layer
+                </button>
+                {!blendInvalid && demoKey(mixPreviewUrl(active), "▶ demo mix")}
+                <span className="mono text-[10.5px] text-ink-3">
+                  faders are ratios — the mix normalizes itself
+                </span>
+              </div>
+              {blendInvalid && (
+                <div className="mono mt-1.5 text-[11px] text-caution">
+                  {familyMix
+                    ? "kokoro can't blend across accents — keep every layer American (a…) or every layer British (b…)"
+                    : "a blend needs at least two layers with weight"}
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
+      {demo.error && <div className="errline mt-3">{demo.error}</div>}
+      {error && <div className="errline mt-3">{error}</div>}
+    </TalkDialog>
   );
 }
 
@@ -548,69 +550,71 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog">
-        <div className="dh">
-          <b>New cloned voice</b>
-          <button className="key quiet" onClick={onClose}>esc</button>
-        </div>
-        <div className="db">
-          <label>reference clip (wav/mp3, ≥ 20 s recommended)</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input type="text" readOnly value={file?.name ?? ""} placeholder="choose a file…" onClick={() => fileInput.current?.click()} />
-            <button className="key quiet" onClick={() => fileInput.current?.click()}>browse</button>
-            <input ref={fileInput} type="file" accept="audio/*" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-          </div>
-          <label>voice name</label>
-          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Mr. Darcy" />
-          <label>engine</label>
-          <select value={engine} onChange={(e) => setEngine(e.target.value)}>
-            <option value="chatterbox">chatterbox — local, free</option>
-            <option value="indextts2">indextts2 — local, emotion + cloning (slow, high quality)</option>
-            <option value="elevenlabs">elevenlabs — cloud IVC, paid</option>
-          </select>
-          <div className="paper release slim">
-            <div className="att">
-              <input type="checkbox" id="att" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
-              <label htmlFor="att" className="attlbl" style={{ margin: 0 }}>
-                I have the speaker's permission to clone this voice
-              </label>
-              <span style={{ marginLeft: "auto", color: "var(--paper-ink-2)", fontFamily: "var(--mono)", fontSize: 11 }}>
-                as{" "}
-                <input
-                  type="text"
-                  value={attestedBy}
-                  onChange={(e) => setAttestedBy(e.target.value)}
-                  placeholder="your name"
-                  style={{ background: "transparent", border: "none", borderBottom: "1px solid var(--paper-ink-2)", color: "var(--paper-ink)", fontFamily: "var(--mono)", width: 110, padding: "1px 3px" }}
-                />
-              </span>
-            </div>
-          </div>
-          <div className="tag" style={{ marginTop: 8, color: "var(--ink-3)", textTransform: "none", letterSpacing: ".02em" }}>
-            one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate
-          </div>
-          {err && !recloneBlocked && <div className="errline" style={{ marginTop: 12 }}>{err.message}</div>}
-          {recloneBlocked && (
-            <div className="refusal" style={{ marginTop: 12 }}>
-              <span className="tag">reclone_blocked</span>
-              <p>
-                {err!.message} —{" "}
-                <button className="link" style={{ background: "none", border: "none", color: "var(--tungsten)", cursor: "pointer", padding: 0 }} onClick={() => submit(true)}>
-                  replace it (purges its cached audio; paid segments re-bill)
-                </button>
-              </p>
-            </div>
-          )}
-        </div>
-        <div className="df">
+    <TalkDialog
+      title="New cloned voice"
+      onClose={onClose}
+      footer={
+        <>
           <button className="key quiet" onClick={onClose}>cancel</button>
           <button className="key" disabled={clone.isPending || !file || !name.trim() || !attested || !attestedBy.trim()} onClick={() => submit(false)}>
             {clone.isPending ? "cloning…" : "clone voice"}
           </button>
+        </>
+      }
+    >
+      <label>reference clip (wav/mp3, ≥ 20 s recommended)</label>
+      <div className="flex gap-2">
+        <input type="text" readOnly value={file?.name ?? ""} placeholder="choose a file…" onClick={() => fileInput.current?.click()} />
+        <button className="key quiet" onClick={() => fileInput.current?.click()}>browse</button>
+        <input ref={fileInput} type="file" accept="audio/*" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      </div>
+      <label>voice name</label>
+      <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Mr. Darcy" />
+      <label>engine</label>
+      <TalkSelect
+        ariaLabel="engine"
+        value={engine}
+        onChange={setEngine}
+        options={[
+          { value: "chatterbox", label: "chatterbox — local, free" },
+          { value: "indextts2", label: "indextts2 — local, emotion + cloning (slow, high quality)" },
+          { value: "elevenlabs", label: "elevenlabs — cloud IVC, paid" },
+        ]}
+      />
+      <div className="paper release slim">
+        <div className="att">
+          <input type="checkbox" id="att" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
+          <label htmlFor="att" className="attlbl m-0">
+            I have the speaker's permission to clone this voice
+          </label>
+          <span className="mono ml-auto text-[11px] text-paper-ink-2">
+            as{" "}
+            <input
+              type="text"
+              value={attestedBy}
+              onChange={(e) => setAttestedBy(e.target.value)}
+              placeholder="your name"
+              className="attname"
+            />
+          </span>
         </div>
       </div>
-    </div>
+      <div className="tag mt-2 normal-case tracking-[0.02em] text-ink-3">
+        one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate
+      </div>
+      {err && !recloneBlocked && <div className="errline mt-3">{err.message}</div>}
+      {recloneBlocked && (
+        <div className="refusal mt-3">
+          <span className="tag">reclone_blocked</span>
+          <p>
+            {err!.message} —{" "}
+            <button className="link" onClick={() => submit(true)}>
+              replace it (purges its cached audio; paid segments re-bill)
+            </button>
+          </p>
+        </div>
+      )}
+    </TalkDialog>
   );
 }
 
@@ -669,23 +673,22 @@ export function Voices() {
       <div className="panel">
         <div className="panel-h">
           <b>Voices</b>
-          <span className="tag" style={{ marginLeft: 14 }}>{voices.data ? `${voices.data.voices.length} in library` : "…"}</span>
+          <span className="tag ml-3.5">{voices.data ? `${voices.data.voices.length} in library` : "…"}</span>
           <div className="slotbank" title="ElevenLabs voice slots">
-            <span className="tag" style={{ marginRight: 6 }}>
+            <span className="tag mr-1.5">
               cloud slots {slots.data ? `${slots.data.count}/${slots.data.max_slots}` : "…"}
             </span>
             {Array.from({ length: slots.data?.max_slots ?? 10 }, (_, i) => (
               <i key={i} className={i < (slots.data?.count ?? 0) ? "lit" : ""} />
             ))}
           </div>
-          <button className="key quiet" style={{ marginLeft: 14 }} onClick={() => setDialog("add")}>add voice</button>
-          <button className="key" style={{ marginLeft: 8 }} onClick={() => setDialog("clone")}>new clone</button>
+          <button className="key quiet ml-3.5" onClick={() => setDialog("add")}>add voice</button>
+          <button className="key ml-2" onClick={() => setDialog("clone")}>new clone</button>
         </div>
         <div className="voicetools">
           <input
             type="search"
-            className="taginput"
-            style={{ width: 200 }}
+            className="taginput w-[200px] flex-none"
             placeholder="search name, id, tag…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -696,17 +699,22 @@ export function Voices() {
               {k}
             </button>
           ))}
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           <span className="tag">sort</span>
-          <select value={sort} onChange={(e) => setSort(e.target.value as VoiceSort)}>
-            <option value="name">name</option>
-            <option value="newest">newest</option>
-            <option value="kind">kind</option>
-            <option value="engine">engine</option>
-          </select>
+          <TalkSelect
+            ariaLabel="sort voices"
+            value={sort}
+            onChange={(v) => setSort(v as VoiceSort)}
+            options={[
+              { value: "name", label: "name" },
+              { value: "newest", label: "newest" },
+              { value: "kind", label: "kind" },
+              { value: "engine", label: "engine" },
+            ]}
+          />
         </div>
         {allTags.length > 0 && (
-          <div className="voicetools" style={{ paddingTop: 0 }}>
+          <div className="voicetools pt-0">
             <span className="tag">tags</span>
             <button className={`tagbtn ${tagFilter === null ? "on" : ""}`} onClick={() => setTagFilter(null)}>
               all
@@ -723,25 +731,25 @@ export function Voices() {
             ))}
           </div>
         )}
-        {voices.isPending && <div className="loadline" style={{ padding: 14 }}>opening the booth…</div>}
-        {voices.isError && <div className="errline" style={{ margin: 14 }}>{voices.error.message}</div>}
+        {voices.isPending && <div className="loadline p-3.5">opening the booth…</div>}
+        {voices.isError && <div className="errline m-3.5">{voices.error.message}</div>}
         {voices.data?.unreadable.map((u) => (
-          <div className="refusal" key={u.voice_id} style={{ margin: "10px 14px 0" }}>
+          <div className="refusal mx-3.5 mt-2.5" key={u.voice_id}>
             <span className="tag">unreadable</span>
             <p>{u.voice_id}: {u.error}</p>
           </div>
         ))}
         {voices.data && voices.data.voices.length === 0 && (
-          <div className="loadline" style={{ padding: 14 }}>
+          <div className="loadline p-3.5">
             no voices yet — add a preset to get narrating, or clone from a reference clip
           </div>
         )}
         {voices.data && all.length > 0 && shown.length === 0 && (
-          <div className="loadline" style={{ padding: 14 }}>
+          <div className="loadline p-3.5">
             nothing matches those filters — {all.length} voice(s) hidden
           </div>
         )}
-        <div className="voices" style={{ padding: 14 }}>
+        <div className="voices p-3.5">
           {shown.map((v) => <VoiceCardView key={v.voice_id} voice={v} titleFor={titleFor} />)}
         </div>
       </div>

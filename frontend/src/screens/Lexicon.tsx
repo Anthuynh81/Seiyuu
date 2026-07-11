@@ -10,6 +10,7 @@ import {
   useSuggestRespellings,
 } from "../api/hooks";
 import type { LexiconEntry, SuggestedTerm } from "../api/types";
+import { TalkSelect } from "../components/Select";
 import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
 
 /* A per-book pronunciation dictionary: term -> respelling (spoken on every engine), with an
@@ -32,12 +33,11 @@ function EntryRow({
     <tr>
       <td>
         <input
-          className="taginput"
+          className={`taginput ${duplicate ? "border-clip" : ""}`}
           value={entry.term}
           placeholder="as written"
           aria-label="term"
           onChange={(e) => set({ term: e.target.value })}
-          style={duplicate ? { borderColor: "var(--clip)" } : undefined}
         />
       </td>
       <td>
@@ -67,7 +67,7 @@ function EntryRow({
           onChange={(e) => set({ note: e.target.value || null })}
         />
       </td>
-      <td style={{ textAlign: "center" }}>
+      <td className="text-center">
         <input
           type="checkbox"
           checked={entry.case_sensitive}
@@ -166,20 +166,15 @@ export function Lexicon() {
 
   return (
     <section className="screen">
-      <h1 style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
+      <h1 className="flex items-baseline gap-3.5">
         Pronunciation
-        <select
+        <TalkSelect
           className="bookpick"
+          ariaLabel="book"
           value={bookId}
-          onChange={(e) => setParams({ book: e.target.value })}
-          aria-label="book"
-        >
-          {ingested.map((b) => (
-            <option key={b.book_id} value={b.book_id}>
-              {b.title ?? b.book_id}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => setParams({ book: v })}
+          options={ingested.map((b) => ({ value: b.book_id, label: b.title ?? b.book_id }))}
+        />
       </h1>
       <p className="sub">
         Fix mispronounced names and invented words for this book. A respelling is spoken by every
@@ -194,22 +189,20 @@ export function Lexicon() {
         </div>
       )}
 
-      <div className="panel" style={{ margin: 0 }}>
+      <div className="panel m-0">
         <div className="panel-h">
           <b>Entries</b>
-          <span className="tag" style={{ marginLeft: 8 }}>
-            {cleanForSave(rows).length}
-          </span>
+          <span className="tag ml-2">{cleanForSave(rows).length}</span>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="overflow-x-auto px-3.5 pt-2">
+          <table className="w-full border-collapse">
             <thead>
-              <tr className="mono" style={{ textAlign: "left", color: "var(--ink-3)", fontSize: 11 }}>
-                <th style={{ padding: "4px 6px" }}>term</th>
-                <th style={{ padding: "4px 6px" }}>respelling</th>
-                <th style={{ padding: "4px 6px" }}>ipa (kokoro)</th>
-                <th style={{ padding: "4px 6px" }}>note</th>
-                <th style={{ padding: "4px 6px" }}>case</th>
+              <tr className="mono text-left text-[11px] text-ink-3">
+                <th className="px-1.5 py-1 font-semibold">term</th>
+                <th className="px-1.5 py-1 font-semibold">respelling</th>
+                <th className="px-1.5 py-1 font-semibold">ipa (kokoro)</th>
+                <th className="px-1.5 py-1 font-semibold">note</th>
+                <th className="px-1.5 py-1 font-semibold">case</th>
                 <th />
               </tr>
             </thead>
@@ -225,7 +218,7 @@ export function Lexicon() {
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="sub" style={{ padding: "10px 6px" }}>
+                  <td colSpan={6} className="sub px-1.5 py-2.5">
                     no entries yet — add a term below or pick from suggestions
                   </td>
                 </tr>
@@ -234,7 +227,7 @@ export function Lexicon() {
           </table>
         </div>
 
-        <div className="row" style={{ gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="mt-3 flex flex-wrap items-center gap-2.5 px-3.5 pb-3.5">
           <button className="key quiet" onClick={() => addRow()}>
             + add term
           </button>
@@ -250,7 +243,7 @@ export function Lexicon() {
             {save.isPending ? "saving…" : "save"}
           </button>
 
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           <button
             className="key quiet"
             disabled={suggestAI.isPending}
@@ -261,48 +254,34 @@ export function Lexicon() {
           </button>
 
           {dupes.length > 0 && (
-            <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-              duplicate term: {dupes.join(", ")}
-            </span>
+            <span className="mono text-[11px] text-clip">duplicate term: {dupes.join(", ")}</span>
           )}
           {preview.data && !preview.isPending && (
-            <span className="mono" style={{ color: "var(--ink-2)", fontSize: 11 }}>
+            <span className="mono text-[11px] text-ink-2">
               would re-synthesize {preview.data.affected_blocks} of {preview.data.total_speakable_blocks} segments
             </span>
           )}
           {savedInfo && !dirty && (
-            <span className="mono" style={{ color: "var(--ink-2)", fontSize: 11 }}>
+            <span className="mono text-[11px] text-ink-2">
               saved · {savedInfo.affected} of {savedInfo.total} segments will re-synthesize on next render
             </span>
           )}
           {save.isError && (
-            <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-              {(save.error as Error).message}
-            </span>
+            <span className="mono text-[11px] text-clip">{(save.error as Error).message}</span>
           )}
           {suggestAI.data && !suggestAI.isPending && (
-            <span className="mono" style={{ color: "var(--ink-2)", fontSize: 11 }}>
+            <span className="mono text-[11px] text-ink-2">
               {suggestAI.data.suggestions.length} respelling
               {suggestAI.data.suggestions.length === 1 ? "" : "s"} from {suggestAI.data.provider}/
               {suggestAI.data.model} — review and save
             </span>
           )}
-          {aiError && (
-            <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>
-              {aiError.message}
-            </span>
-          )}
+          {aiError && <span className="mono text-[11px] text-clip">{aiError.message}</span>}
         </div>
 
         {needsPaidConfirm && (
-          <div
-            className="row"
-            style={{ gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}
-          >
-            <label
-              className="mono"
-              style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}
-            >
+          <div className="mt-2 flex flex-wrap items-center gap-2 px-3.5 pb-3.5">
+            <label className="mono flex items-center gap-[5px] text-[11px]">
               <input
                 type="checkbox"
                 checked={allowPaid}
@@ -311,8 +290,7 @@ export function Lexicon() {
               approve the paid (Anthropic) suggester
             </label>
             <button
-              className="key quiet"
-              style={{ padding: "3px 9px" }}
+              className="key quiet px-[9px] py-[3px]"
               disabled={!allowPaid || suggestAI.isPending}
               onClick={onSuggestAI}
             >
@@ -323,17 +301,17 @@ export function Lexicon() {
       </div>
 
       {suggestions.length > 0 && (
-        <div className="panel" style={{ marginTop: 16 }}>
+        <div className="panel mt-4">
           <div className="panel-h">
             <b>Suggested hard names</b>
-            <span className="sub" style={{ marginLeft: 10 }}>
+            <span className="sub ml-2.5 mb-0">
               capitalized words that recur mid-sentence — likely names. Click to add.
             </span>
           </div>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <div className="flex flex-wrap gap-2 p-3.5">
             {suggestions.map((s) => (
               <button key={s.term} className="chip" onClick={() => addRow(s.term)} title={s.sample}>
-                {s.term} <span className="mono" style={{ color: "var(--ink-3)" }}>×{s.count}</span>
+                {s.term} <span className="mono text-ink-3">×{s.count}</span>
               </button>
             ))}
           </div>

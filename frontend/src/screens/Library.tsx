@@ -5,6 +5,7 @@ import { ApiError } from "../api/client";
 import { useBooks, useDeleteBook, useIngest } from "../api/hooks";
 import type { BookCard as BookCardT, JobOut, PaidArtifacts } from "../api/types";
 import { KIND_STAGE, STAGES } from "../api/types";
+import { TalkDialog } from "../components/Dialog";
 
 function SignalPath({ book }: { book: BookCardT }) {
   const activeStage = book.active_job ? KIND_STAGE[book.active_job.kind] : undefined;
@@ -26,7 +27,7 @@ function SignalPath({ book }: { book: BookCardT }) {
 
 function JobLine({ book }: { book: BookCardT }) {
   const job = book.active_job;
-  if (!job) return <div className="jobline" style={{ color: "var(--ink-3)" }}>no job active</div>;
+  if (!job) return <div className="jobline text-ink-3">no job active</div>;
   return (
     <div className="jobline">
       <i className={`led ${job.state === "running" ? "run" : "q"}`} />
@@ -35,8 +36,6 @@ function JobLine({ book }: { book: BookCardT }) {
     </div>
   );
 }
-
-const dangerStyle = { borderColor: "var(--clip)", color: "var(--clip)" } as const;
 
 /** Two-step book delete. Step 1 is a plain confirm; a 402 escalates to a second, blunt
     confirm that re-sends confirm_paid=true and spells out the paid segments it discards.
@@ -53,72 +52,69 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
   const title = book.title ?? book.book_id;
 
   return (
-    <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog">
-        <div className="dh">
-          <b>{paid ? "Discard paid renders?" : "Delete book"}</b>
-          <button className="key quiet" onClick={onClose}>esc</button>
-        </div>
-        <div className="db">
-          {conflict ? (
-            <div className="refusal">
-              <span className="tag">conflicting_job</span>
-              <p>
-                a {conflict.kind} job is {conflict.state} for this book — cancel it in the transport bar below, then
-                delete.
-              </p>
-            </div>
-          ) : partial ? (
-            <div className="refusal">
-              <span className="tag">partial_delete</span>
-              <p>
-                the delete only partly completed — these paths survived and may need a retry or a manual sweep:
-                <br />
-                {partial.survivors.map((s) => (
-                  <span key={s} className="mono" style={{ display: "block", color: "var(--caution)" }}>{s}</span>
-                ))}
-              </p>
-            </div>
-          ) : paid ? (
-            <>
-              <p style={{ margin: "0 0 10px", color: "var(--ink-2)" }}>
-                <b style={{ color: "var(--clip)" }}>{paid.paid_segment_count}</b> paid cloud segment(s) were rendered
-                for <b>{title}</b> — deleting the book discards them, and reproducing them costs real money
-                {paid.estimated_usd !== null && ` (~$${paid.estimated_usd.toFixed(2)})`}.
-              </p>
-              <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                engines: {paid.engines.join(", ") || "—"}
-                {paid.paid_voice_ids.length > 0 && ` · voices: ${paid.paid_voice_ids.join(", ")}`}
-              </div>
-            </>
-          ) : (
-            <p style={{ margin: 0, color: "var(--ink-2)" }}>
-              Permanently delete <b>{title}</b> — its ingest, attribution, casting, and any rendered/assembled audio.
-              This cannot be undone.
-            </p>
-          )}
-          {otherErr && <div className="errline" style={{ marginTop: 12 }}>{otherErr.message}</div>}
-        </div>
-        <div className="df">
+    <TalkDialog
+      title={paid ? "Discard paid renders?" : "Delete book"}
+      onClose={onClose}
+      footer={
+        <>
           <button className="key quiet" onClick={onClose}>
             {conflict ? "close" : "cancel"}
           </button>
           {conflict ? null : partial ? (
-            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(true)}>
+            <button className="key danger" disabled={del.isPending} onClick={() => run(true)}>
               {del.isPending ? "retrying…" : "retry delete"}
             </button>
           ) : paid ? (
-            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(true)}>
+            <button className="key danger" disabled={del.isPending} onClick={() => run(true)}>
               {del.isPending ? "deleting…" : `discard ${paid.paid_segment_count} paid segment(s) & delete`}
             </button>
           ) : (
-            <button className="key" style={dangerStyle} disabled={del.isPending} onClick={() => run(false)}>
+            <button className="key danger" disabled={del.isPending} onClick={() => run(false)}>
               {del.isPending ? "deleting…" : "delete book"}
             </button>
           )}
+        </>
+      }
+    >
+      {conflict ? (
+        <div className="refusal">
+          <span className="tag">conflicting_job</span>
+          <p>
+            a {conflict.kind} job is {conflict.state} for this book — cancel it in the transport bar below, then
+            delete.
+          </p>
         </div>
-      </div>
-    </div>
+      ) : partial ? (
+        <div className="refusal">
+          <span className="tag">partial_delete</span>
+          <p>
+            the delete only partly completed — these paths survived and may need a retry or a manual sweep:
+            <br />
+            {partial.survivors.map((s) => (
+              <span key={s} className="mono block text-caution">{s}</span>
+            ))}
+          </p>
+        </div>
+      ) : paid ? (
+        <>
+          <p className="mb-2.5 mt-0 text-ink-2">
+            <b className="text-clip">{paid.paid_segment_count}</b> paid cloud segment(s) were rendered
+            for <b>{title}</b> — deleting the book discards them, and reproducing them costs real money
+            {paid.estimated_usd !== null && ` (~$${paid.estimated_usd.toFixed(2)})`}.
+          </p>
+          <div className="mono text-[11px] text-ink-3">
+            engines: {paid.engines.join(", ") || "—"}
+            {paid.paid_voice_ids.length > 0 && ` · voices: ${paid.paid_voice_ids.join(", ")}`}
+          </div>
+        </>
+      ) : (
+        <p className="m-0 text-ink-2">
+          Permanently delete <b>{title}</b> — its ingest, attribution, casting, and any rendered/assembled audio.
+          This cannot be undone.
+        </p>
+      )}
+      {otherErr && <div className="errline mt-3">{otherErr.message}</div>}
+    </TalkDialog>
   );
 }
 
@@ -147,10 +143,9 @@ function Card({ book }: { book: BookCardT }) {
         <button className="key quiet" onClick={() => go("render")}>
           render &amp; jobs
         </button>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         <button
-          className="key quiet"
-          style={blocked ? undefined : dangerStyle}
+          className={`key ${blocked ? "quiet" : "danger"}`}
           disabled={blocked}
           title={blocked ? "a job is live — cancel it in the transport bar before deleting" : "delete this book"}
           onClick={() => setConfirmDelete(true)}
@@ -198,7 +193,7 @@ function UploadSlot() {
       <span className="tag">{ingest.isPending ? "ingesting…" : "drop epub / click to browse"}</span>
       <span>Ingest runs synchronously — the book appears here in seconds.</span>
       {ingest.isSuccess && (
-        <span className="mono" style={{ color: "var(--ok)", fontSize: 11 }}>
+        <span className="mono text-[11px] text-ok">
           {ingest.data.book.book_id} · {ingest.data.chapters} chapters, {ingest.data.blocks} blocks
         </span>
       )}

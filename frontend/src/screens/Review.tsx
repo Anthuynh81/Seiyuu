@@ -20,8 +20,14 @@ import {
 import type { EmotionLabel, EmotionVerdict, SuggestCastResponse } from "../api/types";
 import type { CharacterSummary, SegmentRow, VoiceOut } from "../api/types";
 import { chapterOfBlock } from "../api/types";
+import { TalkDialog } from "../components/Dialog";
+import { TalkSelect } from "../components/Select";
+import { Tip } from "../components/Tooltip";
 import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
 import { buildEmotionMap, EMOTION_LABELS, emotionKey, intensityDots } from "../lib/emotion";
+
+/** TalkSelect keys are strings; this sentinel stands in for "no voice / narration". */
+const NONE = "__none__";
 
 /* -------------------------------------------------- frontier (localStorage, per book) */
 
@@ -65,9 +71,8 @@ function RosterRow({
           <span className="sample">
             enters ch {debutChapter} ·{" "}
             <a
-              className="link"
+              className="link not-italic"
               href="#"
-              style={{ fontStyle: "normal" }}
               onClick={(e) => {
                 e.preventDefault();
                 onReveal();
@@ -81,7 +86,7 @@ function RosterRow({
         <td className="vcell">
           {/* auto voices are named after their characters — a visible picker would leak
               the very name the mask hides */}
-          <span className="mono" style={{ color: "var(--ink-3)" }}>▮▮</span>
+          <span className="mono text-ink-3">▮▮</span>
         </td>
       </tr>
     );
@@ -90,16 +95,17 @@ function RosterRow({
     <tr className={selected ? "sel" : ""} onClick={onSelect}>
       <td>
         {char.name}
-        <button
-          className="rowedit"
-          title="rename / merge"
-          onClick={(e) => {
-            e.stopPropagation();
-            onEdit();
-          }}
-        >
-          ✎
-        </button>
+        <Tip content="rename / merge">
+          <button
+            className="rowedit"
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit();
+            }}
+          >
+            ✎
+          </button>
+        </Tip>
         {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
       </td>
       <td>{char.line_count.toLocaleString()}</td>
@@ -130,33 +136,31 @@ function SuggestCastPanel({
   const existing = preview.would_recast_voice_ids.length;
   const noop = create === 0 && !recast; // every character already cast, recast off
   return (
-    <div className="caststrip" style={{ flexWrap: "wrap", gap: 8, background: "var(--surface-2)" }}>
+    <div className="caststrip flex-wrap gap-2 bg-console-hi">
       <span className="tag">smart cast</span>
-      <span className="mono" style={{ fontSize: 11, color: "var(--ink-2)" }}>
+      <span className="mono text-[11px] text-ink-2">
         every character a distinct voice · {create} new
         {existing > 0 ? ` · ${existing} already cast` : ""}
       </span>
       {existing > 0 && (
-        <label className="mono" style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}>
+        <label className="mono flex items-center gap-[5px] text-[11px]">
           <input type="checkbox" checked={recast} onChange={(e) => setRecast(e.target.checked)} />
           re-cast the {existing} existing (re-renders their audio)
         </label>
       )}
       <label
-        className="mono"
-        style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center" }}
+        className="mono flex items-center gap-[5px] text-[11px]"
         title="ask the LLM for per-character voice-trait hints. Voices stay distinct — the hint only nudges which one each character gets."
       >
         <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
         ✨ use AI trait hints
       </label>
-      <span style={{ flex: 1 }} />
-      <button className="key quiet" style={{ padding: "3px 9px" }} onClick={onDismiss}>
+      <span className="flex-1" />
+      <button className="key quiet px-[9px] py-[3px]" onClick={onDismiss}>
         dismiss
       </button>
       <button
-        className="key"
-        style={{ padding: "3px 12px" }}
+        className="key px-3 py-[3px]"
         disabled={applying || noop}
         title={noop ? "every character is already cast — enable re-cast to overwrite" : undefined}
         onClick={() => onApply({ recast, useLlm })}
@@ -178,19 +182,18 @@ function VoicePicker({
   voices: VoiceOut[];
   allowOwn?: boolean; // the thought-voice "speaker's own" option
 }) {
+  const options = [
+    ...(allowOwn ? [{ value: NONE, label: "speaker's own" }] : value === null ? [{ value: NONE, label: "— uncast —" }] : []),
+    ...voices.map((v) => ({ value: v.voice_id, label: `${v.name} · ${v.engine}` })),
+  ];
   return (
-    <select
+    <TalkSelect
       className="vpick"
-      value={value ?? ""}
-      onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
-    >
-      {allowOwn ? <option value="">speaker's own</option> : value === null && <option value="">— uncast —</option>}
-      {voices.map((v) => (
-        <option key={v.voice_id} value={v.voice_id}>
-          {v.name} · {v.engine}
-        </option>
-      ))}
-    </select>
+      ariaLabel="voice"
+      value={value ?? NONE}
+      onChange={(v) => onChange(v === NONE ? null : v)}
+      options={options}
+    />
   );
 }
 
@@ -207,56 +210,49 @@ function CharacterEditor({
 }) {
   const record = useRecordEdit(bookId);
   const [name, setName] = useState(char.name);
-  const [mergeInto, setMergeInto] = useState("");
+  const [mergeInto, setMergeInto] = useState(NONE);
   const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
   return (
-    <div className="overlay on" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog">
-        <div className="dh">
-          <b>Edit character — {char.name}</b>
-          <button className="key quiet" onClick={onClose}>esc</button>
-        </div>
-        <div className="db">
-          <label>canonical name</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
-            <button
-              className="key"
-              disabled={record.isPending || name.trim() === "" || name === char.name}
-              onClick={() =>
-                record.mutate({ op: "rename", character_id: char.id, new_name: name.trim() }, { onSuccess: onClose })
-              }
-            >
-              rename
-            </button>
-          </div>
-          {char.aliases.length > 0 && (
-            <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6 }}>
-              also seen as: {char.aliases.join(", ")}
-            </div>
-          )}
-          <label>merge into another character (this one's lines move there)</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <select value={mergeInto} onChange={(e) => setMergeInto(e.target.value)}>
-              <option value="">— choose —</option>
-              {others.map((o) => (
-                <option key={o.id} value={o.id}>{o.name}</option>
-              ))}
-            </select>
-            <button
-              className="key"
-              disabled={record.isPending || !mergeInto}
-              onClick={() =>
-                record.mutate({ op: "merge", loser_id: char.id, winner_id: mergeInto }, { onSuccess: onClose })
-              }
-            >
-              merge
-            </button>
-          </div>
-          {error && <div className="errline" style={{ marginTop: 12 }}>{error}</div>}
-        </div>
+    <TalkDialog title={`Edit character — ${char.name}`} onClose={onClose}>
+      <label>canonical name</label>
+      <div className="flex gap-2">
+        <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
+        <button
+          className="key"
+          disabled={record.isPending || name.trim() === "" || name === char.name}
+          onClick={() =>
+            record.mutate({ op: "rename", character_id: char.id, new_name: name.trim() }, { onSuccess: onClose })
+          }
+        >
+          rename
+        </button>
       </div>
-    </div>
+      {char.aliases.length > 0 && (
+        <div className="mono mt-1.5 text-[11px] text-ink-3">
+          also seen as: {char.aliases.join(", ")}
+        </div>
+      )}
+      <label>merge into another character (this one's lines move there)</label>
+      <div className="flex gap-2">
+        <TalkSelect
+          className="flex-1"
+          ariaLabel="merge into"
+          value={mergeInto}
+          onChange={setMergeInto}
+          options={[{ value: NONE, label: "— choose —" }, ...others.map((o) => ({ value: o.id, label: o.name }))]}
+        />
+        <button
+          className="key"
+          disabled={record.isPending || mergeInto === NONE}
+          onClick={() =>
+            record.mutate({ op: "merge", loser_id: char.id, winner_id: mergeInto }, { onSuccess: onClose })
+          }
+        >
+          merge
+        </button>
+      </div>
+      {error && <div className="errline mt-3">{error}</div>}
+    </TalkDialog>
   );
 }
 
@@ -274,24 +270,23 @@ function ReassignPopover({
   onClose: () => void;
 }) {
   const record = useRecordEdit(bookId);
-  const [speaker, setSpeaker] = useState(row.speaker ?? "");
+  const [speaker, setSpeaker] = useState(row.speaker ?? NONE);
   const anchor = row.text.replace(/\s+/g, " ").trim().slice(0, 58);
   const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
   return (
     <span className="popover" onClick={(e) => e.stopPropagation()}>
       <span className="tag">reassign · {row.block_id} [{row.segment_index}]</span>
       <span className="row">
-        <select value={speaker} onChange={(e) => setSpeaker(e.target.value)}>
-          <option value="">— narration —</option>
-          {cast.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
+        <TalkSelect
+          className="flex-1"
+          ariaLabel="speaker"
+          value={speaker}
+          onChange={setSpeaker}
+          options={[{ value: NONE, label: "— narration —" }, ...cast.map((c) => ({ value: c.id, label: c.name }))]}
+        />
       </span>
-      <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)" }}>
-        anchor: {anchor}…
-      </span>
-      {error && <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--clip)", marginTop: 6 }}>{error}</span>}
+      <span className="mono block text-[10px] text-ink-3">anchor: {anchor}…</span>
+      {error && <span className="mono block mt-1.5 text-[10.5px] text-clip">{error}</span>}
       <span className="acts">
         <button className="key quiet" onClick={onClose}>cancel</button>
         <button
@@ -299,7 +294,12 @@ function ReassignPopover({
           disabled={record.isPending}
           onClick={() =>
             record.mutate(
-              { op: "reassign", block_id: row.block_id, segment_index: row.segment_index, speaker: speaker || null },
+              {
+                op: "reassign",
+                block_id: row.block_id,
+                segment_index: row.segment_index,
+                speaker: speaker === NONE ? null : speaker,
+              },
               { onSuccess: onClose },
             )
           }
@@ -341,22 +341,26 @@ function EmotionPopover({
   return (
     <span className="popover" onClick={(e) => e.stopPropagation()}>
       <span className="tag">emotion · {row.block_id} [{row.segment_index}]</span>
-      <span className="row" style={{ display: "flex", gap: 6 }}>
-        <select value={label} onChange={(e) => setLabel(e.target.value as EmotionLabel)}>
-          {settable.map((l) => (
-            <option key={l} value={l}>{l}</option>
-          ))}
-        </select>
-        <select value={intensity} onChange={(e) => setIntensity(Number(e.target.value))}>
-          {[1, 2, 3].map((n) => (
-            <option key={n} value={n}>intensity {n}</option>
-          ))}
-        </select>
+      <span className="row flex gap-1.5">
+        <TalkSelect
+          className="flex-1"
+          ariaLabel="emotion label"
+          value={label}
+          onChange={(v) => setLabel(v as EmotionLabel)}
+          options={settable.map((l) => ({ value: l, label: l }))}
+        />
+        <TalkSelect
+          className="flex-1"
+          ariaLabel="intensity"
+          value={String(intensity)}
+          onChange={(v) => setIntensity(Number(v))}
+          options={[1, 2, 3].map((n) => ({ value: String(n), label: `intensity ${n}` }))}
+        />
       </span>
-      <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)" }}>
+      <span className="mono block text-[10px] text-ink-3">
         voiced at render only when emotion rendering is on
       </span>
-      {error && <span style={{ display: "block", fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--clip)", marginTop: 6 }}>{error}</span>}
+      {error && <span className="mono block mt-1.5 text-[10.5px] text-clip">{error}</span>}
       <span className="acts">
         {current && (
           <button className="key quiet" disabled={record.isPending} onClick={() => save(null)}>
@@ -474,13 +478,17 @@ export function Review() {
 
   return (
     <section className="screen">
-      <h1 style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
+      <h1 className="flex items-baseline gap-3.5">
         Character Review
-        <select className="bookpick" value={bookId} onChange={(e) => setParams({ book: e.target.value })} aria-label="book">
-          {books.data?.books.filter((b) => b.attributed).map((b) => (
-            <option key={b.book_id} value={b.book_id}>{b.title ?? b.book_id}</option>
-          ))}
-        </select>
+        <TalkSelect
+          className="bookpick"
+          ariaLabel="book"
+          value={bookId}
+          onChange={(v) => setParams({ book: v })}
+          options={(books.data?.books ?? [])
+            .filter((b) => b.attributed)
+            .map((b) => ({ value: b.book_id, label: b.title ?? b.book_id }))}
+        />
       </h1>
       <p className="sub">
         The machine's attributions in the margin, the book on the page. Fixes are durable edits replayed over every
@@ -495,22 +503,20 @@ export function Review() {
         <>
           <div className="drainstrip">
             <span className="state"><i className={`led ${overview.data && overview.data.low_confidence_segments > 0 ? "warn" : "ok"}`} />review queue</span>
-            <span className="mono" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
+            <span className="mono text-[11.5px] text-ink-2">
               {overview.data?.low_confidence_segments ?? "…"} low-confidence in the book · {lowConfInChapter.length} in this chapter
             </span>
             {overview.data && (
-              <span
-                className="mono"
-                style={{ fontSize: 10.5, color: "var(--ink-3)" }}
-                title="the LLM that produced this attribution"
-              >
-                read by {overview.data.provider_id} · {overview.data.model_id} · {overview.data.prompt_version}
-              </span>
+              <Tip content="the LLM that produced this attribution">
+                <span className="mono text-[10.5px] text-ink-3">
+                  read by {overview.data.provider_id} · {overview.data.model_id} · {overview.data.prompt_version}
+                </span>
+              </Tip>
             )}
             <button className="key quiet" onClick={jumpToLowConf} disabled={lowConfInChapter.length === 0}>next ▸</button>
-            <span style={{ flex: 1 }} />
+            <span className="flex-1" />
             <span className="tag">edits</span>
-            <span className="mono" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>{editLog.data?.ops.length ?? 0}</span>
+            <span className="mono text-[11.5px] text-ink-2">{editLog.data?.ops.length ?? 0}</span>
             <button
               className="key quiet"
               disabled={undo.isPending || (editLog.data?.ops.length ?? 0) === 0}
@@ -518,22 +524,22 @@ export function Review() {
             >
               undo last
             </button>
-            {undo.error && <span className="mono" style={{ color: "var(--clip)", fontSize: 11 }}>{undo.error.message}</span>}
+            {undo.error && <span className="mono text-[11px] text-clip">{undo.error.message}</span>}
           </div>
 
           <div className="review">
             <div className="panel roster" style={{ margin: 0 }}>
               <div className="panel-h">
                 <b>Cast</b>
-                <span className="tag" style={{ marginLeft: 8 }}>{cast.length}</span>
-                <button
-                  className="key quiet"
-                  style={{ marginLeft: "auto", padding: "3px 9px" }}
-                  title="hide characters that first appear beyond your reading frontier"
-                  onClick={() => setSpoilerSafe(!spoilerSafe)}
-                >
-                  spoiler-safe {spoilerSafe ? "✓" : "✗"}
-                </button>
+                <span className="tag ml-2">{cast.length}</span>
+                <Tip content="hide characters that first appear beyond your reading frontier">
+                  <button
+                    className="key quiet ml-auto px-[9px] py-[3px]"
+                    onClick={() => setSpoilerSafe(!spoilerSafe)}
+                  >
+                    spoiler-safe {spoilerSafe ? "✓" : "✗"}
+                  </button>
+                </Tip>
               </div>
               <div className="frontier">
                 <span className="tag">frontier</span> read through ch{" "}
@@ -550,21 +556,20 @@ export function Review() {
               <div className="caststrip">
                 {!casting ? (
                   <>
-                    <span style={{ color: "var(--ink-2)", fontSize: 12 }}>
+                    <span className="text-xs text-ink-2">
                       no casting yet — auto-cast gives every character a distinct voice blend
                     </span>
+                    <Tip content="preview a smart cast: every character a distinct voice, no collisions">
+                      <button
+                        className="key quiet ml-auto px-[9px] py-[3px]"
+                        disabled={suggestCast.isPending}
+                        onClick={() => suggestCast.mutate()}
+                      >
+                        {suggestCast.isPending ? "thinking…" : "suggest cast"}
+                      </button>
+                    </Tip>
                     <button
-                      className="key quiet"
-                      style={{ marginLeft: "auto", padding: "3px 9px" }}
-                      title="preview a smart cast: every character a distinct voice, no collisions"
-                      disabled={suggestCast.isPending}
-                      onClick={() => suggestCast.mutate()}
-                    >
-                      {suggestCast.isPending ? "thinking…" : "suggest cast"}
-                    </button>
-                    <button
-                      className="key"
-                      style={{ padding: "3px 12px" }}
+                      className="key px-3 py-[3px]"
                       disabled={draftCast.isPending}
                       onClick={() => draftCast.mutate({})}
                     >
@@ -576,34 +581,32 @@ export function Review() {
                     {(["draft", "final"] as const).map((s) => (
                       <button
                         key={s}
-                        className={`chap ${casting.stage === s ? "on" : ""}`}
-                        style={{ padding: "2px 9px" }}
+                        className={`chap px-[9px] py-[2px] ${casting.stage === s ? "on" : ""}`}
                         onClick={() => setCasting({ ...casting, stage: s })}
                       >
                         {s}
                       </button>
                     ))}
+                    <Tip content="preview a smart cast: every character a distinct voice, no collisions">
+                      <button
+                        className="key quiet ml-auto px-[9px] py-[3px]"
+                        disabled={suggestCast.isPending}
+                        onClick={() => suggestCast.mutate()}
+                      >
+                        {suggestCast.isPending ? "thinking…" : "suggest cast"}
+                      </button>
+                    </Tip>
+                    <Tip content="re-run the deterministic draft — fills newly-discovered characters, keeps existing voices">
+                      <button
+                        className="key quiet px-[9px] py-[3px]"
+                        disabled={draftCast.isPending}
+                        onClick={() => draftCast.mutate({})}
+                      >
+                        re-draft
+                      </button>
+                    </Tip>
                     <button
-                      className="key quiet"
-                      style={{ marginLeft: "auto", padding: "3px 9px" }}
-                      title="preview a smart cast: every character a distinct voice, no collisions"
-                      disabled={suggestCast.isPending}
-                      onClick={() => suggestCast.mutate()}
-                    >
-                      {suggestCast.isPending ? "thinking…" : "suggest cast"}
-                    </button>
-                    <button
-                      className="key quiet"
-                      style={{ padding: "3px 9px" }}
-                      title="re-run the deterministic draft — fills newly-discovered characters, keeps existing voices"
-                      disabled={draftCast.isPending}
-                      onClick={() => draftCast.mutate({})}
-                    >
-                      re-draft
-                    </button>
-                    <button
-                      className="key"
-                      style={{ padding: "3px 12px" }}
+                      className="key px-3 py-[3px]"
                       disabled={!castingDirty || saveCast.isPending}
                       onClick={() =>
                         saveCast.mutate({
@@ -633,7 +636,7 @@ export function Review() {
                 />
               )}
               {suggestCast.error && (
-                <div className="refusal" style={{ margin: "8px 12px" }}>
+                <div className="refusal mx-3 my-2">
                   <span className="tag">
                     {suggestCast.error instanceof ApiError ? suggestCast.error.code : "error"}
                   </span>
@@ -641,12 +644,12 @@ export function Review() {
                 </div>
               )}
               {draftCast.data && draftCast.data.created_voice_ids.length > 0 && (
-                <div className="caststrip" style={{ color: "var(--ok)", fontFamily: "var(--mono)", fontSize: 11 }}>
+                <div className="caststrip mono text-[11px] text-ok">
                   created {draftCast.data.created_voice_ids.length} voice(s) — tune them in Voice Studio
                 </div>
               )}
               {(draftCast.error || saveCast.error) && (
-                <div className="refusal" style={{ margin: "8px 12px" }}>
+                <div className="refusal mx-3 my-2">
                   <span className="tag">
                     {(draftCast.error ?? saveCast.error) instanceof ApiError
                       ? ((draftCast.error ?? saveCast.error) as ApiError).code
@@ -655,7 +658,7 @@ export function Review() {
                   <p>{(draftCast.error ?? saveCast.error)?.message}</p>
                 </div>
               )}
-              {overview.isPending && <div className="loadline" style={{ padding: 14 }}>reading the registry…</div>}
+              {overview.isPending && <div className="loadline p-3.5">reading the registry…</div>}
               <table>
                 <tbody>
                   <tr>
@@ -678,7 +681,7 @@ export function Review() {
                   </tr>
                   {casting && (
                     <tr>
-                      <td style={{ color: "var(--ink-2)" }}>
+                      <td className="text-ink-2">
                         Thoughts<span className="sample">inner voice for thought segments</span>
                       </td>
                       <td>—</td>
@@ -709,7 +712,7 @@ export function Review() {
                             voices={voicesQ.data?.voices ?? []}
                           />
                         ) : (
-                          <span className="mono" style={{ color: "var(--ink-3)" }}>—</span>
+                          <span className="mono text-ink-3">—</span>
                         )
                       }
                     />
@@ -719,7 +722,7 @@ export function Review() {
             </div>
 
             <div className="page-wrap" ref={pageRef}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+              <div className="flex items-center gap-2.5 mb-3.5">
                 <button className="chap" disabled={chapter <= 1} onClick={() => setChapter(chapter - 1)}>‹</button>
                 <span className="tag">
                   chapter {chapter} of {chapterCount}
@@ -727,25 +730,23 @@ export function Review() {
                 </span>
                 <button className="chap" disabled={chapter >= chapterCount} onClick={() => setChapter(chapter + 1)}>›</button>
                 {emotionMap.size > 0 && (
-                  <span
-                    className="mono"
-                    style={{ fontSize: 10.5, color: "var(--ink-3)" }}
-                    title="the emotion the model tagged each line with — voiced at render only when emotion rendering is enabled"
-                  >
-                    {emotionMap.size} emotion tag(s) in this chapter
-                  </span>
+                  <Tip content="the emotion the model tagged each line with — voiced at render only when emotion rendering is enabled">
+                    <span className="mono text-[10.5px] text-ink-3">
+                      {emotionMap.size} emotion tag(s) in this chapter
+                    </span>
+                  </Tip>
                 )}
                 {warnings.length > 0 && (
-                  <span className="mono" style={{ fontSize: 10.5, color: "var(--caution)", marginLeft: "auto" }}>
+                  <span className="mono ml-auto text-[10.5px] text-caution">
                     {warnings.length} edit warning(s)
                   </span>
                 )}
               </div>
               {warnings.map((w) => (
-                <div className="mwarn" key={w} style={{ margin: "0 0 10px" }}>edit overlay — {w}</div>
+                <div className="mwarn mb-2.5" key={w}>edit overlay — {w}</div>
               ))}
               {flaggedHere.map((f) => (
-                <div className="mwarn" key={f.block_id} style={{ margin: "0 0 10px" }}>
+                <div className="mwarn mb-2.5" key={f.block_id}>
                   flagged {f.block_id} — {f.reason}
                 </div>
               ))}
@@ -833,11 +834,11 @@ function SegmentPair({
   const chipLabel = row.speaker === null ? "narration" : maskedName ? "▮▮▮▮▮" : (row.speaker_name ?? row.speaker);
   return (
     <>
-      <p className={`seg serif ${dialogueish ? "dlg" : ""}`} data-seg={`${row.block_id}:${row.segment_index}`} style={{ position: "relative" }}>
+      <p className={`seg serif relative ${dialogueish ? "dlg" : ""}`} data-seg={`${row.block_id}:${row.segment_index}`}>
         {open || emoOpen ? <span className="hl">{row.text}</span> : row.text}
         {popover}
       </p>
-      <div className="margin" style={{ position: "relative" }}>
+      <div className="margin relative">
         <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={onChip} role="button" tabIndex={0}>
           {row.speaker === null ? chipLabel : chipLabel.toUpperCase()}
         </span>
@@ -857,15 +858,6 @@ function SegmentPair({
               className="emoadd"
               onClick={onEmotion}
               title="tag this line with an emotion (voiced at render when emotion rendering is on)"
-              style={{
-                background: "none",
-                border: "1px dashed var(--hairline)",
-                color: "var(--ink-3)",
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 10,
-                padding: "1px 6px",
-              }}
             >
               + emotion
             </button>
