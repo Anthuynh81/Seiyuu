@@ -54,6 +54,12 @@ export function Listen() {
   const [params, setParams] = useSearchParams();
   const books = useBooks();
   const player = usePlayer();
+  // The imperative word-span handlers below outlive the render that created them, and the
+  // player api is rebuilt on every state change — a captured `player` still holds the clips
+  // from BEFORE load() ran (empty on first build), so seekClip would silently no-op. Same
+  // latest-ref idiom as hlRef.
+  const playerRef = useRef(player);
+  playerRef.current = player;
   const bookId = params.get("book");
   const book = useBook(bookId);
   const rendered = !!book.data?.status.rendered;
@@ -140,7 +146,7 @@ export function Listen() {
         // reads word.offset LIVE at click time, so it picks up whisper-refined offsets
         word.el.onclick = (e) => {
           e.stopPropagation();
-          player.seekClip(ci, word.offset);
+          playerRef.current?.seekClip(ci, word.offset);
         };
       });
       builtRef.current.push({ ci, key: g.key, clipWords, rows, duration: g.duration });
