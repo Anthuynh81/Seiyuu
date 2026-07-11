@@ -1,7 +1,9 @@
-import { act } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "../test/utils";
+import { PlayerProvider } from "./player";
 import { usePlayer, type PlayClip, type PlayerApi } from "./usePlayer";
 
 /** jsdom's HTMLMediaElement never flips `paused` (the setup shims make play/pause safe
@@ -105,6 +107,44 @@ describe("PlayerProvider", () => {
     expect(onEnded).toHaveBeenCalledTimes(1);
     expect(player.api.playing).toBe(false);
     expect(player.api.index).toBe(1); // stays on the last clip
+  });
+
+  it("StrictMode double-invocation cannot double-advance or double-fire onEnded (side effects live outside updaters)", () => {
+    // main.tsx wraps the app in StrictMode, whose dev build double-invokes setState
+    // updaters — side effects inside one (play(), onEnded) would fire twice. The shared
+    // harness deliberately omits StrictMode, so mount the provider under it directly.
+    const holder: { api?: PlayerApi } = {};
+    function Probe() {
+      holder.api = usePlayer() ?? undefined;
+      return null;
+    }
+    render(
+      <StrictMode>
+        <PlayerProvider>
+          <Probe />
+        </PlayerProvider>
+      </StrictMode>,
+    );
+    const onEnded = vi.fn();
+    act(() =>
+      holder.api!.load("b1", "ch", [clip("/audio/a.wav", 10), clip("/audio/b.wav", 20)], { onEnded }),
+    );
+    const audio = holder.api!.audio!;
+    playSpy.mockClear();
+
+    // mid-chapter advance: exactly one play() per ended event
+    act(() => {
+      audio.dispatchEvent(new Event("ended"));
+    });
+    expect(holder.api!.index).toBe(1);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+
+    // chapter end: the completion callback (auto-advance to the next chapter) fires once
+    act(() => {
+      audio.dispatchEvent(new Event("ended"));
+    });
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(holder.api!.playing).toBe(false);
   });
 
   it("toggle pauses playback and toggling again resumes it", () => {

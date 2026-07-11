@@ -421,7 +421,7 @@ describe("Review", () => {
     });
   });
 
-  it("applying with AI trait hints sends use_llm=true and a 402 surfaces the payment gate instead of applying", async () => {
+  it("applying with AI trait hints sends use_llm=true; a 402 gates on explicit approval, then retries with confirm_paid", async () => {
     const user = userEvent.setup();
     const server = setupReview();
     server.post("/api/books/b1/assignment/suggest", {
@@ -456,5 +456,26 @@ describe("Review", () => {
     expect(
       server.calls.filter((c) => c.method === "POST" && c.url.includes("/assignment/draft")),
     ).toHaveLength(1);
+
+    // the recourse: retry is dead until the paid caster is explicitly approved
+    const retry = screen.getByRole("button", { name: "retry cast" });
+    expect(retry).toBeDisabled();
+    server.post("/api/books/b1/assignment/draft", {
+      assignment: ASSIGNMENT,
+      created_voice_ids: ["v-alice", "v-bob"],
+      edit_warnings: [],
+    });
+    await user.click(screen.getByRole("checkbox", { name: /approve the paid \(Anthropic\) caster/ }));
+    await user.click(retry);
+
+    expect(await screen.findByText(/created 2 voice\(s\)/)).toBeInTheDocument();
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
+      strategy: "smart",
+      recast: false,
+      use_llm: true,
+      confirm_paid: true,
+    });
+    // success dismisses the preview panel — the paid flow ends cleanly
+    expect(screen.queryByRole("button", { name: "apply cast" })).not.toBeInTheDocument();
   });
 });

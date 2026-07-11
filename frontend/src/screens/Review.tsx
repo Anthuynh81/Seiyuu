@@ -122,16 +122,21 @@ function RosterRow({
 function SuggestCastPanel({
   preview,
   applying,
+  applyError,
   onApply,
   onDismiss,
 }: {
   preview: SuggestCastResponse;
   applying: boolean;
-  onApply: (opts: { recast: boolean; useLlm: boolean }) => void;
+  /** the last apply failure — a 402 here grows the explicit paid-confirm recourse */
+  applyError: ApiError | null;
+  onApply: (opts: { recast: boolean; useLlm: boolean; confirmPaid?: boolean }) => void;
   onDismiss: () => void;
 }) {
   const [recast, setRecast] = useState(false);
   const [useLlm, setUseLlm] = useState(false);
+  const [allowPaid, setAllowPaid] = useState(false);
+  const needsPaidConfirm = applyError?.code === "payment_confirmation_required";
   const create = preview.would_create_voice_ids.length;
   const existing = preview.would_recast_voice_ids.length;
   const noop = create === 0 && !recast; // every character already cast, recast off
@@ -167,6 +172,25 @@ function SuggestCastPanel({
       >
         {applying ? "applying…" : noop ? "nothing to apply" : "apply cast"}
       </button>
+      {needsPaidConfirm && (
+        <>
+          <label className="mono flex items-center gap-[5px] text-[11px]">
+            <input
+              type="checkbox"
+              checked={allowPaid}
+              onChange={(e) => setAllowPaid(e.target.checked)}
+            />
+            approve the paid (Anthropic) caster
+          </label>
+          <button
+            className="key quiet px-[9px] py-[3px]"
+            disabled={!allowPaid || applying}
+            onClick={() => onApply({ recast, useLlm, confirmPaid: true })}
+          >
+            retry cast
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -626,9 +650,15 @@ export function Review() {
                 <SuggestCastPanel
                   preview={suggestCast.data}
                   applying={draftCast.isPending}
-                  onApply={({ recast, useLlm }) =>
+                  applyError={draftCast.error instanceof ApiError ? draftCast.error : null}
+                  onApply={({ recast, useLlm, confirmPaid }) =>
                     draftCast.mutate(
-                      { strategy: "smart", recast, use_llm: useLlm },
+                      {
+                        strategy: "smart",
+                        recast,
+                        use_llm: useLlm,
+                        ...(confirmPaid ? { confirm_paid: true } : {}),
+                      },
                       { onSuccess: () => suggestCast.reset() },
                     )
                   }

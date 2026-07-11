@@ -22,6 +22,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     playing: false,
     clipElapsed: 0,
   });
+  // The audio element's listeners are attached once but must read the CURRENT clips; the
+  // ref keeps them honest without putting side effects inside setState updaters (StrictMode
+  // double-invokes updaters in dev, which would double-fire onEnded and double-play).
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const [volume, setVolumeState] = useState(() => Number(localStorage.getItem("seiyuu.volume") ?? "0.8"));
 
   const ensureAudio = () => {
@@ -29,18 +34,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const el = new Audio();
       el.volume = volume;
       el.addEventListener("timeupdate", () => setState((s) => ({ ...s, clipElapsed: el.currentTime })));
-      el.addEventListener("ended", () =>
-        setState((s) => {
-          const next = s.index + 1;
-          if (next >= s.clips.length) {
-            onEndedRef.current?.();
-            return { ...s, playing: false, clipElapsed: 0 };
-          }
-          el.src = s.clips[next].src;
-          el.play().catch(() => {});
-          return { ...s, index: next, clipElapsed: 0 };
-        }),
-      );
+      el.addEventListener("ended", () => {
+        const s = stateRef.current;
+        const next = s.index + 1;
+        if (next >= s.clips.length) {
+          onEndedRef.current?.();
+          setState((cur) => ({ ...cur, playing: false, clipElapsed: 0 }));
+          return;
+        }
+        el.src = s.clips[next].src;
+        el.play().catch(() => {});
+        setState((cur) => ({ ...cur, index: next, clipElapsed: 0 }));
+      });
       audioRef.current = el;
     }
     return audioRef.current;
