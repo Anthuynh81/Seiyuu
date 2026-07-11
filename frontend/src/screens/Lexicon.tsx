@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
@@ -102,7 +102,15 @@ export function Lexicon() {
 
   // Re-seed the editable rows whenever the server copy (or the selected book) changes.
   const serverSig = lexicon.data ? entriesSig(lexicon.data.entries) : null;
+  const seededBook = useRef<string | null>(null);
   useEffect(() => {
+    const sameBook = seededBook.current === bookId;
+    seededBook.current = bookId;
+    // A save invalidates the lexicon query, and the refetch hands back the editor's own
+    // rows — that is the save LANDING, not an external change. Skip the reset so the
+    // "saved · N of M" confirmation survives its own round-trip (it used to be cleared
+    // the same frame it became visible). A book switch always reseeds.
+    if (sameBook && lexicon.data && serverSig === entriesSig(rows)) return;
     if (lexicon.data) setRows(lexicon.data.entries.map((e) => ({ ...e })));
     setSavedInfo(null);
     preview.reset();
@@ -142,8 +150,10 @@ export function Lexicon() {
 
   const onSave = () => {
     save.mutate(cleanForSave(rows), {
-      onSuccess: (res) =>
-        setSavedInfo({ affected: res.affected_blocks, total: res.total_speakable_blocks }),
+      onSuccess: (res) => {
+        setSavedInfo({ affected: res.affected_blocks, total: res.total_speakable_blocks });
+        preview.reset(); // the previewed delta just landed — don't show both counts
+      },
     });
   };
 

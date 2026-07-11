@@ -137,6 +137,43 @@ describe("Lexicon", () => {
     });
   });
 
+  it("the saved confirmation survives the lexicon refetch that lands its own save, and retires on the next edit", async () => {
+    const user = userEvent.setup();
+    // the GET route serves a mutable copy so the post-save invalidation refetch returns
+    // exactly what the PUT stored — the round-trip that used to clear the message
+    let serverEntries = [entry({ term: "Kvothe", respelling: "KVOH-thee" })];
+    const server = mockApi()
+      .get("/api/books", { books: [makeBook({ book_id: "b1", title: "The Name of the Wind" })] })
+      .on("GET", "/api/books/b1/lexicon", () => jsonResponse(lexiconOut(serverEntries)));
+    server.on("PUT", "/api/books/b1/lexicon", (_url, init) => {
+      serverEntries = (JSON.parse(init?.body as string) as { entries: LexiconEntry[] }).entries;
+      return jsonResponse({
+        book_id: "b1",
+        schema_version: 1,
+        entries: serverEntries,
+        affected_blocks: 5,
+        total_speakable_blocks: 40,
+      });
+    });
+    renderWithProviders(<Lexicon />);
+
+    await screen.findByDisplayValue("KVOH-thee");
+    await user.type(screen.getByLabelText("respelling"), "!");
+    await user.click(screen.getByRole("button", { name: "save" }));
+
+    // the message only renders once the editor is clean again, i.e. AFTER the refetch lands
+    expect(
+      await screen.findByText(/saved · 5 of 40 segments will re-synthesize on next render/),
+    ).toBeInTheDocument();
+    expect(
+      server.calls.filter((c) => c.method === "GET" && c.url.includes("/lexicon")).length,
+    ).toBeGreaterThan(1);
+
+    // a real edit re-dirties the editor and retires the stale confirmation
+    await user.type(screen.getByLabelText("respelling"), "?");
+    expect(screen.queryByText(/saved ·/)).not.toBeInTheDocument();
+  });
+
   it("suggest-with-AI POSTs the editor's terms and folds advisory respellings in without clobbering user input", async () => {
     const user = userEvent.setup();
     const server = mountLexicon(
