@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -83,11 +83,11 @@ function makeQuote(over: Partial<QuoteResponse> = {}): QuoteResponse {
 }
 
 /** Mount routes for one book; per-test routes (estimate/quotes/render) layer on top. */
-function mountRoutes(card: BookCard): MockApi {
+function mountRoutes(card: BookCard, system: SystemStatusOut = makeSystem()): MockApi {
   return mockApi()
     .get("/api/books", { books: [card] })
     .get("/api/books/demo", makeDetail(card))
-    .get("/api/system", makeSystem());
+    .get("/api/system", system);
 }
 
 /** ingested + attributed + assigned -> the screen defaults to a ready multivoice render. */
@@ -113,6 +113,64 @@ describe("RenderJobs", () => {
     const est = server.lastCall("GET", "/cost-estimate");
     expect(est?.url).toContain("mode=multivoice");
     expect(est?.url).toContain("apply_emotion=false");
+  });
+
+  it("a server default of apply_emotion=true flows into the estimate and quote with no checkbox touch", async () => {
+    const user = userEvent.setup();
+    const server = mountRoutes(readyCard(), makeSystem({ apply_emotion: true }))
+      .get("/api/books/demo/cost-estimate", makeEstimate({ total_usd: 1.25, paid_segments: 7 }))
+      .post("/api/books/demo/quotes", makeQuote());
+    renderWithProviders(<RenderJobs />);
+
+    // the hint proves the default came from /api/system rather than a hardcoded false
+    expect(await screen.findByText(/system default: on/)).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "voice per-line emotion" })).toBeChecked();
+    await waitFor(() =>
+      expect(server.lastCall("GET", "/cost-estimate")?.url).toContain("apply_emotion=true"),
+    );
+
+    // mint WITHOUT touching the toggle: the server default must reach the quote fingerprint
+    await user.click(await screen.findByRole("button", { name: /approve — mint quote for \$1\.25/ }));
+    await screen.findByRole("button", { name: "CONFIRM & RENDER" });
+    expect(server.jsonBodyOf("POST", "/quotes")).toEqual({
+      mode: "multivoice",
+      chapters: [],
+      apply_emotion: true,
+    });
+  });
+
+  it("single-voice mode is emotion-agnostic: no apply_emotion anywhere, and the render carries single:{}", async () => {
+    const user = userEvent.setup();
+    const server = mountRoutes(readyCard())
+      .get("/api/books/demo/cost-estimate", makeEstimate({ total_usd: 1.25, paid_segments: 7, mode: "single" }))
+      .post("/api/books/demo/quotes", makeQuote({ token: "tok-s" }))
+      .post("/api/books/demo/render", makeJob({ kind: "render", state: "queued" }));
+    renderWithProviders(<RenderJobs />);
+
+    await user.click(await screen.findByRole("button", { name: "single voice" }));
+    // the emotion toggle is a multivoice affordance — single hides it entirely
+    await waitFor(() =>
+      expect(screen.queryByRole("checkbox", { name: "voice per-line emotion" })).not.toBeInTheDocument(),
+    );
+    // ...and the estimate URL carries NO apply_emotion param (cache-key parity with the backend)
+    await waitFor(() => {
+      const est = server.lastCall("GET", "/cost-estimate");
+      expect(est?.url).toContain("mode=single");
+      expect(est?.url).not.toContain("apply_emotion");
+    });
+
+    await user.click(await screen.findByRole("button", { name: /approve — mint quote for \$1\.25/ }));
+    const confirm = await screen.findByRole("button", { name: "CONFIRM & RENDER" });
+    expect(server.jsonBodyOf("POST", "/quotes")).toEqual({ mode: "single", chapters: [], single: {} });
+
+    await user.click(confirm);
+    await waitFor(() => expect(server.lastCall("POST", "/render")).toBeDefined());
+    expect(server.jsonBodyOf("POST", "/render")).toEqual({
+      mode: "single",
+      chapters: [],
+      single: {},
+      cost_token: "tok-s",
+    });
   });
 
   it("a free estimate renders in one click: POST /render directly, no quote minted", async () => {
@@ -298,6 +356,45 @@ describe("RenderJobs", () => {
       apply_emotion: false,
       confirm_full: true,
     });
+  });
+
+  it("a paid whole-book refusal re-sends BOTH the live ticket's token AND confirm_full on the confirmed retry", async () => {
+    const user = userEvent.setup();
+    const server = mountRoutes(readyCard())
+      .get("/api/books/demo/cost-estimate", makeEstimate({ total_usd: 1.25, paid_segments: 7 }))
+      .post("/api/books/demo/quotes", makeQuote({ token: "tok-x" }));
+    let renders = 0;
+    server.on("POST", "/api/books/demo/render", () => {
+      renders += 1;
+      return renders === 1
+        ? errorResponse(409, "full_render_confirmation_required", "confirm the full render", {
+            speakable_blocks: 4200,
+            runtime_estimate_seconds: 25200,
+          })
+        : jsonResponse(makeJob({ kind: "render", state: "queued" }));
+    });
+    renderWithProviders(<RenderJobs />);
+
+    await user.click(await screen.findByRole("button", { name: /approve — mint quote for \$1\.25/ }));
+    await user.click(await screen.findByRole("button", { name: "CONFIRM & RENDER" }));
+
+    // the whole-book gate fires ON TOP of the paid flow — confirming must not drop the ticket
+    const dialog = await screen.findByRole("dialog", { name: "Full-book render" });
+    await user.click(within(dialog).getByRole("button", { name: "render the whole book" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(postCount(server, "/render")).toBe(2);
+    expect(server.jsonBodyOf("POST", "/render")).toEqual({
+      mode: "multivoice",
+      chapters: [],
+      apply_emotion: false,
+      cost_token: "tok-x",
+      confirm_full: true,
+    });
+    // success consumes the ticket: no live quote lingers to be double-confirmed
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "CONFIRM & RENDER" })).not.toBeInTheDocument(),
+    );
   });
 
   it("paid attribution 402s without confirm_paid; the explicit confirm re-sends confirm_paid=true", async () => {

@@ -1,8 +1,9 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CloudSlotsOut, EngineVoicesOut, VoiceOut } from "../api/types";
+import { makeJob } from "../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Voices } from "./Voices";
 
@@ -211,6 +212,90 @@ describe("Voices", () => {
     expect(posts).toHaveLength(2);
     expect(JSON.parse(posts[0].body as string)).toEqual({ confirm_paid: false });
     expect(JSON.parse(posts[1].body as string)).toEqual({ confirm_paid: true });
+  });
+
+  it("engine_cold refusal offers warm-up: POSTs the voice's engine warmup and resets to the audition control", async () => {
+    const user = userEvent.setup();
+    const server = mountServer({ voices: [makeVoice({ voice_id: "k1", name: "Cold Heart" })] });
+    server.error("POST", "/api/voices/k1/audition", 409, "engine_cold", "kokoro has no warm worker");
+    server.post("/api/engines/kokoro/warmup", makeJob({ job_id: "w1", kind: "warmup", state: "queued" }));
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: /^audition/ }));
+    expect(await screen.findByText("engine_cold")).toBeInTheDocument();
+    expect(screen.getByText(/kokoro has no warm worker/)).toBeInTheDocument();
+
+    // the recourse targets the VOICE's engine, and success clears back to an idle audition
+    await user.click(screen.getByRole("button", { name: "warm up first" }));
+    await waitFor(() => expect(server.lastCall("POST", "/warmup")?.url).toBe("/api/engines/kokoro/warmup"));
+    expect(await screen.findByRole("button", { name: /^audition/ })).toBeInTheDocument();
+    expect(screen.queryByText("engine_cold")).not.toBeInTheDocument();
+  });
+
+  // Fake timers drive the backoff deterministically. fireEvent (not userEvent) on purpose:
+  // RTL's asyncWrapper awaits a setTimeout(0) it only advances under a `jest` global, so
+  // userEvent deadlocks under vitest fake timers. Timer advances are act()-wrapped instead.
+  it("gpu_busy_retry auto-retries keep confirm_paid=true, stop at the bound, and the manual retry stays paid", async () => {
+    vi.useFakeTimers();
+    try {
+      const bodies: { confirm_paid: boolean }[] = [];
+      mountServer({
+        voices: [makeVoice({ voice_id: "v11", name: "Cloud Belle", engine: "elevenlabs", preset_id: "stock1" })],
+      }).on("POST", "/api/voices/v11/audition", (_url, init) => {
+        const body = JSON.parse(init?.body as string) as { confirm_paid: boolean };
+        bodies.push(body);
+        return body.confirm_paid
+          ? errorResponse(402, "gpu_busy_retry", "a render is lending the GPU between segments")
+          : errorResponse(402, "payment_confirmation_required", "this audition bills elevenlabs", {
+              estimated_usd: 0.0123,
+            });
+      });
+      renderWithProviders(<Voices />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50); // settle the mount queries
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /^audition/ }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(screen.getByText("payment_confirmation_required")).toBeInTheDocument();
+      expect(bodies).toEqual([{ confirm_paid: false }]);
+
+      // the user confirms the paid audition; the server then refuses softly (GPU borrowed)
+      fireEvent.click(screen.getByRole("button", { name: /confirm ~\$0\.0123 & play/ }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(bodies).toEqual([{ confirm_paid: false }, { confirm_paid: true }]);
+      expect(screen.getByText(/queued behind a render segment — retrying/)).toBeInTheDocument();
+
+      // bounded auto-retry with backoff: every re-POST must keep the user's confirm_paid=true
+      for (let i = 0; i < 6; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+      }
+      expect(bodies).toHaveLength(5); // 1 unpaid + 1 explicit confirm + exactly 3 auto-retries
+      expect(bodies.slice(1)).toEqual(Array(4).fill({ confirm_paid: true }));
+      expect(screen.getByText(/the render keeps running/)).toBeInTheDocument();
+
+      // ...and the budget is truly exhausted: no further auto-POST however long the clock runs
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(bodies).toHaveLength(5);
+
+      // the manual retry also preserves the paid confirmation — never a fresh unpaid attempt
+      fireEvent.click(screen.getByRole("button", { name: "retry" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(bodies).toHaveLength(6);
+      expect(bodies[5]).toEqual({ confirm_paid: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("audition on a local engine fires once with confirm_paid=false and plays the take", async () => {

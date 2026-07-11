@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 
 /** Shared jsdom shims. jsdom implements neither the observer APIs react-aria overlays
     measure with, nor media playback, nor blob URLs — every stub here exists because a
@@ -77,6 +77,10 @@ if (typeof URL.createObjectURL !== "function") {
 
 afterEach(() => {
   cleanup();
+  // Drop mockApi()'s fetch stub (installed via vi.stubGlobal) so a test that forgets to
+  // install its own mock fails loudly instead of inheriting the previous test's routes.
+  // The shims above use plain assignment precisely so they survive this.
+  vi.unstubAllGlobals();
   // Theme pref and player volume persist in localStorage; never bleed across tests.
   localStorage.clear();
 });

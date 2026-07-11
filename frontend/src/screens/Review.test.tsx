@@ -254,7 +254,9 @@ describe("Review", () => {
     const server = setupReview();
     renderWithProviders(<Review />);
 
-    await user.click((await screen.findAllByRole("button", { name: "✎" }))[0]);
+    // scope to Alice's roster row: the tests edit ALICE, wherever the roster sorts her
+    const aliceRow = await screen.findByRole("row", { name: /Alice/ });
+    await user.click(within(aliceRow).getByRole("button", { name: "✎" }));
     const dialog = await screen.findByRole("dialog", { name: /Edit character — Alice/ });
     const input = within(dialog).getByRole("textbox");
     await user.clear(input);
@@ -278,7 +280,9 @@ describe("Review", () => {
     const server = setupReview();
     renderWithProviders(<Review />);
 
-    await user.click((await screen.findAllByRole("button", { name: "✎" }))[0]);
+    // scope to Alice's roster row: the tests edit ALICE, wherever the roster sorts her
+    const aliceRow = await screen.findByRole("row", { name: /Alice/ });
+    await user.click(within(aliceRow).getByRole("button", { name: "✎" }));
     const dialog = await screen.findByRole("dialog", { name: /Edit character — Alice/ });
     expect(within(dialog).getByRole("button", { name: "merge" })).toBeDisabled();
 
@@ -448,5 +452,9 @@ describe("Review", () => {
     });
     // nothing applied: the preview stays up, still offering apply
     expect(screen.getByRole("button", { name: "apply cast" })).toBeInTheDocument();
+    // the paid gate is a hard stop: exactly one draft POST — nothing auto-retries a paid call
+    expect(
+      server.calls.filter((c) => c.method === "POST" && c.url.includes("/assignment/draft")),
+    ).toHaveLength(1);
   });
 });

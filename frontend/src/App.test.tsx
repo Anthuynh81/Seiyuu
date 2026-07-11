@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { JobOut } from "./api/types";
@@ -58,15 +58,16 @@ describe("App", () => {
       expect(invalidate).not.toHaveBeenCalledWith({ queryKey: [key] });
     }
 
-    // the job finishes: the next 2s poll sees the count drop from 1 to 0
+    // the job finishes: drive the next poll deterministically instead of waiting out the
+    // refetch interval — the test must not care what cadence useLiveJobs polls at
     jobs = [];
-    await waitFor(
-      () => {
-        for (const key of families) {
-          expect(invalidate).toHaveBeenCalledWith({ queryKey: [key] });
-        }
-      },
-      { timeout: 4500 },
-    );
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["jobs", "live"] });
+    });
+    await waitFor(() => {
+      for (const key of families) {
+        expect(invalidate).toHaveBeenCalledWith({ queryKey: [key] });
+      }
+    });
   });
 });

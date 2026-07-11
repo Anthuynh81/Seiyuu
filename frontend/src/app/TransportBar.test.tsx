@@ -31,6 +31,27 @@ describe("TransportBar", () => {
     expect(screen.getByText("queued")).toBeInTheDocument();
   });
 
+  it("prefers the running job over an earlier queued one — display and cancel both target it", async () => {
+    const user = userEvent.setup();
+    const server = mockApi().get("/api/jobs", {
+      jobs: [
+        makeJob({ job_id: "j-q", kind: "attribute", state: "queued", progress_text: "", started_at: null }),
+        makeJob({ job_id: "j-r", kind: "render", state: "running", progress_text: "chapter 3/9" }),
+      ],
+    });
+    server.post("/api/jobs/j-r/cancel", makeJob({ job_id: "j-r", kind: "render", cancel_requested: true }));
+    renderWithProviders(<TransportBar />);
+
+    // the bar shows the RUNNING render, not the queued attribute listed before it
+    expect(await screen.findByText("render · demo")).toBeInTheDocument();
+    expect(screen.getByText("chapter 3/9")).toBeInTheDocument();
+    expect(screen.queryByText("attribute · demo")).not.toBeInTheDocument();
+
+    // ...and cancel targets the running job's id — never the queued one's
+    await user.click(screen.getByRole("button", { name: "cancel" }));
+    await waitFor(() => expect(server.lastCall("POST", "/cancel")?.url).toBe("/api/jobs/j-r/cancel"));
+  });
+
   it("cancel POSTs /api/jobs/{id}/cancel for the shown job", async () => {
     const user = userEvent.setup();
     const server = mockApi().get("/api/jobs", { jobs: [makeJob({ job_id: "job-42" })] });
