@@ -15,19 +15,20 @@ def main() -> None:
 
 
 @main.command()
-@click.argument("epub_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("book_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--include-item",
     "include_items",
     multiple=True,
-    help="Force-include a spine item (substring of its file name or id) that the "
-    "front/back-matter heuristic would skip.",
+    help="Force-include a section the front/back-matter heuristic would skip "
+    "(EPUB: substring of a spine item's file name or id; PDF: substring of a chapter title).",
 )
 @click.option(
     "--exclude-item",
     "exclude_items",
     multiple=True,
-    help="Force-exclude a spine item (substring of its file name or id).",
+    help="Force-exclude a section (EPUB: substring of a spine item's file name or id; "
+    "PDF: substring of a chapter title).",
 )
 @click.option(
     "--split-level",
@@ -42,19 +43,19 @@ def main() -> None:
     help="Output root directory (default: settings.books_dir).",
 )
 def ingest(
-    epub_path: Path,
+    book_path: Path,
     include_items: tuple[str, ...],
     exclude_items: tuple[str, ...],
     split_level: int,
     books_dir: Path | None,
 ) -> None:
-    """Ingest an EPUB into normalized JSON (books/{book_id}/normalized.json)."""
-    from seiyuu.ingest import IngestError, parse_epub, write_normalized
+    """Ingest an EPUB or PDF into normalized JSON (books/{book_id}/normalized.json)."""
+    from seiyuu.ingest import IngestError, parse_book, write_normalized
     from seiyuu.settings import get_settings
 
     try:
-        result = parse_epub(
-            epub_path,
+        result = parse_book(
+            book_path,
             include_items=include_items,
             exclude_items=exclude_items,
             split_level=split_level,
@@ -1894,7 +1895,7 @@ def validate(book_id: str, show_all: bool, output_dir: Path | None) -> None:
 
 
 @main.command()
-@click.argument("epub_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("book_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--engine", "engine_id", default=None, help="TTS engine (default from settings).")
 @click.option("--voice", default=None, help="Voice/preset id (default from settings).")
 @click.option(
@@ -1945,7 +1946,7 @@ def validate(book_id: str, show_all: bool, output_dir: Path | None) -> None:
 @_pause_options
 @_loudness_options
 def convert(
-    epub_path: Path,
+    book_path: Path,
     engine_id: str | None,
     voice: str | None,
     chapter_indices: tuple[int, ...],
@@ -1964,10 +1965,10 @@ def convert(
     voices_dir: Path | None,
     **pause_overrides,
 ) -> None:
-    """Full pipeline: EPUB -> normalized JSON -> render (single- or multi-voice) -> chapter MP3s."""
+    """Full pipeline: EPUB/PDF -> normalized JSON -> render -> chapter MP3s."""
     from seiyuu.assemble import AssembleError, assemble_book, master_book
     from seiyuu.engines import SynthesisError, get_engine, voices_dir_kwargs
-    from seiyuu.ingest import IngestError, parse_epub, write_normalized
+    from seiyuu.ingest import IngestError, parse_book, write_normalized
     from seiyuu.render import RenderError, render_book
     from seiyuu.render.gate import FULL_RENDER_CONFIRM_BLOCKS
     from seiyuu.settings import get_settings
@@ -1976,7 +1977,7 @@ def convert(
 
     click.echo("== ingest ==")
     try:
-        ingest_result = parse_epub(epub_path)
+        ingest_result = parse_book(book_path)
     except IngestError as exc:
         raise click.ClickException(str(exc)) from exc
     book = ingest_result.book

@@ -186,11 +186,11 @@ function UploadSlot() {
       <input
         ref={input}
         type="file"
-        accept=".epub"
+        accept=".epub,.pdf"
         hidden
         onChange={(e) => submit(e.target.files?.[0] ?? undefined)}
       />
-      <span className="tag">{ingest.isPending ? "ingesting…" : "drop epub / click to browse"}</span>
+      <span className="tag">{ingest.isPending ? "ingesting…" : "drop epub or pdf / click to browse"}</span>
       <span>Ingest runs synchronously — the book appears here in seconds.</span>
       {ingest.isSuccess && (
         <span className="mono text-[11px] text-ok">
