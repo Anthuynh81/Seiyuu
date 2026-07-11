@@ -46,7 +46,7 @@ from seiyuu.api.schemas import (
     SegmentRow,
 )
 from seiyuu.duration import estimate_runtime_seconds, format_hms
-from seiyuu.ingest import IngestError, parse_epub, write_normalized
+from seiyuu.ingest import IngestError, parse_book, write_normalized
 from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_books
 from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME, delete_book_trees
 from seiyuu.services import ServiceError, characters_overview
@@ -106,8 +106,9 @@ def ingest_book(
     exclude_item: Annotated[list[str], Form()] = [],  # noqa: B006
     split_level: Annotated[int, Form(ge=1)] = 2,
 ) -> IngestResponse:
-    """Ingest an uploaded EPUB. Identical bytes re-upload is idempotent (the id is
-    slug + content sha256[:8]) and answers 200 instead of 201."""
+    """Ingest an uploaded EPUB or PDF (dispatched on the file suffix). Identical bytes
+    re-upload is idempotent (the id is slug + content sha256[:8]) and answers 200
+    instead of 201."""
     upload_dir = cfg.data_dir / "uploads" / secrets.token_hex(8)
     upload_dir.mkdir(parents=True, exist_ok=True)
     tmp = upload_dir / _safe_upload_name(file.filename)
@@ -125,7 +126,7 @@ def ingest_book(
                     )
                 out.write(chunk)
         try:
-            result = parse_epub(
+            result = parse_book(
                 tmp,
                 include_items=tuple(include_item),
                 exclude_items=tuple(exclude_item),

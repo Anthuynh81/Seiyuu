@@ -8,12 +8,31 @@ force-included/excluded from the CLI.
 
 import hashlib
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from bs4 import BeautifulSoup, CData, NavigableString
 from ebooklib import ITEM_DOCUMENT, ITEM_STYLE, epub
 
+from seiyuu.ingest.common import (
+    CHAPTER_TITLE_PATTERN,
+    DECORATIVE_PATTERN,
+    MATTER_MAX_WORDS,
+    IngestError,
+    IngestResult,
+    ProtoChapter,
+    RawBlock,
+    assemble_chapters,
+    collapse_flagged,
+)
+from seiyuu.ingest.common import (
+    chapterize as _chapterize,
+)
+from seiyuu.ingest.common import (
+    collapse as _collapse,
+)
+from seiyuu.ingest.common import (
+    slug as _slug,
+)
 from seiyuu.ingest.css_italics import (
     EMPTY_ITALIC_MAP,
     INLINE_ITALIC,
@@ -21,8 +40,20 @@ from seiyuu.ingest.css_italics import (
     ItalicStyleMap,
     parse_css_italics,
 )
-from seiyuu.ingest.models import Block, BlockType, BookMeta, Chapter, NormalizedBook
+from seiyuu.ingest.models import BlockType, BookMeta, NormalizedBook
 from seiyuu.repository import atomic_write_text
+
+__all__ = [
+    "CHAPTER_TITLE_PATTERN",
+    "DECORATIVE_PATTERN",
+    "MATTER_MAX_WORDS",
+    "IngestError",
+    "IngestResult",
+    "ProtoChapter",
+    "RawBlock",
+    "parse_epub",
+    "write_normalized",
+]
 
 # Spine items that are never narration (covers, navigation, wrappers). Matched
 # as whole name tokens — substring matching falsely skipped chapters like
@@ -39,67 +70,13 @@ SKIP_CLASS_PATTERN = re.compile(
     r"caption|figcenter|figleft|figright|figure|illus|pg-boilerplate", re.IGNORECASE
 )
 
-# A paragraph made only of decorative symbols (e.g. ***, * * *, ~ ~ ~, ---).
-DECORATIVE_PATTERN = re.compile(r"^[\s*~\-—–_=•·.#•◦]+$")
-
-# Heading texts that mark real content sections (vs front/back matter).
-CHAPTER_TITLE_PATTERN = re.compile(
-    r"^(chapter|part|book|volume|canto|stave|prologue|epilogue|preface|introduction|interlude)\b"
-    r"|^[ivxlcdm]+\.?$"
-    r"|^\d+\.?$",
-    re.IGNORECASE,
-)
-
-# Sections whose title doesn't look like a chapter AND that are shorter than
-# this many words are treated as front/back matter and dropped (reported).
-MATTER_MAX_WORDS = 150
-
 # How many consecutive empty <p> elements count as a deliberate blank-line gap.
 BLANK_GAP_RUN = 2
-
-
-class IngestError(Exception):
-    """Loud, actionable ingest failure."""
-
 
 # Inline tags whose text is the standard unspoken-thought / emphasis signal. Kept as the
 # highest-priority per-element signal so the tag italic is byte-identical to Phase 1 even
 # when CSS restyles <em>/<i> to normal (see ItalicStyleMap.em_forced_normal, not acted on).
 _ITALIC_TAGS = {"em", "i"}
-
-
-@dataclass
-class RawBlock:
-    kind: BlockType
-    text: str = ""
-    level: int = 0  # heading level, 0 for non-headings
-    italic_spans: list[tuple[int, int]] = field(default_factory=list)
-
-
-@dataclass
-class ProtoChapter:
-    title: str | None
-    blocks: list[RawBlock] = field(default_factory=list)
-
-    @property
-    def word_count(self) -> int:
-        return sum(len(b.text.split()) for b in self.blocks)
-
-
-@dataclass
-class IngestResult:
-    book: NormalizedBook
-    skipped_items: list[str]
-    dropped_sections: list[str]
-
-
-def _collapse(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-# Single whitespace char, using the SAME class as ``_collapse``'s ``\s+`` so the italic
-# walker collapses identically to ``_collapse(el.get_text())`` for the text itself.
-_WS_CHAR = re.compile(r"\s")
 
 
 def _element_font_style(el, italic_map: ItalicStyleMap) -> bool | None:
@@ -167,49 +144,7 @@ def _collapse_with_italics(
             raw_chars.append(ch)
             raw_italic.append(italic)
 
-    # Collapse each maximal whitespace run to a single space, mirroring
-    # ``re.sub(r"\s+", " ", ...)``. The collapsed space stays italic ONLY when italic on BOTH
-    # sides (interior to an italic run); a boundary seam is non-italic, so an italic run never
-    # absorbs the whitespace that separates it from surrounding prose.
-    out_chars: list[str] = []
-    out_italic: list[bool] = []
-    i = 0
-    n = len(raw_chars)
-    while i < n:
-        if _WS_CHAR.match(raw_chars[i]):
-            j = i + 1
-            while j < n and _WS_CHAR.match(raw_chars[j]):
-                j += 1
-            left_italic = raw_italic[i - 1] if i > 0 else False
-            right_italic = raw_italic[j] if j < n else False
-            out_chars.append(" ")
-            out_italic.append(left_italic and right_italic)
-            i = j
-        else:
-            out_chars.append(raw_chars[i])
-            out_italic.append(raw_italic[i])
-            i += 1
-
-    # Strip the (single, non-italic) leading/trailing collapsed spaces, mirroring ``.strip()``.
-    start = 0
-    end = len(out_chars)
-    while start < end and out_chars[start] == " ":
-        start += 1
-    while end > start and out_chars[end - 1] == " ":
-        end -= 1
-
-    text = "".join(out_chars[start:end])
-    spans: list[tuple[int, int]] = []
-    pos = start
-    while pos < end:
-        if out_italic[pos]:
-            run_start = pos
-            while pos < end and out_italic[pos]:
-                pos += 1
-            spans.append((run_start - start, pos - start))
-        else:
-            pos += 1
-    return text, spans
+    return collapse_flagged(raw_chars, raw_italic)
 
 
 def _extract_doc_blocks(
@@ -256,48 +191,6 @@ def _extract_doc_blocks(
                     )
                 )
     return blocks
-
-
-def _chapterize(raws: list[RawBlock], split_level: int) -> list[ProtoChapter]:
-    """Split the cross-document block stream at chapter-level headings.
-
-    Blocks before the first heading form a (usually dropped) preamble; blocks
-    after a heading belong to it even if they came from a later spine file.
-    """
-    chapters = [ProtoChapter(None)]
-    for rb in raws:
-        if rb.kind is BlockType.HEADING and rb.level <= split_level:
-            chapters.append(ProtoChapter(rb.text, [rb]))
-        else:
-            chapters[-1].blocks.append(rb)
-    return chapters
-
-
-def _is_content(proto: ProtoChapter) -> bool:
-    if proto.title and CHAPTER_TITLE_PATTERN.match(proto.title):
-        return True
-    return proto.word_count >= MATTER_MAX_WORDS
-
-
-def _clean_blocks(raws: list[RawBlock]) -> list[RawBlock]:
-    """Collapse scene-break runs and trim them from chapter edges."""
-    out: list[RawBlock] = []
-    for rb in raws:
-        if rb.kind is BlockType.SCENE_BREAK and (not out or out[-1].kind is BlockType.SCENE_BREAK):
-            continue
-        out.append(rb)
-    while out and out[-1].kind is BlockType.SCENE_BREAK:
-        out.pop()
-    return out
-
-
-def _slug(text: str, max_len: int = 40) -> str:
-    s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-")
-    if len(s) > max_len:
-        s = s[:max_len]
-        if "-" in s:
-            s = s[: s.rfind("-")]
-    return s or "book"
 
 
 def _name_tokens(*names: str) -> set[str]:
@@ -383,33 +276,7 @@ def parse_epub(
     if not raws:
         raise IngestError(f"no narratable content found in {epub_path} (all items skipped?)")
 
-    chapters: list[Chapter] = []
-    dropped: list[str] = []
-    for proto in _chapterize(raws, split_level):
-        label = proto.title or "(untitled preamble)"
-        if not _is_content(proto):
-            if proto.blocks:
-                dropped.append(f"{label} ({proto.word_count} words)")
-            continue
-        blocks = _clean_blocks(proto.blocks)
-        if not any(b.kind is not BlockType.SCENE_BREAK for b in blocks):
-            dropped.append(f"{label} (no speakable blocks)")
-            continue
-        ci = len(chapters) + 1
-        chapters.append(
-            Chapter(
-                title=proto.title or "Untitled",
-                blocks=[
-                    Block(
-                        id=f"ch{ci:03d}_b{bi:04d}",
-                        type=rb.kind,
-                        text=rb.text,
-                        italic_spans=rb.italic_spans,
-                    )
-                    for bi, rb in enumerate(blocks, start=1)
-                ],
-            )
-        )
+    chapters, dropped = assemble_chapters(_chapterize(raws, split_level))
 
     if not chapters:
         raise IngestError(
