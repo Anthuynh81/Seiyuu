@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from seiyuu import __version__
 from seiyuu.api.concurrency import AuditionSlot, BorrowBroker, HeavyWorkGate
@@ -43,7 +44,9 @@ _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 def create_app(*, settings: Settings | None = None) -> FastAPI:
     """App factory. ``settings`` is injectable for tests; production resolves the
-    process-wide singleton lazily at startup, not at import."""
+    process-wide singleton at construction (the host allowlist — middleware must
+    exist before startup) and at startup (everything else); ``get_settings()`` is
+    cached, so both paths see the same instance."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -109,6 +112,17 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
                 )
 
     app = FastAPI(title="Seiyuu API", version=__version__, lifespan=lifespan)
+    # DNS-rebinding guard: a malicious page can resolve its own domain to 127.0.0.1 and
+    # reach this money-spending API same-origin, so only allowlisted Host headers pass
+    # (ports are stripped when matching — the Vite proxy's localhost:5173 is fine). The
+    # rejection is the middleware's plain-text 400, NOT the JSON envelope: it fires
+    # before routing, and the legitimate frontend's Host is always allowed, so no real
+    # client ever sees it.
+    host_cfg = settings or get_settings()
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=[h.strip() for h in host_cfg.api_allowed_hosts.split(",") if h.strip()],
+    )
     register_error_handlers(app)
     app.include_router(system_routes.router, prefix="/api")
     app.include_router(engines_routes.router, prefix="/api")

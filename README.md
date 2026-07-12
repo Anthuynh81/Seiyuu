@@ -196,6 +196,12 @@ uv run uvicorn seiyuu.api.main:app --reload
 cd frontend && npm run dev
 ```
 
+The API only answers requests whose `Host` header is on an allowlist (DNS-rebinding
+guard — otherwise any website could resolve itself to `127.0.0.1` and drive the paid
+endpoints). To reach it from another device on your LAN (e.g. the Listen screen on a
+tablet), add that machine's address in `.env`:
+`API_ALLOWED_HOSTS=localhost,127.0.0.1,testserver,192.168.1.20`
+
 The UI has five screens: **Library** (books, status, estimates), **Listen** (real-audio
 read-along with a word-karaoke highlight and chapter auto-advance), **Character Review**
 (reassign / rename / merge the cast, spoiler-safe), **Voice Studio** (upload → curate →
