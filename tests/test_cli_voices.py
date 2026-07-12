@@ -142,6 +142,29 @@ def test_voice_audition_writes_wav(tmp_path, monkeypatch):
     assert (vdir / "n" / "audition.wav").is_file()
 
 
+def test_voice_audition_cross_process_gpu_busy_is_a_clean_error(tmp_path, monkeypatch):
+    # Another PROCESS holds gpu.lock (a second manager instance — the OS lock is
+    # per-descriptor): the CLI must print the actionable refusal, not a traceback.
+    import seiyuu.engines
+    import seiyuu.gpu
+    from seiyuu.gpu import GpuResourceManager
+
+    monkeypatch.setattr(seiyuu.engines, "get_engine", lambda engine_id, **kw: FakeEngine())
+    vdir = tmp_path / "voices"
+    _ok("voice", "add-preset", "N", "af_heart", "--voice-id", "n", "--voices-dir", str(vdir))
+
+    lock = tmp_path / "contended-gpu.lock"
+    holder = GpuResourceManager(lock_path=lock)
+    with holder.acquire(FakeEngine(), "engine:server"):
+        pass  # lazy residency keeps the card claimed (simulates the API server process)
+    monkeypatch.setattr(seiyuu.gpu, "get_gpu_manager", lambda: GpuResourceManager(lock_path=lock))
+
+    result = _invoke("voice", "audition", "n", "--voices-dir", str(vdir))
+    assert result.exit_code != 0
+    assert "another seiyuu process holds the GPU" in result.output  # ClickException, printed
+    assert not isinstance(result.exception, seiyuu.gpu.GpuBusyError)  # no raw traceback
+
+
 # --- assign + multi-voice render ------------------------------------------
 
 

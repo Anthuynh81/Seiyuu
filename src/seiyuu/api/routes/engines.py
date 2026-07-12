@@ -33,7 +33,7 @@ from seiyuu.api.schemas import (
     WarmupParams,
 )
 from seiyuu.engines import SynthesisError, get_engine_class
-from seiyuu.gpu import get_gpu_manager
+from seiyuu.gpu import GpuBusyError, get_gpu_manager
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.repository import JobKind, JobState
 from seiyuu.voices import render_voice_args
@@ -237,6 +237,10 @@ def preview_voice(
                 with get_gpu_manager().acquire(engine, "engine:kokoro"):
                     audio = synth(engine)
                 # stays lazily resident, same as auditions — the next preview is warm
+        except GpuBusyError as exc:
+            # cross-process contention (a CLI run holds gpu.lock): same hard 409 gpu_busy
+            # as auditions, never the auto-retrying gpu_busy_retry
+            raise ApiError(409, "gpu_busy", str(exc)) from exc
         except SynthesisError as exc:
             raise ApiError(502, "upstream", str(exc)) from exc
         out_path.parent.mkdir(parents=True, exist_ok=True)

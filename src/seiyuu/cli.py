@@ -394,6 +394,7 @@ def _convert_multivoice(
 ):
     """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
     from seiyuu.attribute import AttributionError
+    from seiyuu.gpu import GpuBusyError
     from seiyuu.services import ServiceError, draft_assignment, run_attribution, save_assignment
     from seiyuu.voices import VoiceLibrary
 
@@ -407,7 +408,7 @@ def _convert_multivoice(
             chapters=chapter_indices,
             progress=click.echo,
         )  # Ollama VRAM freed inside, before the TTS engine loads (GPU discipline)
-    except (AttributionError, ValueError) as exc:
+    except (AttributionError, GpuBusyError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     flagged = f", {len(report.flagged)} flagged" if report.flagged else ""
     click.echo(f"{len(report.registry.characters)} characters{flagged}")
@@ -485,6 +486,7 @@ def attribute(
 ) -> None:
     """Attribute speakers with the local LLM: writes attribution.json + a cache DB."""
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionError
+    from seiyuu.gpu import GpuBusyError
     from seiyuu.ingest.models import NormalizedBook
     from seiyuu.settings import get_settings
 
@@ -518,7 +520,7 @@ def attribute(
             chapters=chapter_indices,
             progress=click.echo,
         )
-    except (AttributionError, ValueError) as exc:
+    except (AttributionError, GpuBusyError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     n_segments = sum(len(c.segments) for c in report.chapters)
@@ -552,6 +554,7 @@ def adjudicate(book_id: str, books_dir: Path | None) -> None:
     (needs ANTHROPIC_API_KEY); local is free and reuses the GPU.
     """
     from seiyuu.attribute import ATTRIBUTION_NAME, AttributionError
+    from seiyuu.gpu import GpuBusyError
     from seiyuu.services import ServiceError, run_adjudication
     from seiyuu.settings import get_settings
 
@@ -561,7 +564,7 @@ def adjudicate(book_id: str, books_dir: Path | None) -> None:
     )
     try:
         report = run_adjudication(book_dir, cfg=cfg, progress=click.echo)
-    except (ServiceError, AttributionError, ValueError) as exc:
+    except (ServiceError, AttributionError, GpuBusyError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"done: {len(report.registry.characters)} characters "
@@ -1146,7 +1149,7 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
 
     from seiyuu.engines import get_engine, voices_dir_kwargs
     from seiyuu.engines.base import SynthesisError
-    from seiyuu.gpu import get_gpu_manager
+    from seiyuu.gpu import GpuBusyError, get_gpu_manager
     from seiyuu.normalize import normalize_text, profile_for
     from seiyuu.settings import get_settings
     from seiyuu.voices import (
@@ -1194,11 +1197,11 @@ def voice_audition(voice_id: str, text: str, out: Path | None, voices_dir: Path 
     try:
         with ctx:
             audio = engine.synthesize(norm, engine_voice, {**settings, "seed": meta.seed})
-    except SynthesisError as exc:
+    except (GpuBusyError, SynthesisError) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         if engine.uses_gpu:
-            gpu.free_all()
+            gpu.free_all()  # a refused acquire never claimed the card, so this stays a no-op
     out_path = Path(out) if out else lib.dir_for(voice_id) / "audition.wav"
     audio.save(out_path)
     click.echo(f"wrote {out_path} ({audio.duration_seconds:.1f}s)")
@@ -1453,6 +1456,7 @@ def assign(
 ) -> None:
     """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.gpu import GpuBusyError
     from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
     from seiyuu.services.llm_advisory import resolve_advisory, run_cast_hints
     from seiyuu.settings import get_settings
@@ -1503,7 +1507,7 @@ def assign(
             recast=recast,
             trait_hints=trait_hints,
         )
-    except (ServiceError, ValueError) as exc:
+    except (GpuBusyError, ServiceError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     for warning in edit_warnings:
         click.echo(f"edit overlay: {warning}")
