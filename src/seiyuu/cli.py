@@ -598,6 +598,11 @@ def characters(book_id: str, sample_lines: int, books_dir: Path | None) -> None:
     provenance = f"{overview.provider_id}/{overview.model_id}, prompt {overview.prompt_version}"
     click.echo(f"{overview.book_id}  ({provenance})")
     click.echo(f"narration segments: {overview.narration_segments}")
+    if overview.unattributed_quote_segments:
+        click.echo(
+            "unattributed quotes (narrator voice, no speaker): "
+            f"{overview.unattributed_quote_segments}"
+        )
     click.echo(f"characters: {len(overview.characters)}\n")
 
     for char in overview.characters:

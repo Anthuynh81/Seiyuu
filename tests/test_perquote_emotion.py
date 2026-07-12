@@ -165,6 +165,66 @@ def test_out_of_range_quote_index_is_dropped():
     )
     assert all(s.type is SegmentType.NARRATION for s in result.segments)
     assert "".join(s.text for s in result.segments) == _TWO_SPEAKERS
+    # The invalid label left no usable verdict for either quote -> 0.0; prose keeps 1.0.
+    assert [s.confidence for s in result.segments] == [0.0, 1.0, 0.0, 1.0]
+
+
+def test_null_speaker_quote_carries_model_confidence_not_default():
+    # Regression: the degrade path built Segment(...) without a confidence, so the schema
+    # default 1.0 replaced the model's verdict and hid the quote from every review surface.
+    labels = {
+        "blocks": [
+            {
+                "block_id": "ch001_b0001",
+                "quotes": [
+                    {"index": 0, "speaker": "Ann", "confidence": 0.9},
+                    {"index": 1, "speaker": None, "confidence": 0.35},
+                ],
+            }
+        ]
+    }
+    result = _provider(json.dumps(labels)).attribute_chunk(
+        _one_block_chunk(_TWO_SPEAKERS), CharacterRegistry()
+    )
+    assert [(s.type.value, s.speaker, s.confidence) for s in result.segments] == [
+        ("dialogue", "Ann", 0.9),
+        ("narration", None, 1.0),  # prose narration keeps full confidence
+        ("narration", None, 0.35),  # the null-speaker quote keeps the model's confidence
+        ("narration", None, 1.0),
+    ]
+
+
+def test_unlabeled_quote_degrades_at_zero_confidence():
+    # Per-quote mode with NO verdict at all for quote 1: nothing to propagate -> 0.0.
+    labels = {"blocks": [{"block_id": "ch001_b0001", "quotes": [{"index": 0, "speaker": "Ann"}]}]}
+    result = _provider(json.dumps(labels)).attribute_chunk(
+        _one_block_chunk(_TWO_SPEAKERS), CharacterRegistry()
+    )
+    assert [s.confidence for s in result.segments] == [1.0, 1.0, 0.0, 1.0]
+    assert result.segments[2].type is SegmentType.NARRATION
+
+
+def test_whole_block_null_speaker_quotes_carry_block_confidence():
+    # v3-shaped row, speaker null: the model's block confidence rides the degraded quotes.
+    labels = {"blocks": [{"block_id": "ch001_b0001", "speaker": None, "confidence": 0.4}]}
+    result = _provider(json.dumps(labels)).attribute_chunk(
+        _one_block_chunk(_TWO_SPEAKERS), CharacterRegistry()
+    )
+    assert [(s.type.value, s.confidence) for s in result.segments] == [
+        ("narration", 0.4),
+        ("narration", 1.0),
+        ("narration", 0.4),
+        ("narration", 1.0),
+    ]
+
+
+def test_missing_block_row_degrades_quotes_at_zero_confidence():
+    # The model dropped the block entirely: quotes surface at 0.0, prose stays 1.0.
+    labels = {"blocks": []}
+    result = _provider(json.dumps(labels)).attribute_chunk(
+        _one_block_chunk(_TWO_SPEAKERS), CharacterRegistry()
+    )
+    assert [s.confidence for s in result.segments] == [0.0, 1.0, 0.0, 1.0]
 
 
 def test_markers_never_leak_into_segment_text_or_mentions():

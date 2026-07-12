@@ -259,8 +259,11 @@ class AttributionLLM(ABC):
         this can't fail on alignment. Per-quote (F1): when a block emitted ``quotes``, each
         quoted span is labeled by its quoted-span ORDINAL (via the shared
         :func:`quoted_ordinals`); an unlabeled/null/out-of-range quote degrades to narration
-        (never a guess-merge). When a block emitted no ``quotes`` (single-quote block or a
-        v3/v4-shaped row) the whole-block ``speaker`` labels every quote — byte-identical to
+        (never a guess-merge) at the model's reported confidence — 0.0 when it gave no usable
+        verdict — so unattributed quotes stay visible to the review surfaces. Genuine prose
+        narration keeps the default confidence 1.0. When a block emitted no ``quotes``
+        (single-quote block or a v3/v4-shaped row) the whole-block ``speaker`` labels every
+        quote — byte-identical to
         today. The returned ``emotions`` list is index-aligned to ``segments`` (F2): dialogue
         carries its emotion tag (or None); narration and thought carry None.
         """
@@ -325,6 +328,9 @@ class AttributionLLM(ABC):
                             )
                             emotions.append(quote.emotion)
                             continue
+                        # A labeled-but-null quote keeps the model's own confidence; an
+                        # unlabeled one has no verdict at all -> 0.0.
+                        degrade_conf = quote.confidence if quote is not None else 0.0
                     elif block_speaker:
                         segments.append(
                             Segment(
@@ -337,9 +343,23 @@ class AttributionLLM(ABC):
                         )
                         emotions.append(block_emotion)
                         continue
-                    # Unattributed / unlabeled quote -> narration (precision over recall).
+                    elif block is not None and not block.quotes:
+                        # Whole-block shape, speaker null: the model's block confidence.
+                        degrade_conf = block.confidence
+                    else:
+                        # No row for the block, or per-quote-shaped output whose labels were
+                        # all invalid (out-of-range indexes): no usable verdict for this quote.
+                        degrade_conf = 0.0
+                    # Unattributed / unlabeled quote -> narration (precision over recall),
+                    # carrying the degraded confidence — NEVER the Segment default 1.0, which
+                    # made these quotes invisible to every review surface.
                     segments.append(
-                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span.text)
+                        Segment(
+                            block_id=block_id,
+                            type=SegmentType.NARRATION,
+                            text=span.text,
+                            confidence=degrade_conf,
+                        )
                     )
                     emotions.append(None)
                     continue

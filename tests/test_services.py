@@ -35,7 +35,7 @@ from seiyuu.services import (
 )
 from seiyuu.services.edits import EditLog
 from seiyuu.settings import get_settings
-from seiyuu.voices import VoiceAssignment, VoiceKind, VoiceLibrary, VoiceMeta
+from seiyuu.voices import VoiceAssignment, VoiceKind, VoiceLibrary, VoiceMeta, resolve_voice
 
 
 def _report() -> AttributionReport:
@@ -352,6 +352,66 @@ def test_characters_overview_counts_samples_and_edits(tmp_path):
     assert alice.line_count == 2 and alice.sample_lines == ["Hi.", "Yo."]
     assert overview.narration_segments == 2
     assert len(overview.edit_warnings) == 1  # the stale rename surfaced, not crashed
+
+
+def _quote_report() -> AttributionReport:
+    """A report carrying an unattributed quote: speaker None but the text is a quoted
+    span, at the degraded confidence the provider now propagates."""
+    return AttributionReport(
+        book_id="test-book-00000000",
+        provider_id="local",
+        model_id="m",
+        prompt_version="v5",
+        registry=CharacterRegistry(characters=[Character(id="alice", canonical_name="Alice")]),
+        chapters=[
+            AttributedChapter(
+                index=1,
+                title="Chapter 1",
+                segments=[
+                    Segment(block_id="ch001_b0001", type=SegmentType.NARRATION, text="Narration."),
+                    Segment(
+                        block_id="ch001_b0002",
+                        type=SegmentType.DIALOGUE,
+                        text='"Hi."',
+                        speaker="alice",
+                        confidence=0.9,
+                    ),
+                    Segment(
+                        block_id="ch001_b0003",
+                        type=SegmentType.NARRATION,
+                        text='"Who goes there?"',
+                        confidence=0.0,  # an unattributed quote, degraded by the provider
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def test_characters_overview_surfaces_unattributed_quotes(tmp_path):
+    (tmp_path / "attribution.json").write_text(_quote_report().model_dump_json(), encoding="utf-8")
+    overview = characters_overview(tmp_path, confidence_threshold=0.7)
+    assert overview.unattributed_quote_segments == 1
+    assert overview.narration_segments == 1  # the quote is NOT buried in narration
+    assert overview.low_confidence_segments == 1  # and it joins the review tally
+
+
+def test_reassign_unattributed_quote_flips_to_dialogue_and_reroutes_the_voice():
+    """Reassigning a speaker onto a narration-typed unattributed quote must change the
+    audio: the replay flips type to DIALOGUE (the standing reassign rule), so
+    resolve_voice routes it to the character's voice, not the narrator's."""
+    op = ReassignSegment(block_id="ch001_b0003", segment_index=0, speaker="alice")
+    edited, warnings = apply_edits(_quote_report(), EditLog(ops=[op]))
+    assert warnings == []
+    seg = edited.chapters[0].segments[2]
+    assert seg.type is SegmentType.DIALOGUE and seg.speaker == "alice"
+    assert seg.confidence == 1.0  # human ground truth drains the review queue
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narr_v",
+        assignments={"alice": "alice_v"},
+    )
+    assert resolve_voice(seg, assignment) == "alice_v"
 
 
 # --- assignment service ---

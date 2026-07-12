@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from seiyuu.attribute.models import FlaggedBlock, SegmentType
+from seiyuu.attribute.spans import is_quoted_span
 from seiyuu.services.attribution import load_report
 
 
@@ -30,6 +31,10 @@ class CharactersOverview(BaseModel):
     prompt_version: str
     narration_segments: int
     low_confidence_segments: int
+    # Quoted spans no provider attempt attributed (speaker None but the text is a quoted
+    # run): they render in the narrator's voice, so they are their own stat, never buried
+    # in the narration count. The low-confidence ones also count into the review tally.
+    unattributed_quote_segments: int
     confidence_threshold: float
     characters: list[CharacterSummary]  # sorted by line count, busiest first
     flagged: list[FlaggedBlock]
@@ -44,11 +49,16 @@ def characters_overview(
 
     counts: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
-    narration = low_confidence = 0
+    narration = low_confidence = unattributed_quotes = 0
     for chapter in report.chapters:
         for seg in chapter.segments:
             if seg.speaker is None:
-                narration += 1
+                if is_quoted_span(seg.text):
+                    unattributed_quotes += 1
+                    if seg.confidence < confidence_threshold:
+                        low_confidence += 1
+                else:
+                    narration += 1
                 continue
             counts[seg.speaker] = counts.get(seg.speaker, 0) + 1
             if seg.confidence < confidence_threshold:
@@ -81,6 +91,7 @@ def characters_overview(
         prompt_version=report.prompt_version,
         narration_segments=narration,
         low_confidence_segments=low_confidence,
+        unattributed_quote_segments=unattributed_quotes,
         confidence_threshold=confidence_threshold,
         characters=characters,
         flagged=report.flagged,

@@ -20,6 +20,7 @@ function makeRow(overrides: Partial<SegmentRow> = {}): SegmentRow {
     speaker_name: null,
     text: "a bb ccc",
     confidence: 0.95,
+    unattributed_quote: false,
     has_audio: true,
     audio_segment: 0,
     duration_seconds: 90,
