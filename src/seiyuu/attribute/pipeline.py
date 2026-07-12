@@ -27,11 +27,17 @@ from seiyuu.attribute.models import (
     SegmentType,
 )
 from seiyuu.attribute.providers.base import (
+    SINGLE_QUOTE_KEY_SUFFIX,
     AttributionError,
     AttributionLLM,
     MalformedOutputError,
 )
 from seiyuu.attribute.registry import resolve_chunk
+from seiyuu.attribute.spans import (
+    ConventionDetection,
+    DialogueConvention,
+    detect_dialogue_convention,
+)
 from seiyuu.attribute.validate import ReconstructionFailure, find_reconstruction_failures
 from seiyuu.ingest.models import Block, BlockType, NormalizedBook
 from seiyuu.repository import atomic_write_text
@@ -98,6 +104,33 @@ def _drop_superseded_notes(notes: list[str], merged_names: set[str]) -> list[str
     ]
 
 
+def _convention_note(detection: ConventionDetection) -> str:
+    """The registry_notes entry surfacing a non-DOUBLE dialogue convention.
+
+    The stable "dialogue convention:" prefix is what the CLI attribute command filters on to
+    echo it; `seiyuu characters` and the API already print every registry note verbatim.
+    """
+    counts = (
+        f"{detection.single_curly_runs} curly / {detection.single_straight_runs} straight "
+        f"single-quote runs vs {detection.double_runs} double"
+    )
+    if detection.convention is DialogueConvention.SINGLE_CURLY:
+        return (
+            f"dialogue convention: single curly quotes (‘…’) detected ({counts}); "
+            "splitting dialogue on single-quote boundaries"
+        )
+    if detection.convention is DialogueConvention.SINGLE_STRAIGHT:
+        return (
+            f"dialogue convention: straight single quotes suspected ({counts}); straight "
+            "singles are indistinguishable from apostrophes so the splitter stays on double "
+            "quotes — dialogue may be missed, review recommended"
+        )
+    return (
+        f"dialogue convention: unclear ({counts}); splitter stays on double quotes — "
+        "dialogue may be missed, review recommended"
+    )
+
+
 def _fallback_segments(blocks: list[Block]) -> list[Segment]:
     """Whole-block narration at confidence 0.0 — used when a chunk can't be attributed."""
     return [
@@ -152,10 +185,39 @@ def attribute_book(
             f"(book has {len(book.chapters)})"
         )
 
+    # Book-level dialogue convention, detected ONCE over the FULL book (never the --chapter
+    # subset, so partial runs classify — and key — identically). Only the unambiguous curly
+    # form switches the splitter; the convention rides on the provider(s) because the span
+    # split happens inside attribute_chunk.
+    detection = detect_dialogue_convention(
+        "\n".join(
+            b.text for ch in book.chapters for b in ch.blocks if b.type is BlockType.PARAGRAPH
+        )
+    )
+    single_curly = detection.convention is DialogueConvention.SINGLE_CURLY
+    splitter_convention = (
+        DialogueConvention.SINGLE_CURLY if single_curly else DialogueConvention.DOUBLE
+    )
+    provider.dialogue_convention = splitter_convention
+    if escalation_provider is not None:
+        escalation_provider.dialogue_convention = splitter_convention
+    # A single-quote book attributed BEFORE convention detection existed left all-narration
+    # rows under the same chunk hashes, so single-curly mode records the prompt_version KEY
+    # COMPONENT with the "-sq" suffix. The key FORMAT is unchanged and double-convention
+    # books keep byte-identical keys (their caches hit untouched).
+    key_prompt_version = provider.prompt_version
+    if single_curly and not key_prompt_version.endswith(SINGLE_QUOTE_KEY_SUFFIX):
+        key_prompt_version += SINGLE_QUOTE_KEY_SUFFIX
+
     registry = CharacterRegistry()
     notes: list[str] = []
     flagged: list[FlaggedBlock] = []
     out_chapters: list[AttributedChapter] = []
+
+    if detection.convention is not DialogueConvention.DOUBLE:
+        note = _convention_note(detection)
+        notes.append(note)
+        say(note)
 
     for ci, chapter in enumerate(book.chapters, start=1):
         if wanted and ci not in wanted:
@@ -179,7 +241,7 @@ def attribute_book(
                 chunk_hash=chunk.content_hash,
                 provider_id=provider.provider_id,
                 model_id=provider.model_id,
-                prompt_version=provider.prompt_version,
+                prompt_version=key_prompt_version,
             )
             label = f"  chunk {chunk.index + 1}/{len(chunks)} ({len(chunk.owned_ids)} blocks)"
             attribution = cache.get(key)
@@ -265,7 +327,7 @@ def attribute_book(
         book_id=book.book_meta.book_id,
         provider_id=provider.provider_id,
         model_id=provider.model_id,
-        prompt_version=provider.prompt_version,
+        prompt_version=key_prompt_version,
         registry=registry,
         chapters=out_chapters,
         flagged=flagged,

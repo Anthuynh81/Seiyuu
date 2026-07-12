@@ -528,6 +528,11 @@ def attribute(
     )
     if report.flagged:
         click.echo(f"  {len(report.flagged)} blocks flagged for review — see `seiyuu characters`")
+    # Surface a detected non-double dialogue convention (UK single-quote books) after the
+    # run too — the note also lives in registry_notes for `seiyuu characters` and the API.
+    for note in report.registry_notes:
+        if note.startswith("dialogue convention:"):
+            click.echo(f"  {note}")
     click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
 
 

@@ -6,14 +6,19 @@ model only labels each span (narration/dialogue/thought + speaker). Segments are
 from the source span text, so concatenating a block's segments always reproduces the block
 exactly — the reconstruction invariant cannot be violated by the model.
 
-Splitting is on double-quote boundaries: a quoted run (dialogue) vs the prose around it.
-Straight and curly double quotes are recognised; single quotes/apostrophes are left alone
-(they are apostrophes far more often than dialogue in English prose). A block with no
-double quotes is a single span. ``"".join(split_block_spans(text)) == text`` always holds.
+Splitting is on double-quote boundaries by default: a quoted run (dialogue) vs the prose
+around it. Straight and curly double quotes are recognised; single quotes/apostrophes are
+left alone (they are apostrophes far more often than dialogue in English prose). A block
+with no double quotes is a single span. UK-convention books (all dialogue in ‘single curly
+quotes’) opt into :data:`DialogueConvention.SINGLE_CURLY`, detected once per book by
+:func:`detect_dialogue_convention` and threaded down by the attribution pipeline; the
+single-curly pattern is guarded so apostrophes (don’t, o’clock, the Bennets’) never open or
+close a run. ``"".join(split_block_spans(text)) == text`` always holds in every mode.
 """
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 
 # A quoted run: an opening double quote, any non-double-quote chars, a closing double quote.
 # Matching straight (") and curly (“ ”) forms; the inner class excludes all three so a run
@@ -24,11 +29,104 @@ _QUOTED_RUN = re.compile(r'[“"][^“”"]*[”"]')
 _OPEN_QUOTES = '"“”'
 
 
-def split_block_spans(text: str) -> list[str]:
+class DialogueConvention(StrEnum):
+    """Which quote glyphs mark dialogue in a book (detected once per book).
+
+    Only SINGLE_CURLY ever switches the splitter: U+2018/U+2019 pairs can be guarded against
+    apostrophes. SINGLE_STRAIGHT and UNKNOWN are warn-only verdicts — straight singles are
+    glyph-identical to apostrophes, so splitting on them would mis-slice real prose.
+    """
+
+    DOUBLE = "double"
+    SINGLE_CURLY = "single_curly"
+    SINGLE_STRAIGHT = "single_straight"
+    UNKNOWN = "unknown"
+
+
+# A single-curly (UK) dialogue run, guarded because U+2019 doubles as the apostrophe:
+# - opener: U+2018 preceded by nothing, whitespace, or opening punctuation (U+2018 is
+#   near-unambiguous — apostrophes render as U+2019 — but the guard keeps a stray mid-word
+#   glyph from opening a run);
+# - closer: U+2019 preceded by punctuation — never a word character, so possessives like
+#   "the Bennets’ house" stay inside the quote — and followed by end/whitespace/closing
+#   punctuation, never intra-word (don’t, o’clock, it’s).
+# Content is lazy and excludes a second opener, so an unclosed quote degrades to prose
+# exactly like the double-quote pattern; nested doubles (UK style: ‘… “inner” …’) stay part
+# of the run. A punctuation-less closer (‘Yes’ said Tom) is deliberately missed — precision
+# over recall, the span stays narration rather than risking an apostrophe mis-close.
+_SINGLE_CURLY_RUN = re.compile(
+    r"(?<![^\s\(\[\{\-–—“‘\"«])"
+    r"‘"
+    r"[^‘]*?"
+    r"(?<=[.,;:!?…—–\-”\"])’"
+    r"(?=[\s\)\]\}\-–—.,;:!?…”\"»]|$)"
+)
+
+# The straight-single analogue, used ONLY for detection counting (never for splitting):
+# same boundary guards, content confined to one line because a straight quote carries no
+# open/close distinction at all.
+_SINGLE_STRAIGHT_RUN = re.compile(
+    r"(?<![^\s\(\[\{\-–—“\"«])"
+    r"'"
+    r"[^\n]*?"
+    r"(?<=[.,;:!?…—–\-”\"])'"
+    r"(?=[\s\)\]\}\-–—.,;:!?…”\"»]|$)"
+)
+
+# Conservative thresholds (precision over recall): a book stays DOUBLE unless single-quote
+# runs clearly dominate — more than the ratio times the double count AND above an absolute
+# floor — so a handful of decorative singles can never flip a real double-quote book.
+_SINGLE_DOMINANCE_RATIO = 10
+_SINGLE_FLOOR = 20
+
+
+@dataclass(frozen=True)
+class ConventionDetection:
+    """Book-level dialogue-convention verdict plus the run counts that justify it."""
+
+    convention: DialogueConvention
+    double_runs: int
+    single_curly_runs: int
+    single_straight_runs: int
+
+
+def detect_dialogue_convention(text: str) -> ConventionDetection:
+    """Classify a book's dialogue convention from its normalized text (pure, deterministic).
+
+    DOUBLE is the default and wins any ambiguity, including a book with no dialogue at all.
+    SINGLE_CURLY / SINGLE_STRAIGHT require guarded single runs to dominate doubles by
+    ``_SINGLE_DOMINANCE_RATIO`` and clear ``_SINGLE_FLOOR``. UNKNOWN marks a book with zero
+    double runs and a single-quote mix too scattered to classify either way.
+    """
+    doubles = sum(1 for _ in _QUOTED_RUN.finditer(text))
+    curly = sum(1 for _ in _SINGLE_CURLY_RUN.finditer(text))
+    straight = sum(1 for _ in _SINGLE_STRAIGHT_RUN.finditer(text))
+    if curly >= _SINGLE_FLOOR and curly > _SINGLE_DOMINANCE_RATIO * doubles:
+        verdict = DialogueConvention.SINGLE_CURLY
+    elif straight >= _SINGLE_FLOOR and straight > _SINGLE_DOMINANCE_RATIO * doubles:
+        verdict = DialogueConvention.SINGLE_STRAIGHT
+    elif doubles == 0 and curly + straight >= _SINGLE_FLOOR:
+        verdict = DialogueConvention.UNKNOWN
+    else:
+        verdict = DialogueConvention.DOUBLE
+    return ConventionDetection(verdict, doubles, curly, straight)
+
+
+def _run_pattern(convention: DialogueConvention) -> re.Pattern[str]:
+    """The quoted-run pattern for a convention. Only SINGLE_CURLY leaves the double pattern;
+    SINGLE_STRAIGHT/UNKNOWN books are too apostrophe-ambiguous to split (warn-only)."""
+    if convention is DialogueConvention.SINGLE_CURLY:
+        return _SINGLE_CURLY_RUN
+    return _QUOTED_RUN
+
+
+def split_block_spans(
+    text: str, convention: DialogueConvention = DialogueConvention.DOUBLE
+) -> list[str]:
     """Split a block into alternating prose / quoted spans. Concatenation reproduces text."""
     spans: list[str] = []
     cursor = 0
-    for match in _QUOTED_RUN.finditer(text):
+    for match in _run_pattern(convention).finditer(text):
         if match.start() > cursor:
             spans.append(text[cursor : match.start()])
         spans.append(match.group())
@@ -104,12 +202,14 @@ def is_italic_thought_candidate(run_text: str, prose_text: str) -> bool:
     return ends_sentence or near_whole
 
 
-def _quote_regions(text: str) -> list[tuple[int, int, bool]]:
+def _quote_regions(
+    text: str, convention: DialogueConvention = DialogueConvention.DOUBLE
+) -> list[tuple[int, int, bool]]:
     """The block's prose/quoted regions as ``(start, end, quoted)`` — the offset-aware form
     of :func:`split_block_spans` (same partition, same boundaries)."""
     regions: list[tuple[int, int, bool]] = []
     cursor = 0
-    for match in _QUOTED_RUN.finditer(text):
+    for match in _run_pattern(convention).finditer(text):
         if match.start() > cursor:
             regions.append((cursor, match.start(), False))
         regions.append((match.start(), match.end(), True))
@@ -120,7 +220,10 @@ def _quote_regions(text: str) -> list[tuple[int, int, bool]]:
 
 
 def thought_candidate_spans(
-    block_id: str, text: str, italic_spans: list[tuple[int, int]]
+    block_id: str,
+    text: str,
+    italic_spans: list[tuple[int, int]],
+    convention: DialogueConvention = DialogueConvention.DOUBLE,
 ) -> list[Span]:
     """Quote-split, then sub-split PROSE spans at SUBSTANTIAL italic runs into thought candidates.
 
@@ -132,7 +235,7 @@ def thought_candidate_spans(
     holds — sub-splitting only subdivides an existing prose slice.
     """
     spans: list[Span] = []
-    for rstart, rend, quoted in _quote_regions(text):
+    for rstart, rend, quoted in _quote_regions(text, convention):
         if quoted:
             spans.append(Span(text[rstart:rend], rstart, True))
             continue
