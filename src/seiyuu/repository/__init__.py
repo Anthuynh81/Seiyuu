@@ -26,11 +26,12 @@ from seiyuu.repository.jobs import (
     JobStore,
     default_jobs_db_path,
 )
-from seiyuu.repository.lock import file_lock
+from seiyuu.repository.lock import FileLockHandle, file_lock
 
 __all__ = [
     "BookPurgeResult",
     "BookStatus",
+    "FileLockHandle",
     "IllegalTransitionError",
     "Job",
     "JobKind",

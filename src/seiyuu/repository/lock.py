@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from seiyuu.repository.books import RepositoryError
 
@@ -70,3 +71,55 @@ def file_lock(path: Path, *, timeout: float = 30.0, poll_seconds: float = 0.05) 
             _unlock(f.fileno())
     finally:
         f.close()
+
+
+class FileLockHandle:
+    """A non-blocking exclusive lock on ``path`` whose hold outlives any one with-block.
+
+    ``file_lock`` above waits for the lock and scopes the hold to a with-body; the GPU
+    manager needs the opposite on both counts: refuse IMMEDIATELY on contention (a second
+    process about to double-load the card must fail loudly, not queue behind a multi-hour
+    job) and keep holding across calls while a model stays lazily resident. Same OS
+    primitive (each handle owns its own descriptor), so a crashed holder still
+    self-releases when its handle dies with the process.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = Path(path)
+        self._file: IO[bytes] | None = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def held(self) -> bool:
+        return self._file is not None
+
+    def try_acquire(self) -> bool:
+        """Take the lock without waiting; True if now (or already) held by this handle."""
+        if self._file is not None:
+            return True
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self._path, "a+b")  # created if missing; content is irrelevant, only the lock
+        try:
+            f.seek(0)
+            if not _try_lock(f.fileno()):
+                f.close()
+                return False
+        except BaseException:  # a seek/fileno failure must not leak the descriptor
+            f.close()
+            raise
+        self._file = f
+        return True
+
+    def release(self) -> None:
+        """Drop the lock if held; idempotent, closes the descriptor even if unlock fails."""
+        f, self._file = self._file, None
+        if f is None:
+            return
+        try:
+            f.seek(0)
+            _unlock(f.fileno())
+        finally:
+            f.close()

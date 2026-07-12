@@ -12,13 +12,26 @@ The manager imports NO engine/LLM SDK: consumers register themselves by passing 
 acquire() calls must never nest. The render loops acquire per synthesis unit (re-acquiring
 the resident consumer is a cheap no-op) because a multi-voice render switches engines
 segment to segment; renders free_all() at the end only if they actually acquired.
+
+Cross-PROCESS discipline: the threading.Lock covers one process only, but the CLI and the
+API server are separate processes sharing one card. The `get_gpu_manager()` singleton
+(every real entry point) therefore also claims an OS file lock (data/gpu.lock) while ANY
+model is resident — from the idle->resident acquire until free_all() empties the card.
+Lazy release means a server can sit on VRAM long after its job finished; a CLI run must be
+refused THEN too, so the file lock tracks RESIDENCY, not acquire bodies. Contention raises
+GpuBusyError immediately (truthful refusal beats an OOM/CPU-spill); OS locks die with
+their process, so a crashed holder self-releases and no stale-lock recovery exists.
 """
 
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from seiyuu.repository.lock import FileLockHandle
+from seiyuu.settings import get_settings
 
 
 @runtime_checkable
@@ -27,20 +40,39 @@ class GpuConsumer(Protocol):
         """Free this consumer's GPU memory. Default no-op for non-GPU consumers."""
 
 
+class GpuBusyError(RuntimeError):
+    """Another seiyuu PROCESS holds the GPU (cross-process gpu.lock contention)."""
+
+
 class GpuResourceManager:
-    def __init__(self) -> None:
+    def __init__(self, lock_path: Path | None = None) -> None:
+        """``lock_path`` (data/gpu.lock via the singleton) arms the cross-process half of
+        the discipline; None keeps the manager process-local (tests, injected managers)."""
         self._lock = threading.Lock()
         self._resident: GpuConsumer | None = None
         self._resident_name = ""
+        self._card_lock = FileLockHandle(lock_path) if lock_path is not None else None
 
     @contextmanager
     def acquire(self, consumer: GpuConsumer, name: str) -> Iterator[None]:
         """Hold the GPU for `consumer` across the `with` body, unloading any other resident."""
         with self._lock:
-            if self._resident is not None and self._resident is not consumer:
+            if self._resident is None:
+                self._claim_card(name)
+            elif self._resident is not consumer:
+                # in-process handoff: the card stays claimed while residency transfers
                 self._free_resident()
             self._resident, self._resident_name = consumer, name
             yield
+
+    def _claim_card(self, name: str) -> None:
+        if self._card_lock is None or self._card_lock.try_acquire():
+            return
+        raise GpuBusyError(
+            f"cannot load {name}: another seiyuu process holds the GPU "
+            f"(lock: {self._card_lock.path}). Is the API server running, or another "
+            f"seiyuu command? Stop it or wait for its job to finish, then retry."
+        )
 
     def _free_resident(self) -> None:
         if self._resident is None:
@@ -51,7 +83,13 @@ class GpuResourceManager:
     def free_all(self) -> None:
         """Unload the resident model (teardown / explicit handoff)."""
         with self._lock:
-            self._free_resident()
+            try:
+                self._free_resident()
+            finally:
+                # released only when truthful: an unload() failure leaves the model on the
+                # card (resident stays set), so the cross-process claim must survive it
+                if self._resident is None and self._card_lock is not None:
+                    self._card_lock.release()
 
     @property
     def resident(self) -> str | None:
@@ -67,4 +105,7 @@ class GpuResourceManager:
 
 @lru_cache
 def get_gpu_manager() -> GpuResourceManager:
-    return GpuResourceManager()
+    # Every real entry point (CLI commands, the API server) shares this singleton, so
+    # arming it with the cross-process lock covers every heavy path at once. Bare
+    # GpuResourceManager() (tests, injected fakes) stays process-local.
+    return GpuResourceManager(lock_path=get_settings().data_dir / "gpu.lock")
