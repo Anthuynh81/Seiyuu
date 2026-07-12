@@ -27,6 +27,8 @@ from seiyuu.attribute.providers.local import OllamaProvider
 from seiyuu.attribute.spans import (
     DialogueConvention,
     detect_dialogue_convention,
+    is_quoted_span,
+    is_unattributed_quote,
     split_block_spans,
     thought_candidate_spans,
 )
@@ -174,6 +176,39 @@ def test_thought_candidate_spans_single_curly_marks_quotes():
     assert head == [("‘Leave now,’", True), (" said Ann. ", False)]
     # The italic run inside the PROSE region still nominates a thought candidate.
     assert any(s.candidate_id for s in spans if not s.quoted)
+
+
+# ---------------------------------------------------------------------------------------
+# Review surfacing: single-curly quoted spans read as quotes, apostrophes never do
+# ---------------------------------------------------------------------------------------
+
+
+def test_is_quoted_span_recognises_single_curly_opener():
+    # Every _SINGLE_CURLY_RUN span starts with U+2018, so these must read as quotes or the
+    # unattributed-quote review surfaces silently no-op for a whole UK book.
+    for text in ("‘Hello,’", "‘Don’t worry, it’s fine,’", "‘’Tis nothing,’"):
+        assert is_quoted_span(text), text
+
+
+@pytest.mark.parametrize("text,expected", SINGLE_CASES)
+def test_split_single_curly_quoted_spans_all_read_as_quotes(text, expected):
+    # The splitter's quoted spans (the ones opening with U+2018) and is_quoted_span agree.
+    for span in split_block_spans(text, DialogueConvention.SINGLE_CURLY):
+        assert is_quoted_span(span) == span.startswith("‘"), span
+
+
+def test_apostrophe_led_prose_is_not_a_quote():
+    # U+2019 is the apostrophe glyph — elisions must stay prose, not become dialogue.
+    assert not is_quoted_span("’tis the season")
+    assert not is_quoted_span("’twas the night before")
+
+
+def test_is_unattributed_quote_predicate():
+    assert is_unattributed_quote(None, "‘Who goes there?’")
+    assert is_unattributed_quote(None, '"Who goes there?"')
+    assert not is_unattributed_quote("tom", "‘Who goes there?’")  # attributed
+    assert not is_unattributed_quote(None, "He waited.")  # prose narration
+    assert not is_unattributed_quote(None, "’tis the season")  # apostrophe, not a quote
 
 
 # ---------------------------------------------------------------------------------------

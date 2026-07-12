@@ -45,7 +45,7 @@ from seiyuu.api.schemas import (
     SegmentBrowserOut,
     SegmentRow,
 )
-from seiyuu.attribute.spans import is_quoted_span
+from seiyuu.attribute.spans import is_unattributed_quote
 from seiyuu.duration import estimate_runtime_seconds, format_hms
 from seiyuu.ingest import IngestError, parse_book, write_normalized
 from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_books
@@ -499,7 +499,7 @@ def segment_browser(
                 speaker_name=names.get(seg.speaker) if seg.speaker else None,
                 text=seg.text,
                 confidence=seg.confidence,
-                unattributed_quote=seg.speaker is None and is_quoted_span(seg.text),
+                unattributed_quote=is_unattributed_quote(seg.speaker, seg.text),
                 has_audio=has_audio,
                 audio_segment=audio_segment,
                 duration_seconds=duration,

@@ -372,7 +372,7 @@ class AttributionLLM(ABC):
                         continue
                     elif block is not None and not block.quotes:
                         # Whole-block shape, speaker null: the model's block confidence.
-                        degrade_conf = block.confidence
+                        degrade_conf = block_conf
                     else:
                         # No row for the block, or per-quote-shaped output whose labels were
                         # all invalid (out-of-range indexes): no usable verdict for this quote.

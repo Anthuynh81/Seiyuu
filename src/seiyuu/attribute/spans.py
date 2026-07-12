@@ -26,7 +26,10 @@ from enum import StrEnum
 _QUOTED_RUN = re.compile(r'[“"][^“”"]*[”"]')
 
 
-_OPEN_QUOTES = '"“”'
+# Glyphs a quoted span can open with: the double forms plus U+2018, the single-curly
+# opener (unambiguous — apostrophes render as U+2019, which is deliberately absent so
+# "’tis"/"’twas" never read as dialogue). _SINGLE_CURLY_RUN spans always start with U+2018.
+_OPEN_QUOTES = '"“”‘'
 
 
 class DialogueConvention(StrEnum):
@@ -137,8 +140,16 @@ def split_block_spans(
 
 
 def is_quoted_span(span: str) -> bool:
-    """True if a span is a quoted run (dialogue) — it opens with a double-quote glyph."""
+    """True if a span is a quoted run (dialogue) — it opens with a dialogue quote glyph
+    (double, or the unambiguous single-curly opener U+2018)."""
     return bool(span) and span[0] in _OPEN_QUOTES
+
+
+def is_unattributed_quote(speaker: str | None, text: str) -> bool:
+    """True for a quoted span no provider attempt attributed (speaker None but the text is
+    a quoted run). The single review-surface predicate — the characters overview and the
+    API segment browser must agree on it, so both call THIS instead of restating it."""
+    return speaker is None and is_quoted_span(text)
 
 
 @dataclass(frozen=True)

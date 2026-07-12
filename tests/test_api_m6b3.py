@@ -486,6 +486,61 @@ def test_unattributed_quote_surfaces_in_review_views(client, epub_bytes) -> None
     assert body["low_confidence_segments"] == 1  # it needs review
 
 
+def test_single_curly_unattributed_quote_surfaces_in_review_views(client, epub_bytes) -> None:
+    """The UK-convention twin of the test above: a ‘single curly’ quote nobody attributed
+    must reach both review surfaces too — is_quoted_span once knew only double glyphs, so
+    unattributed-quote surfacing silently no-opped for SINGLE_CURLY books."""
+    book_id = _ingested(client, epub_bytes)
+    report = AttributionReport(
+        book_id=book_id,
+        provider_id="local",
+        model_id="test-model",
+        prompt_version="v5-sq",
+        registry=CharacterRegistry(characters=[Character(id="alice", canonical_name="Alice")]),
+        chapters=[
+            AttributedChapter(
+                index=1,
+                title="Chapter 1",
+                segments=[
+                    Segment(
+                        block_id="ch001_b0001", type="narration", speaker=None, text="He waited."
+                    ),
+                    Segment(
+                        block_id="ch001_b0001",
+                        type="dialogue",
+                        speaker="alice",
+                        text="‘Hello.’",
+                        confidence=0.95,
+                    ),
+                    Segment(
+                        block_id="ch001_b0002",
+                        type="narration",
+                        speaker=None,
+                        text="‘Who goes there?’",
+                        confidence=0.0,
+                    ),
+                ],
+            ),
+        ],
+    )
+    book_dir = client.app.state.settings.books_dir / book_id
+    book_dir.mkdir(parents=True, exist_ok=True)
+    (book_dir / "attribution.json").write_text(report.model_dump_json(), encoding="utf-8")
+
+    rows = client.get(f"/api/books/{book_id}/chapters/1/segments").json()["segments"]
+    flags = {(r["block_id"], r["segment_index"]): r["unattributed_quote"] for r in rows}
+    assert flags == {
+        ("ch001_b0001", 0): False,  # prose narration
+        ("ch001_b0001", 1): False,  # attributed dialogue
+        ("ch001_b0002", 0): True,  # the UK quote nobody attributed
+    }
+
+    body = client.get(f"/api/books/{book_id}/characters").json()
+    assert body["unattributed_quote_segments"] == 1
+    assert body["narration_segments"] == 1  # not buried in the narration count
+    assert body["low_confidence_segments"] == 1  # it needs review
+
+
 def test_characters_route(client, epub_bytes) -> None:
     book_id = _ingested(client, epub_bytes)
     missing = client.get(f"/api/books/{book_id}/characters")

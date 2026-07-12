@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from seiyuu.attribute.models import FlaggedBlock, SegmentType
-from seiyuu.attribute.spans import is_quoted_span
+from seiyuu.attribute.spans import is_unattributed_quote
 from seiyuu.services.attribution import load_report
 
 
@@ -52,13 +52,13 @@ def characters_overview(
     narration = low_confidence = unattributed_quotes = 0
     for chapter in report.chapters:
         for seg in chapter.segments:
+            if is_unattributed_quote(seg.speaker, seg.text):
+                unattributed_quotes += 1
+                if seg.confidence < confidence_threshold:
+                    low_confidence += 1
+                continue
             if seg.speaker is None:
-                if is_quoted_span(seg.text):
-                    unattributed_quotes += 1
-                    if seg.confidence < confidence_threshold:
-                        low_confidence += 1
-                else:
-                    narration += 1
+                narration += 1
                 continue
             counts[seg.speaker] = counts.get(seg.speaker, 0) + 1
             if seg.confidence < confidence_threshold:

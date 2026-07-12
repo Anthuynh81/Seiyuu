@@ -29,6 +29,12 @@ import { buildEmotionMap, EMOTION_LABELS, emotionKey, intensityDots } from "../l
 /** TalkSelect keys are strings; this sentinel stands in for "no voice / narration". */
 const NONE = "__none__";
 
+/** The review-queue predicate, shared by the chapter queue count and each row's low flag.
+ * Unattributed quotes (speaker null but the text is a quoted span) are queue material too —
+ * they render in the narrator's voice, which is exactly what needs eyes. */
+const isReviewable = (s: SegmentRow, threshold: number) =>
+  (s.speaker !== null || s.unattributed_quote) && s.confidence < threshold;
+
 /* -------------------------------------------------- frontier (localStorage, per book) */
 
 function useFrontier(bookId: string | null): [number, (n: number) => void] {
@@ -467,13 +473,8 @@ export function Review() {
   }, [segments.error, chapter, chapterCount]);
 
   const threshold = overview.data?.confidence_threshold ?? 0.7;
-  // Unattributed quotes (speaker null but the text is a quoted span) are review-queue
-  // material too — they render in the narrator's voice, which is exactly what needs eyes.
   const lowConfInChapter = useMemo(
-    () =>
-      segments.data?.segments.filter(
-        (s) => (s.speaker !== null || s.unattributed_quote) && s.confidence < threshold,
-      ) ?? [],
+    () => segments.data?.segments.filter((s) => isReviewable(s, threshold)) ?? [],
     [segments.data, threshold],
   );
 
@@ -795,7 +796,7 @@ export function Review() {
                 <div className="paper page">
                   {segments.data.segments.map((s) => {
                     const key = `${s.block_id}:${s.segment_index}`;
-                    const low = (s.speaker !== null || s.unattributed_quote) && s.confidence < threshold;
+                    const low = isReviewable(s, threshold);
                     const dimmed = spoilerSafe && s.speaker !== null && cast.some((c) => c.id === s.speaker && isMasked(c));
                     const emotion = emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null;
                     return (
