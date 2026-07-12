@@ -127,6 +127,27 @@ def test_missing_verdict_revalidated_on_cache_hit(tmp_path):
     assert _seg(third).validation is not None and _seg(third).validation.ok is False
 
 
+def test_subset_merge_recomputes_validation_failures(tmp_path):
+    # A chapter-subset render merges into the existing manifest; the merged
+    # validation_failures aggregate must span the CARRIED-OVER chapters too, not just
+    # this run's (which would report 0 and hide ch1's flagged segments).
+    from factories import make_book
+
+    book, out = make_book(), tmp_path / "out"
+    first = render_book(
+        book, _validating_engine(), "v", out, seed=1, chapters=(1,),
+        validator=ScriptedValidator([(False, 0.4)]), validation_max_retries=0,
+    )  # fmt: skip
+    assert first.manifest.validation_failures == 3  # ch1's three speakable blocks all failed
+
+    second = render_book(
+        book, _validating_engine(), "v", out, seed=1, chapters=(2,),
+        validator=ScriptedValidator([(True, 0.95)]), validation_max_retries=0,
+    )  # fmt: skip
+    assert second.validation_failures == 0  # this RUN was clean...
+    assert second.manifest.validation_failures == 3  # ...but the merged book still flags ch1
+
+
 def test_verdict_persists_across_cache_hit(tmp_path):
     book, out = _one_block_book(), tmp_path / "out"
     first = render_book(

@@ -69,6 +69,57 @@ def test_chapter_subset(tmp_path) -> None:
     assert len(engine.calls) == 2
 
 
+def test_subset_render_merges_into_existing_manifest(tmp_path) -> None:
+    # Regression: a chapter-subset render used to OVERWRITE manifest.json wholesale, so
+    # "render ch1, then continue with ch2" left a manifest holding only ch2 — GET /render
+    # reported ch1 unrendered and assembly produced an m4b missing it.
+    out = tmp_path / "book"
+    render_book(make_book(), FakeEngine(), "test_voice", out, chapters=(1,))
+    result = render_book(make_book(), FakeEngine(), "test_voice", out, chapters=(2,))
+
+    assert [c.index for c in result.manifest.chapters] == [1, 2]
+    loaded = RenderManifest.model_validate_json((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert loaded == result.manifest
+    # carried-over chapter 1 entries are intact, not re-rendered placeholders
+    assert [s.block_id for s in loaded.chapters[0].segments] == [
+        "ch001_b0001",
+        "ch001_b0002",
+        "ch001_b0003",
+        "ch001_b0004",
+    ]
+    assert loaded.voice_id == "test_voice"
+
+    # re-rendering an already-merged chapter replaces its entry, never duplicates it
+    again = render_book(make_book(), FakeEngine(), "test_voice", out, chapters=(1,))
+    assert [c.index for c in again.manifest.chapters] == [1, 2]
+
+
+def test_full_render_still_overwrites_manifest(tmp_path) -> None:
+    # A FULL-book render keeps the historical wholesale overwrite — even across a voice
+    # change, where a subset render would refuse.
+    out = tmp_path / "book"
+    render_book(make_book(), FakeEngine(), "voice_a", out)
+    result = render_book(make_book(), FakeEngine(), "voice_b", out)
+    loaded = RenderManifest.model_validate_json((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert loaded == result.manifest
+    assert loaded.voice_id == "voice_b"
+    assert [c.index for c in loaded.chapters] == [1, 2]
+
+
+def test_subset_voice_identity_mismatch_refused_before_synthesis(tmp_path) -> None:
+    # Merging chapters rendered under a different voice/seed would make the manifest's
+    # top-level identity lie about the carried-over half — refuse before any synthesis.
+    out = tmp_path / "book"
+    render_book(make_book(), FakeEngine(), "test_voice", out, seed=1)
+    second = FakeEngine()
+    with pytest.raises(RenderError, match="chapter-subset"):
+        render_book(make_book(), second, "other_voice", out, chapters=(2,), seed=2)
+    assert second.calls == []  # refused up front, not after rendering
+    loaded = RenderManifest.model_validate_json((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert loaded.voice_id == "test_voice"  # existing manifest untouched
+    assert [c.index for c in loaded.chapters] == [1, 2]
+
+
 def test_unknown_chapter_rejected(tmp_path) -> None:
     with pytest.raises(RenderError, match="no such chapter"):
         render_book(make_book(), FakeEngine(), "test_voice", tmp_path / "book", chapters=(99,))
