@@ -517,4 +517,42 @@ describe("Review", () => {
     // success dismisses the preview panel — the paid flow ends cleanly
     expect(screen.queryByRole("button", { name: "apply cast" })).not.toBeInTheDocument();
   });
+
+  it("tag chips narrow every voice picker (AND semantics) but never hide the assigned voice", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/assignment", ASSIGNMENT);
+    server.get("/api/voices", {
+      voices: [
+        { ...voice("v-narr", "Narrator"), tags: ["male", "deep"] },
+        { ...voice("v-alice", "auto:Alice"), tags: ["female", "young"] },
+        { ...voice("v-lily", "Lily"), tags: ["female"] },
+        { ...voice("v-bob", "auto:Bob"), tags: ["male"] },
+      ],
+      unreadable: [],
+    });
+    renderWithProviders(<Review />);
+
+    // chips come from the union of tags; picking one narrows the pool
+    await user.click(await screen.findByRole("button", { name: "female" }));
+    expect(screen.getByText("2 of 4 voices")).toBeInTheDocument();
+
+    // Bob's picker: the two female-tagged voices plus his own (kept despite the filter) — not the narrator
+    const bobRow = await screen.findByRole("row", { name: /Bob/ });
+    await user.click(within(bobRow).getByRole("button", { name: /auto:Bob · kokoro/ }));
+    const listbox = await screen.findByRole("listbox");
+    expect(within(listbox).getByRole("option", { name: "auto:Bob · kokoro" })).toBeInTheDocument();
+    expect(within(listbox).getByRole("option", { name: "auto:Alice · kokoro" })).toBeInTheDocument();
+    expect(within(listbox).getByRole("option", { name: "Lily · kokoro" })).toBeInTheDocument();
+    expect(within(listbox).queryByRole("option", { name: "Narrator · kokoro" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    // a second tag ANDs: only voices carrying BOTH remain
+    await user.click(screen.getByRole("button", { name: "young" }));
+    expect(screen.getByText("1 of 4 voices")).toBeInTheDocument();
+
+    // clear restores the full pool
+    await user.click(screen.getByRole("button", { name: "clear" }));
+    expect(screen.queryByText(/of 4 voices/)).not.toBeInTheDocument();
+  });
 });

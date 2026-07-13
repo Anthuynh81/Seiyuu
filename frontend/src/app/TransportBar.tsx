@@ -13,6 +13,9 @@ function ledFor(job: JobOut): string {
 
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
+/** playback speeds the ×-key cycles through — 1× sits first so a reset is one lap away */
+const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
+
 function AudioTransport() {
   const player = usePlayer()!;
   const total = player.totalDuration;
@@ -41,6 +44,18 @@ function AudioTransport() {
       </div>
       <span className="mono" style={{ color: "var(--ink-2)" }}>{fmt(elapsed)} / {fmt(total)}</span>
       <span className="mono" style={{ color: "var(--ink-3)" }}>{clip?.speaker ?? "—"}</span>
+      <Tip content="playback speed — click to cycle">
+        <button
+          className="key quiet px-2 py-[2px]"
+          aria-label="playback speed"
+          onClick={() => {
+            const i = RATES.indexOf(player.rate);
+            player.setRate(RATES[(i + 1) % RATES.length] ?? 1);
+          }}
+        >
+          {player.rate}×
+        </button>
+      </Tip>
       <span className="vol">
         <span className="tag">vol</span>
         <TalkSlider

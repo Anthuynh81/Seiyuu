@@ -205,16 +205,23 @@ function VoicePicker({
   value,
   onChange,
   voices,
+  pool,
   allowOwn,
 }: {
   value: string | null;
   onChange: (v: string | null) => void;
   voices: VoiceOut[];
+  /** the unfiltered list — keeps the assigned voice visible when a tag filter hides it */
+  pool?: VoiceOut[];
   allowOwn?: boolean; // the thought-voice "speaker's own" option
 }) {
+  const current =
+    value !== null && !voices.some((v) => v.voice_id === value)
+      ? (pool ?? []).filter((v) => v.voice_id === value)
+      : [];
   const options = [
     ...(allowOwn ? [{ value: NONE, label: "speaker's own" }] : value === null ? [{ value: NONE, label: "— uncast —" }] : []),
-    ...voices.map((v) => ({ value: v.voice_id, label: `${v.name} · ${v.engine}` })),
+    ...[...current, ...voices].map((v) => ({ value: v.voice_id, label: `${v.name} · ${v.engine}` })),
   ];
   return (
     <TalkSelect
@@ -446,6 +453,21 @@ export function Review() {
     [assignment.data, casting],
   );
 
+  // tag filter for the voice pickers: AND semantics, narrows every picker in the roster.
+  // The assigned voice always stays visible (VoicePicker falls back to the full pool).
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
+  const allVoices = useMemo(() => voicesQ.data?.voices ?? [], [voicesQ.data]);
+  const allTags = useMemo(
+    () => [...new Set(allVoices.flatMap((v) => v.tags))].sort(),
+    [allVoices],
+  );
+  const filteredVoices = useMemo(
+    () => allVoices.filter((v) => tagFilter.every((t) => v.tags.includes(t))),
+    [allVoices, tagFilter],
+  );
+  const toggleTag = (t: string) =>
+    setTagFilter((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
+
   const [frontier, setFrontier] = useFrontier(bookId);
   const [spoilerSafe, setSpoilerSafe] = useState(true);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -656,6 +678,32 @@ export function Review() {
                   </>
                 )}
               </div>
+              {casting && allTags.length > 0 && (
+                <div className="caststrip flex-wrap gap-1.5">
+                  <Tip content="narrow every voice picker to voices carrying ALL the selected tags — tag voices in Voice Studio">
+                    <span className="tag">voice tags</span>
+                  </Tip>
+                  {allTags.map((t) => (
+                    <button
+                      key={t}
+                      className={`chap px-2 py-[2px] ${tagFilter.includes(t) ? "on" : ""}`}
+                      onClick={() => toggleTag(t)}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                  {tagFilter.length > 0 && (
+                    <>
+                      <span className="mono text-[10.5px] text-ink-3">
+                        {filteredVoices.length} of {allVoices.length} voices
+                      </span>
+                      <button className="key quiet px-2 py-[2px]" onClick={() => setTagFilter([])}>
+                        clear
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
               {suggestCast.data && (
                 <SuggestCastPanel
                   preview={suggestCast.data}
@@ -714,7 +762,8 @@ export function Review() {
                         <VoicePicker
                           value={casting.narrator}
                           onChange={(v) => v && setCasting({ ...casting, narrator: v })}
-                          voices={voicesQ.data?.voices ?? []}
+                          voices={filteredVoices}
+                          pool={allVoices}
                         />
                       )}
                     </td>
@@ -729,7 +778,8 @@ export function Review() {
                         <VoicePicker
                           value={casting.thought}
                           onChange={(v) => setCasting({ ...casting, thought: v })}
-                          voices={voicesQ.data?.voices ?? []}
+                          voices={filteredVoices}
+                          pool={allVoices}
                           allowOwn
                         />
                       </td>
@@ -749,7 +799,8 @@ export function Review() {
                           <VoicePicker
                             value={casting.map[c.id] ?? null}
                             onChange={(v) => v && setCasting({ ...casting, map: { ...casting.map, [c.id]: v } })}
-                            voices={voicesQ.data?.voices ?? []}
+                            voices={filteredVoices}
+                            pool={allVoices}
                           />
                         ) : (
                           <span className="mono text-ink-3">—</span>

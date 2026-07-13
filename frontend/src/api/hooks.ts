@@ -643,6 +643,21 @@ export function useSetVoiceTags() {
   });
 }
 
+/** Rename a voice — a pure label change (PATCH name only). Characters reference voice_id and
+    name is in no cache key, so no rendered audio drifts; recipe/seed stay immutable. */
+export function useRenameVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ voiceId, name }: { voiceId: string; name: string }) =>
+      api<VoiceOut>(`/api/voices/${voiceId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
 export function useDeleteVoice() {
   const qc = useQueryClient();
   return useMutation({

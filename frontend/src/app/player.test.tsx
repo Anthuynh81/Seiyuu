@@ -199,6 +199,60 @@ describe("PlayerProvider", () => {
     expect(player.api.audio!.volume).toBe(0.3);
   });
 
+  it("rate is read from localStorage on mount and setRate persists + applies it", () => {
+    localStorage.setItem("seiyuu.rate", "1.5");
+    const player = renderPlayer();
+    expect(player.api.rate).toBe(1.5);
+
+    act(() => player.api.load("b1", "ch", [clip("/audio/a.wav", 10)]));
+    expect(player.api.audio!.playbackRate).toBe(1.5);
+    // defaultPlaybackRate is what survives the src swap on clip advance
+    expect(player.api.audio!.defaultPlaybackRate).toBe(1.5);
+
+    act(() => player.api.setRate(2));
+    expect(localStorage.getItem("seiyuu.rate")).toBe("2");
+    expect(player.api.rate).toBe(2);
+    expect(player.api.audio!.playbackRate).toBe(2);
+    expect(player.api.audio!.defaultPlaybackRate).toBe(2);
+  });
+
+  it("re-loading the SAME clip list (a background refetch) neither pauses nor rewinds playback", () => {
+    const player = renderPlayer();
+    const clips = () => [clip("/audio/a.wav", 10), clip("/audio/b.wav", 20)];
+    act(() => player.api.load("b1", "ch", clips(), { autoplay: true }));
+    act(() => {
+      player.api.audio!.dispatchEvent(new Event("ended")); // now mid-chapter on clip b
+    });
+    expect(player.api.index).toBe(1);
+    pauseSpy.mockClear();
+    playSpy.mockClear();
+
+    // a window-refocus refetch rebuilds the page and calls load again with identical srcs
+    const onEnded = vi.fn();
+    act(() => player.api.load("b1", "ch", clips(), { autoplay: false, onEnded }));
+
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(player.api.playing).toBe(true);
+    expect(player.api.index).toBe(1); // place in the chapter kept
+    expect(player.api.audio!.src).toBe(absolute("/audio/b.wav"));
+
+    // the fresh onEnded took over: finishing the chapter fires it
+    act(() => {
+      player.api.audio!.dispatchEvent(new Event("ended"));
+    });
+    expect(onEnded).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-loading with DIFFERENT clips (a real navigation) restarts from the top", () => {
+    const player = renderPlayer();
+    act(() => player.api.load("b1", "ch1", [clip("/audio/a.wav", 10)], { autoplay: true }));
+
+    act(() => player.api.load("b1", "ch2", [clip("/audio/c.wav", 30)], { autoplay: false }));
+    expect(player.api.index).toBe(0);
+    expect(player.api.playing).toBe(false);
+    expect(player.api.audio!.src).toBe(absolute("/audio/c.wav"));
+  });
+
   it("clear pauses the audio and flips playing off", () => {
     const player = renderPlayer();
     act(() => player.api.load("b1", "ch", [clip("/audio/a.wav", 10)], { autoplay: true }));

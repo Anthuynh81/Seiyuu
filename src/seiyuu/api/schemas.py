@@ -567,11 +567,16 @@ class BlendVoiceCreate(BaseModel):
 VoiceCreate = Annotated[PresetVoiceCreate | BlendVoiceCreate, Field(discriminator="kind")]
 
 
-class VoiceTagsWrite(BaseModel):
-    """PATCH /voices/{id}: replace the tag list (the only mutable organization field)."""
+class VoiceUpdate(BaseModel):
+    """PATCH /voices/{id}: rename and/or replace tags. Both are optional and applied
+    independently (omit a field to leave it untouched). Deliberately the ONLY mutable
+    fields — name is a pure label (Characters reference voice_id, and name is in no cache
+    key) and tags are organization-only, so neither can drift a render cache key. Recipe,
+    seed, engine, and consent stay immutable; changing those means a new voice."""
 
     model_config = {"extra": "forbid"}
-    tags: list[str] = Field(max_length=16)
+    name: str | None = Field(default=None, min_length=1)
+    tags: list[str] | None = Field(default=None, max_length=16)
 
 
 class VoiceReferencesOut(BaseModel):

@@ -457,7 +457,7 @@ export interface VoiceListOut {
 }
 
 export type VoiceCreate =
-  | { kind: "preset"; name: string; engine: string; preset_id: string; voice_id?: string }
+  | { kind: "preset"; name: string; engine: string; preset_id: string; seed?: number; voice_id?: string }
   | {
       kind: "blend";
       name: string;
@@ -465,6 +465,8 @@ export type VoiceCreate =
       components?: { preset_id: string; weight: number }[];
       gender?: string | null;
       accent?: "a" | "b";
+      /** carry the source voice's seed when duplicating so the copy starts identical-sounding */
+      seed?: number;
       voice_id?: string;
     };
 

@@ -139,6 +139,69 @@ describe("Voices", () => {
     });
   });
 
+  it("rename PATCHes name only and shows the new name without touching the recipe", async () => {
+    const user = userEvent.setup();
+    const server = mountServer({ voices: [makeVoice({ voice_id: "v1", name: "Narrator", tags: ["hero"] })] });
+    server.on("PATCH", "/api/voices/v1", (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse(makeVoice({ voice_id: "v1", name: String(body.name), tags: ["hero"] }));
+    });
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "rename voice" }));
+    const input = screen.getByRole("textbox", { name: "voice name" });
+    await user.clear(input);
+    await user.type(input, "The Narrator");
+    // the post-save invalidation refetches the library — carry the rename on that GET
+    server.get("/api/voices", { voices: [makeVoice({ voice_id: "v1", name: "The Narrator", tags: ["hero"] })], unreadable: [] });
+    await user.click(screen.getByRole("button", { name: "save" }));
+
+    // the PATCH carries name ONLY — never recipe/seed/tags
+    await waitFor(() => expect(server.jsonBodyOf("PATCH", "/api/voices/v1")).toEqual({ name: "The Narrator" }));
+    expect(await screen.findByText("The Narrator")).toBeInTheDocument();
+  });
+
+  it("duplicate opens Add pre-filled with the blend recipe + seed and creates a NEW voice", async () => {
+    const user = userEvent.setup();
+    const server = mountServer({
+      voices: [
+        makeVoice({
+          voice_id: "vb",
+          name: "Duet",
+          kind: "blend",
+          preset_id: null,
+          seed: 999,
+          blend: [
+            { preset_id: "af_heart", weight: 0.6 },
+            { preset_id: "af_nicole", weight: 0.4 },
+          ],
+        }),
+      ],
+    })
+      .get("/api/engines/kokoro/voices", kokoroCatalog)
+      .post("/api/voices", makeVoice({ voice_id: "vb-copy", kind: "blend" }));
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "duplicate voice" }));
+    const dialog = await screen.findByRole("dialog", { name: "Duplicate voice" });
+    // pre-filled: copy name, and it lands in manual-mix mode with the source's layers
+    expect(within(dialog).getByDisplayValue("Duet copy")).toBeInTheDocument();
+    expect(within(dialog).getByText(/the original stays exactly as it is/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "create copy" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // a fresh voice from the same recipe, carrying the source seed so it starts identical
+    expect(server.jsonBodyOf("POST", "/api/voices")).toEqual({
+      kind: "blend",
+      name: "Duet copy",
+      components: [
+        { preset_id: "af_heart", weight: 60 },
+        { preset_id: "af_nicole", weight: 40 },
+      ],
+      seed: 999,
+    });
+  });
+
   it("clone uploads multipart with consent fields and escalates reclone_blocked into replace", async () => {
     const user = userEvent.setup();
     const server = mountServer();

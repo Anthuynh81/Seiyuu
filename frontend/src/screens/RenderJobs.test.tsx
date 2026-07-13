@@ -442,7 +442,7 @@ describe("RenderJobs", () => {
 
     // wait for the system defaults so the enqueue carries provider + model
     await screen.findByText(/anthropic · claude-sonnet-4/);
-    await user.click(screen.getByRole("button", { name: "attribute the whole book" }));
+    await user.click(screen.getByRole("button", { name: /attribute the whole book/ }));
 
     // the 402 surfaces the reason and an explicit confirm control — nothing auto-retries
     expect(await screen.findByText(/anthropic attribution is a paid run/)).toBeInTheDocument();
@@ -551,6 +551,65 @@ describe("RenderJobs", () => {
     expect(
       screen.getByText(/a render job is running and owns the render — wait for it or cancel it/),
     ).toBeInTheDocument();
+  });
+
+  /* ---- one-click finish (assemble → master) ------------------------------------------- */
+
+  it("finish runs assemble, waits for it to land, then runs master and reports done", async () => {
+    const user = userEvent.setup();
+    const server = mountRendered(renderedCard())
+      .get("/api/books/demo/render", makeSummary())
+      .post("/api/books/demo/assemble", makeJob({ job_id: "j-asm", kind: "assemble", state: "queued" }));
+    const { queryClient } = renderWithProviders(<RenderJobs />);
+
+    // the key deadens until the book detail (status.rendered) lands
+    const finishBtn = await screen.findByRole("button", { name: "finish · mp3s + m4b" });
+    await waitFor(() => expect(finishBtn).toBeEnabled());
+    await user.click(finishBtn);
+
+    // assemble fires immediately; master must NOT — it waits for assemble to succeed
+    await waitFor(() => expect(postCount(server, "/assemble")).toBe(1));
+    expect(postCount(server, "/master")).toBe(0);
+    expect(screen.getByText(/then master — keep this page open/)).toBeInTheDocument();
+
+    // the assemble job lands; the next poll advances the chain to master
+    server.get("/api/jobs", {
+      jobs: [makeJob({ job_id: "j-asm", kind: "assemble", state: "succeeded", is_terminal: true, finished_at: "2026-07-11T00:01:00Z" })],
+    });
+    server.post("/api/books/demo/master", makeJob({ job_id: "j-mst", kind: "master", state: "queued" }));
+    void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    await waitFor(() => expect(postCount(server, "/master")).toBe(1));
+
+    // the master job lands; the chain reports the m4b done
+    server.get("/api/jobs", {
+      jobs: [makeJob({ job_id: "j-mst", kind: "master", state: "succeeded", is_terminal: true, finished_at: "2026-07-11T00:02:00Z" })],
+    });
+    void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    expect(await screen.findByText(/finished — the \.m4b is ready below/)).toBeInTheDocument();
+    // the chain is over: finish is clickable again, and master was never double-fired
+    expect(screen.getByRole("button", { name: "finish · mp3s + m4b" })).toBeEnabled();
+    expect(postCount(server, "/master")).toBe(1);
+  });
+
+  it("a failed job stops the finish chain with the reason instead of running master anyway", async () => {
+    const user = userEvent.setup();
+    const server = mountRendered(renderedCard())
+      .get("/api/books/demo/render", makeSummary())
+      .post("/api/books/demo/assemble", makeJob({ job_id: "j-asm", kind: "assemble", state: "queued" }));
+    const { queryClient } = renderWithProviders(<RenderJobs />);
+
+    const finishBtn = await screen.findByRole("button", { name: "finish · mp3s + m4b" });
+    await waitFor(() => expect(finishBtn).toBeEnabled());
+    await user.click(finishBtn);
+    await waitFor(() => expect(postCount(server, "/assemble")).toBe(1));
+
+    server.get("/api/jobs", {
+      jobs: [makeJob({ job_id: "j-asm", kind: "assemble", state: "failed", is_terminal: true, error: "ffmpeg exploded" })],
+    });
+    void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+
+    expect(await screen.findByText(/auto-finish stopped — the assemble job failed: ffmpeg exploded/)).toBeInTheDocument();
+    expect(postCount(server, "/master")).toBe(0);
   });
 
   /* ---- cover art (Outputs panel) ------------------------------------------------------ */

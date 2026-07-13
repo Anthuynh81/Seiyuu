@@ -77,9 +77,16 @@ export function Listen() {
   const autoplayNext = useRef(false);
 
   const setChapter = (c: number) => {
+    // switching mid-listen carries the playback over — the new chapter starts on its own
+    // instead of landing paused (the old stop-dead-on-switch complaint)
+    autoplayNext.current = !!playerRef.current?.playing;
     setChapterRaw(c);
     setTocOpen(false);
   };
+
+  // nearest rendered neighbours for the ‹ › chapter keys
+  const prevRendered = Math.max(...[...renderedChapters].filter((i) => i < effectiveChapter), -Infinity);
+  const nextRendered = Math.min(...[...renderedChapters].filter((i) => i > effectiveChapter), Infinity);
 
   const playableRows = useMemo<SegmentRow[]>(
     () => segments.data?.segments.filter((s) => s.has_audio && s.duration_seconds !== null && s.audio_segment !== null) ?? [],
@@ -269,6 +276,22 @@ export function Listen() {
       <div className="readerhead">
         <button className="key quiet" onClick={() => setParams({})}>‹ shelf</button>
         <h1 className="m-0">{book.data?.status.title ?? bookId}</h1>
+        <button
+          className="chap"
+          disabled={!Number.isFinite(prevRendered)}
+          title="previous rendered chapter"
+          onClick={() => setChapter(prevRendered)}
+        >
+          ‹
+        </button>
+        <button
+          className="chap"
+          disabled={!Number.isFinite(nextRendered)}
+          title="next rendered chapter"
+          onClick={() => setChapter(nextRendered)}
+        >
+          ›
+        </button>
         <div className="tocwrap">
           <button className="key quiet" onClick={() => setTocOpen(!tocOpen)}>
             contents ▾

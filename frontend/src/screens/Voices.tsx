@@ -9,6 +9,7 @@ import {
   useCreateVoice,
   useDeleteVoice,
   useKokoroPresets,
+  useRenameVoice,
   useSetVoiceTags,
   useVoices,
   useWarmup,
@@ -201,10 +202,96 @@ function TagEditor({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: strin
   );
 }
 
+/* -------------------------------------------------- rename (name is a safe, cache-free label) */
+
+function NameRow({ voice }: { voice: VoiceOut }) {
+  const rename = useRenameVoice();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(voice.name);
+  const save = () => {
+    const name = draft.trim();
+    if (!name || name === voice.name) return setEditing(false);
+    rename.mutate({ voiceId: voice.voice_id, name }, { onSuccess: () => setEditing(false) });
+  };
+  if (!editing) {
+    return (
+      <h3 className="namerow">
+        {voice.name}
+        <button
+          className="rowedit ml-1.5"
+          title="rename voice"
+          aria-label="rename voice"
+          onClick={() => {
+            setDraft(voice.name);
+            rename.reset();
+            setEditing(true);
+          }}
+        >
+          ✎
+        </button>
+      </h3>
+    );
+  }
+  return (
+    <h3 className="namerow">
+      <input
+        className="taginput flex-1"
+        value={draft}
+        autoFocus
+        aria-label="voice name"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+      <button className="key quiet px-2 py-[2px]" disabled={rename.isPending} onClick={save}>
+        save
+      </button>
+      {rename.error && <span className="mono text-[10px] text-clip">{rename.error.message}</span>}
+    </h3>
+  );
+}
+
 /* -------------------------------------------------- voice card */
 
-function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: string) => string }) {
+/** A recipe lifted off an existing preset/blend voice to pre-fill the Add dialog. Duplicating
+    mints a NEW voice_id with its own (empty) render history — so tweaking the copy can never
+    drift the original's cached audio. Cloned voices can't be duplicated this way (their source
+    is reference.wav + a hash-bound consent, which the create path can't re-derive). */
+export interface DuplicateRecipe {
+  kind: "preset" | "blend";
+  name: string;
+  engine: string;
+  presetId?: string;
+  layers?: { preset_id: string; weight: number }[];
+  seed: number;
+}
+
+function recipeOf(voice: VoiceOut): DuplicateRecipe | null {
+  if (voice.kind === "preset" && voice.preset_id) {
+    return { kind: "preset", name: `${voice.name} copy`, engine: voice.engine, presetId: voice.preset_id, seed: voice.seed };
+  }
+  if (voice.kind === "blend" && voice.blend && voice.blend.length >= 2) {
+    // weights are stored as normalized ratios; scale to readable 0-100 for the mixer faders
+    const sum = voice.blend.reduce((a, b) => a + b.weight, 0) || 1;
+    const layers = voice.blend.map((b) => ({ preset_id: b.preset_id, weight: Math.max(1, Math.round((100 * b.weight) / sum)) }));
+    return { kind: "blend", name: `${voice.name} copy`, engine: voice.engine, layers, seed: voice.seed };
+  }
+  return null;
+}
+
+function VoiceCardView({
+  voice,
+  titleFor,
+  onDuplicate,
+}: {
+  voice: VoiceOut;
+  titleFor: (tag: string) => string;
+  onDuplicate: (recipe: DuplicateRecipe) => void;
+}) {
   const del = useDeleteVoice();
+  const recipe = recipeOf(voice);
   const kindLine =
     voice.kind === "preset"
       ? `${voice.preset_id} · seed ${voice.seed}`
@@ -224,8 +311,18 @@ function VoiceCardView({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag: s
         >
           ✕
         </button>
+        {recipe && (
+          <button
+            className="rowedit visible float-right mr-1.5"
+            title="duplicate — opens Add voice pre-filled with this recipe (a new, freely-editable voice)"
+            aria-label="duplicate voice"
+            onClick={() => onDuplicate(recipe)}
+          >
+            ⧉
+          </button>
+        )}
       </span>
-      <h3>{voice.name}</h3>
+      <NameRow voice={voice} />
       <span className="kind">{kindLine}</span>
       {voice.kind === "cloned" ? (
         voice.consent_attested ? (
@@ -326,23 +423,26 @@ const mixPreviewUrl = (layers: { preset_id: string; weight: number }[]) =>
 
 /* -------------------------------------------------- add / clone dialogs */
 
-function AddVoiceDialog({ onClose }: { onClose: () => void }) {
+function AddVoiceDialog({ onClose, initial }: { onClose: () => void; initial?: DuplicateRecipe }) {
   const create = useCreateVoice();
   const presets = useKokoroPresets();
-  const [kind, setKind] = useState<"preset" | "blend">("preset");
-  const [name, setName] = useState("");
-  const [engine, setEngine] = useState("kokoro");
-  const [presetId, setPresetId] = useState("af_heart");
-  const [cloudId, setCloudId] = useState("");
+  const [kind, setKind] = useState<"preset" | "blend">(initial?.kind ?? "preset");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [engine, setEngine] = useState(initial?.engine ?? "kokoro");
+  const [presetId, setPresetId] = useState(initial?.presetId ?? "af_heart");
+  const [cloudId, setCloudId] = useState(initial?.kind === "preset" && initial.engine !== "kokoro" ? (initial.presetId ?? "") : "");
   const [gender, setGender] = useState("");
   const [accent, setAccent] = useState<"a" | "b">("a");
   // manual mix: layers of (preset, weight) — the server normalizes weights, so only
-  // the ratios matter; the mixer shows the resulting percentages live
-  const [manual, setManual] = useState(false);
-  const [layers, setLayers] = useState<{ preset_id: string; weight: number }[]>([
-    { preset_id: "af_heart", weight: 60 },
-    { preset_id: "af_nicole", weight: 40 },
-  ]);
+  // the ratios matter; the mixer shows the resulting percentages live. A duplicated blend
+  // lands in manual mode with the source's resolved layers so it can be tweaked directly.
+  const [manual, setManual] = useState(!!initial?.layers);
+  const [layers, setLayers] = useState<{ preset_id: string; weight: number }[]>(
+    initial?.layers ?? [
+      { preset_id: "af_heart", weight: 60 },
+      { preset_id: "af_nicole", weight: 40 },
+    ],
+  );
   const error = create.error instanceof ApiError ? create.error.message : create.error?.message;
 
   const demo = useDemoPlayer();
@@ -368,13 +468,15 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
   const setLayer = (i: number, patch: Partial<{ preset_id: string; weight: number }>) =>
     setLayers(layers.map((l, k) => (k === i ? { ...l, ...patch } : l)));
 
+  // a duplicate carries the source seed so the copy starts identical-sounding before tuning
+  const seedPart = initial ? { seed: initial.seed } : {};
   const submit = () => {
     const body: VoiceCreate =
       kind === "preset"
-        ? { kind, name, engine, preset_id: engine === "kokoro" ? presetId : cloudId }
+        ? { kind, name, engine, preset_id: engine === "kokoro" ? presetId : cloudId, ...seedPart }
         : manual
-          ? { kind, name, components: layers.filter((l) => l.weight > 0) }
-          : { kind, name, gender: gender || null, accent };
+          ? { kind, name, components: layers.filter((l) => l.weight > 0), ...seedPart }
+          : { kind, name, gender: gender || null, accent, ...seedPart };
     create.mutate(body, { onSuccess: onClose });
   };
 
@@ -386,7 +488,7 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <TalkDialog
-      title="Add voice"
+      title={initial ? "Duplicate voice" : "Add voice"}
       onClose={onClose}
       footer={
         <>
@@ -401,11 +503,16 @@ function AddVoiceDialog({ onClose }: { onClose: () => void }) {
             }
             onClick={submit}
           >
-            add voice
+            {initial ? "create copy" : "add voice"}
           </button>
         </>
       }
     >
+      {initial && (
+        <div className="tag mb-2 normal-case tracking-[0.02em] text-ink-3">
+          creates a new voice from this recipe — the original stays exactly as it is
+        </div>
+      )}
       <div className="modewrap mb-1">
         <button className={`chap ${kind === "preset" ? "on" : ""}`} onClick={() => setKind("preset")}>preset</button>
         <button className={`chap ${kind === "blend" ? "on" : ""}`} onClick={() => setKind("blend")}>blend</button>
@@ -627,6 +734,7 @@ export function Voices() {
   const slots = useCloudSlots();
   const books = useBooks();
   const [dialog, setDialog] = useState<"none" | "add" | "clone">("none");
+  const [duplicate, setDuplicate] = useState<DuplicateRecipe | null>(null);
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<"all" | "preset" | "blend" | "cloned">("all");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
@@ -682,7 +790,15 @@ export function Voices() {
               <i key={i} className={i < (slots.data?.count ?? 0) ? "lit" : ""} />
             ))}
           </div>
-          <button className="key quiet ml-3.5" onClick={() => setDialog("add")}>add voice</button>
+          <button
+            className="key quiet ml-3.5"
+            onClick={() => {
+              setDuplicate(null);
+              setDialog("add");
+            }}
+          >
+            add voice
+          </button>
           <button className="key ml-2" onClick={() => setDialog("clone")}>new clone</button>
         </div>
         <div className="voicetools">
@@ -750,10 +866,28 @@ export function Voices() {
           </div>
         )}
         <div className="voices p-3.5">
-          {shown.map((v) => <VoiceCardView key={v.voice_id} voice={v} titleFor={titleFor} />)}
+          {shown.map((v) => (
+            <VoiceCardView
+              key={v.voice_id}
+              voice={v}
+              titleFor={titleFor}
+              onDuplicate={(recipe) => {
+                setDuplicate(recipe);
+                setDialog("add");
+              }}
+            />
+          ))}
         </div>
       </div>
-      {dialog === "add" && <AddVoiceDialog onClose={() => setDialog("none")} />}
+      {dialog === "add" && (
+        <AddVoiceDialog
+          initial={duplicate ?? undefined}
+          onClose={() => {
+            setDialog("none");
+            setDuplicate(null);
+          }}
+        />
+      )}
       {dialog === "clone" && <CloneDialog onClose={() => setDialog("none")} />}
     </section>
   );
