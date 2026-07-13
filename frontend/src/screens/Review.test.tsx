@@ -594,7 +594,7 @@ describe("Review", () => {
 
     // the rendered audio is now stale — the screen says so and deep-links to Render & Jobs
     expect(
-      await screen.findByText(/the rendered audio still uses the old voices/),
+      await screen.findByText(/the rendered audio still uses the old ones/),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /re-render in Render & Jobs/ })).toHaveAttribute(
       "href",

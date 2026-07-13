@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from seiyuu.render.pipeline import CostEstimate
+from seiyuu.render.pipeline import _ASSIGNMENT_IDENTITY, CostEstimate
 from seiyuu.repository import atomic_write_text
 
 _KEY_NAME = "cost_signing.key"
@@ -85,14 +85,22 @@ class CostQuote(BaseModel):
 
 
 def hash_assignment(assignment) -> str:
-    """Canonical hash of a VoiceAssignment, binding a quote to who-speaks-with-which-voice.
+    """Canonical hash of a VoiceAssignment's VOICE IDENTITY — who-speaks-with-which-voice
+    (``_ASSIGNMENT_IDENTITY``: narrator_voice_id, assignments, thought_voice_id).
+
+    Deliberately hashes ONLY those fields, never ``stage`` or ``created_at``: a re-save or a
+    draft->final promote regenerates ``created_at`` (a today date) and may flip ``stage`` WITHOUT
+    changing any voice, and folding them in would (a) spuriously invalidate an outstanding cost
+    quote and (b) false-positive GET /render's ``rendered_assignment_hash`` staleness signal on a
+    voice-identical re-save. This matches the render pipeline's own merge-identity guard.
 
     Accepts a VoiceAssignment OR its already-serialized ``model_dump(mode="json")`` dict — the
     render manifest stores the latter (an assignment snapshot), and GET /render hashes it to
     report ``rendered_assignment_hash``. Same canonicalization either way, so the render summary's
     hash is directly comparable to the estimate's hash of the current cast."""
     dumped = assignment if isinstance(assignment, dict) else assignment.model_dump(mode="json")
-    payload = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
+    identity = {k: dumped.get(k) for k in _ASSIGNMENT_IDENTITY}
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

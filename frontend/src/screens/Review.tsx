@@ -23,7 +23,7 @@ import { chapterOfBlock } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
-import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
+import { castingDiffers, castingFromServer, castingVoicesDiffer, type CastingState } from "../lib/casting";
 import { buildEmotionMap, EMOTION_LABELS, emotionKey, intensityDots } from "../lib/emotion";
 
 /** TalkSelect keys are strings; this sentinel stands in for "no voice / narration". */
@@ -452,6 +452,12 @@ export function Review() {
     () => (assignment.data && casting ? castingDiffers(assignment.data, casting) : false),
     [assignment.data, casting],
   );
+  // A voice-changing save on a rendered book makes the audio stale. Tracked (not derived from
+  // saveCast.isSuccess) so a stage-only draft->final save never claims the audio is stale, and
+  // set-true-only so a later stage-only save can't clear a still-pending voice change. Cleared on
+  // book switch (the ?book= param), since staleness is per-book.
+  const [staleAfterSave, setStaleAfterSave] = useState(false);
+  useEffect(() => setStaleAfterSave(false), [bookId]);
 
   // tag filter for the voice pickers: AND semantics, narrows every picker in the roster.
   // The assigned voice always stays visible (VoicePicker falls back to the full pool).
@@ -664,14 +670,22 @@ export function Review() {
                     <button
                       className="key px-3 py-[3px]"
                       disabled={!castingDirty || saveCast.isPending}
-                      onClick={() =>
-                        saveCast.mutate({
-                          stage: casting.stage,
-                          narrator_voice_id: casting.narrator,
-                          assignments: casting.map,
-                          thought_voice_id: casting.thought,
-                        })
-                      }
+                      onClick={() => {
+                        // capture BEFORE the save overwrites the server copy: did the voices
+                        // actually change (vs a stage-only edit)? Only that makes audio stale.
+                        const voicesChanged = assignment.data
+                          ? castingVoicesDiffer(assignment.data, casting)
+                          : true;
+                        saveCast.mutate(
+                          {
+                            stage: casting.stage,
+                            narrator_voice_id: casting.narrator,
+                            assignments: casting.map,
+                            thought_voice_id: casting.thought,
+                          },
+                          { onSuccess: () => voicesChanged && setStaleAfterSave(true) },
+                        );
+                      }}
                     >
                       {saveCast.isPending ? "saving…" : castingDirty ? "save casting" : "saved ✓"}
                     </button>
@@ -746,11 +760,11 @@ export function Review() {
                   <p>{(draftCast.error ?? saveCast.error)?.message}</p>
                 </div>
               )}
-              {saveCast.isSuccess && !castingDirty && book.data?.status.rendered && (
+              {staleAfterSave && !castingDirty && book.data?.status.rendered && (
                 <div className="caststrip flex-wrap gap-2 text-[11px]">
                   <span className="tag">audio is stale</span>
                   <span className="mono text-ink-2">
-                    casting saved — the rendered audio still uses the old voices.
+                    voices changed — the rendered audio still uses the old ones.
                   </span>
                   <Link className="link" to={`/render?book=${encodeURIComponent(bookId)}`}>
                     re-render in Render &amp; Jobs →
