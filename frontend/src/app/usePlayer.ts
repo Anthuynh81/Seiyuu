@@ -33,6 +33,9 @@ export interface PlayerApi {
   seekFraction: (frac: number) => void;
   setVolume: (v: number) => void;
   volume: number;
+  /** playback speed (0.75–2). Persisted; applies to the element immediately. */
+  rate: number;
+  setRate: (r: number) => void;
   audio: HTMLAudioElement | null;
   totalDuration: number;
   clear: () => void;

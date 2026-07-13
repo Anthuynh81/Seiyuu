@@ -20,6 +20,7 @@ import {
 import type {
   ActiveJobSummary,
   ArchivedRenderMode,
+  BookCard,
   ChapterSummary,
   CostEstimateOut,
   CoverOut,
@@ -29,32 +30,51 @@ import type {
   RenderSummaryOut,
   ValidationRow,
 } from "../api/types";
+import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
 import { classifyRenderFailure } from "../lib/money";
 import { continueRange, scopeChapters, type Scope } from "../lib/scope";
 
-/* -------------------------------------------------- steps strip */
+/* -------------------------------------------------- pipeline rail */
 
-function Steps() {
+/** The whole signal path in one glance — which stages are done, which one is running,
+    and what to do next. Replaces the old three-paragraph "steps" banner and answers
+    "what do I click after render?" without the user memorizing the order. */
+function StageRail({
+  status,
+  activeJob,
+}: {
+  status: Omit<BookCard, "active_job"> | undefined;
+  activeJob: ActiveJobSummary | null;
+}) {
+  const runningStage = activeJob ? KIND_STAGE[activeJob.kind] : undefined;
+  const nextFlag = STAGES.find(([flag]) => !status?.[flag])?.[0];
+  const hint = runningStage
+    ? `${activeJob!.kind} is ${activeJob!.state} — follow it on the right`
+    : nextFlag === "ingested"
+      ? "no text yet — re-ingest from the Library"
+      : nextFlag === "attributed"
+        ? "next: attribute (below) — or render single voice right away"
+        : nextFlag === "assigned"
+          ? "next: cast voices in Character Review — or render single voice"
+          : nextFlag === "rendered"
+            ? "next: render (below)"
+            : nextFlag // assembled or mastered
+              ? "next: finish · assemble + master (Outputs panel)"
+              : "all stages done — download the .m4b in Outputs";
   return (
-    <div className="steps">
-      <div className="step">
-        <span className="n">STEP 1</span>
-        <b>Estimate</b>
-        <span>free &amp; instant — see what's cached, what's local, what would bill</span>
-      </div>
-      <div className="step">
-        <span className="n">STEP 2</span>
-        <b>Approve</b>
-        <span>paid work mints a quote: a single-use price ticket, valid 15 minutes</span>
-      </div>
-      <div className="step">
-        <span className="n">STEP 3</span>
-        <b>Render</b>
-        <span>the job appears on the right, cancellable from the transport bar</span>
-      </div>
+    <div className="scoperow" role="list" aria-label="pipeline">
+      <span className="tag">pipeline</span>
+      {STAGES.map(([flag, label], i) => (
+        <span key={flag} role="listitem" className="state mono text-[11px]">
+          <i className={`led ${runningStage === flag ? "run" : status?.[flag] ? "ok" : "off"}`} />
+          {label}
+          {i < STAGES.length - 1 && <span aria-hidden className="text-ink-3">›</span>}
+        </span>
+      ))}
+      <span className="mono scopehint">{hint}</span>
     </div>
   );
 }
@@ -118,7 +138,7 @@ function QuoteTicket({
         {dead && <div className="line text-clip"><span>refusal</span><span>{state.message}</span></div>}
         <div className="total">
           <span className="tag text-paper-ink-2">
-            {dead ? "token intact — mint a fresh quote" : "step 3 — the render never bills past this"}
+            {dead ? "token intact — mint a fresh quote" : "the render never bills past this"}
           </span>
           <b>${quote.total_usd.toFixed(2)}</b>
         </div>
@@ -299,7 +319,7 @@ function EstimateCard({
   return (
     <div className="panel est mb-0">
       <div className="panel-h">
-        <b>Step 1 — Estimate</b>
+        <b>Estimate</b>
         <span className="tag ml-auto">{mode} · {est.chapters.length ? `ch ${est.chapters.join(",")}` : "whole book"}</span>
       </div>
       <div className="humanline">{human}</div>
@@ -320,7 +340,7 @@ function EstimateCard({
       <div className="est acts">
         {paid ? (
           <button className="key" onClick={onMint} disabled={minting}>
-            {minting ? "minting…" : `step 2 · approve — mint quote for $${est.total_usd.toFixed(2)}`}
+            {minting ? "minting…" : `approve — mint quote for $${est.total_usd.toFixed(2)}`}
           </button>
         ) : (
           <button className="key" onClick={onFreeRender}>render {mode} — free, nothing to approve</button>
@@ -580,6 +600,55 @@ export function RenderJobs() {
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
 
+  // One-click finish: run assemble, then master, advancing when the watched job lands
+  // (the useBookJobs poll is the clock). Client-side chain — it stops if the page closes,
+  // which the checkbox label says out loud.
+  const [chain, setChain] = useState<{ watch: string | null; queue: ("assemble" | "master")[] } | null>(null);
+  const [chainNote, setChainNote] = useState<string | null>(null);
+  const [autoFinish, setAutoFinish] = useState(false);
+  const chainStep = (queue: ("assemble" | "master")[]) => {
+    const [next, ...rest] = queue;
+    if (!next) {
+      setChain(null);
+      setChainNote("finished — the .m4b is ready below");
+      return;
+    }
+    setChain({ watch: null, queue: rest }); // "starting" — blocks the watcher until the job id lands
+    (next === "assemble" ? assemble : master).mutate(
+      {},
+      {
+        onSuccess: (job) => setChain({ watch: job.job_id, queue: rest }),
+        onError: (e) => {
+          setChain(null);
+          setChainNote(`auto-finish stopped at ${next}: ${e instanceof ApiError ? e.message : String(e)}`);
+        },
+      },
+    );
+  };
+  useEffect(() => {
+    if (!chain?.watch) return;
+    const j = jobs.data?.jobs.find((x) => x.job_id === chain.watch);
+    if (!j?.is_terminal) return;
+    if (j.state === "succeeded") chainStep(chain.queue);
+    else {
+      setChain(null);
+      setChainNote(`auto-finish stopped — the ${j.kind} job ${j.state}${j.error ? `: ${j.error}` : ""}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs.data, chain]);
+  // Reset only on a REAL book switch. bookId flickers to null whenever the live-job count
+  // changes (useBooks re-keys and refetches) — and that happens precisely when a chained job
+  // lands, which must not kill the chain.
+  const lastBook = useRef<string | null>(null);
+  useEffect(() => {
+    if (bookId === null || bookId === lastBook.current) return;
+    lastBook.current = bookId;
+    setChain(null);
+    setChainNote(null);
+    setAutoFinish(false);
+  }, [bookId]);
+  const chainBusy = chain !== null || assemble.isPending || master.isPending;
+
   const [ticket, setTicket] = useState<TicketState>({ kind: "none" });
   const [confirmFull, setConfirmFull] = useState<{ speakable_blocks: number; runtime_estimate_seconds: number } | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
@@ -609,9 +678,13 @@ export function RenderJobs() {
         ...(opts.confirmFull ? { confirm_full: true } : {}),
       },
       {
-        onSuccess: () => {
+        onSuccess: (job) => {
           setTicket({ kind: "none" });
           setConfirmFull(null);
+          if (autoFinish) {
+            setChainNote(null);
+            setChain({ watch: job.job_id, queue: ["assemble", "master"] });
+          }
         },
         onError: (e) => {
           const action = classifyRenderFailure(e, ticket.kind === "live");
@@ -660,10 +733,9 @@ export function RenderJobs() {
         />
       </h1>
       <p className="sub">
-        Turn the reviewed book into audio. Free renders start with one click; anything that costs money asks you to
-        approve the exact price first.
+        Free renders start with one click; paid work always shows its exact price first.
       </p>
-      <Steps />
+      <StageRail status={status} activeJob={book.data?.active_job ?? null} />
       <div className="rjgrid">
         <div>
           <div className="modewrap">
@@ -737,13 +809,12 @@ export function RenderJobs() {
             ) : (
               <div className="refusal mb-3.5">
                 <span className="tag">not attributed</span>
-                <p>
-                  no speaker attribution yet — multivoice, Character Review, and the Listen read-along all need it
-                  (a bare single-voice render doesn't).{" "}
-                  <button className="link" disabled={attribute.isPending} onClick={() => startAttribute()}>
+                <p>multivoice, Character Review, and the read-along need speaker attribution — single voice doesn't.</p>
+                <p className="mt-2">
+                  <button className="key" disabled={attribute.isPending} onClick={() => startAttribute()}>
                     {attribute.isPending
                       ? "starting…"
-                      : `attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
+                      : `▶ attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
                   </button>
                 </p>
                 <p className="mono mt-1.5 text-[11px] text-ink-2">
@@ -799,14 +870,20 @@ export function RenderJobs() {
           {estimate.isPending && ready && <div className="loadline">estimating against the segment cache…</div>}
           {estimate.isError && <div className="errline">{estimate.error.message}</div>}
           {estimate.data && (
-            <EstimateCard
-              est={estimate.data}
-              mode={mode}
-              onMint={doMint}
-              onFreeRender={() => startRender({})}
-              minting={mint.isPending}
-              error={flowError}
-            />
+            <>
+              <EstimateCard
+                est={estimate.data}
+                mode={mode}
+                onMint={doMint}
+                onFreeRender={() => startRender({})}
+                minting={mint.isPending}
+                error={flowError}
+              />
+              <label className="mono mt-2 flex items-center gap-1.5 text-[11px] text-ink-2">
+                <input type="checkbox" checked={autoFinish} onChange={(e) => setAutoFinish(e.target.checked)} />
+                when the render lands, assemble + master automatically (keep this page open)
+              </label>
+            </>
           )}
           <QuoteTicket
             state={ticket}
@@ -829,7 +906,7 @@ export function RenderJobs() {
         <div>
           <div className="panel joblist">
             <div className="panel-h"><b>Jobs</b><span className="tag ml-auto">live</span></div>
-            <div className="panel-sub">Everything the machine is doing or has done for this book, newest first. Click a failed row for its reason.</div>
+            <div className="panel-sub">Newest first — click a failed row for its reason.</div>
             {jobs.data?.jobs.length === 0 && <div className="loadline p-3.5">no jobs yet</div>}
             {jobs.data?.jobs.map((j) => <JobRow key={j.job_id} job={j} />)}
           </div>
@@ -837,19 +914,40 @@ export function RenderJobs() {
           <div className="panel dl">
             <div className="panel-h">
               <b>Outputs</b>
-              <button className="key quiet ml-auto" disabled={!status?.rendered || assemble.isPending}
+              <button className="key quiet ml-auto" disabled={!status?.rendered || chainBusy}
                 onClick={() => assemble.mutate({})}>
                 assemble
               </button>
-              <button className="key ml-2.5" disabled={!status?.rendered || master.isPending}
+              <button className="key quiet ml-2.5" disabled={!status?.rendered || chainBusy}
                 onClick={() => master.mutate({})}>
-                master m4b
+                master
+              </button>
+              <button
+                className="key ml-2.5"
+                disabled={!status?.rendered || chainBusy}
+                title="run assemble, then master — one click to the .m4b"
+                onClick={() => {
+                  setChainNote(null);
+                  chainStep(["assemble", "master"]);
+                }}
+              >
+                {chain ? "finishing…" : "finish · mp3s + m4b"}
               </button>
             </div>
             <div className="panel-sub">
-              After a render: <b>assemble</b> makes per-chapter MP3s, <b>master</b> makes the final chaptered .m4b audiobook.
+              <b>assemble</b> → per-chapter MP3s · <b>master</b> → the chaptered .m4b — or <b>finish</b> runs both.
             </div>
-            {(assemble.error || master.error) && (
+            {chain && (
+              <div className="drainstrip mx-3 my-2">
+                <span className="state"><i className="led run" />auto-finish</span>
+                <span className="mono text-[11px] text-ink-2">
+                  {chain.watch ? "waiting for the current job" : "starting"}
+                  {chain.queue.length > 0 && ` · then ${chain.queue.join(" → ")}`} — keep this page open
+                </span>
+              </div>
+            )}
+            {chainNote && <div className="mono mx-3.5 my-2 text-[11px] text-ink-2">{chainNote}</div>}
+            {(assemble.error || master.error) && !chainNote && (
               <div className="errline m-3">{(assemble.error ?? master.error)?.message}</div>
             )}
             <table>

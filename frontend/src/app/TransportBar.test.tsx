@@ -1,10 +1,22 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useEffect } from "react";
 import { describe, expect, it } from "vitest";
 
 import { makeJob } from "../test/fixtures";
 import { mockApi, renderWithProviders } from "../test/utils";
 import { TransportBar } from "./TransportBar";
+import { usePlayer } from "./usePlayer";
+
+/** Loads one clip into the player so the /listen route mounts the audio transport. */
+function LoadOneClip() {
+  const player = usePlayer();
+  useEffect(() => {
+    player?.load("b1", "Chapter 1", [{ src: "/audio/a.wav", duration: 10, key: "a", speaker: "N", words: [] }]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
 
 describe("TransportBar", () => {
   it("reads idle when no jobs are queued or running", async () => {
@@ -67,5 +79,31 @@ describe("TransportBar", () => {
     renderWithProviders(<TransportBar />);
     expect(await screen.findByRole("button", { name: "canceling…" })).toBeDisabled();
     expect(screen.getByText("canceling")).toBeInTheDocument();
+  });
+
+  it("the speed key cycles the playback rate and persists it", async () => {
+    const user = userEvent.setup();
+    mockApi();
+    renderWithProviders(
+      <>
+        <LoadOneClip />
+        <TransportBar />
+      </>,
+      { route: "/listen" },
+    );
+
+    const key = await screen.findByRole("button", { name: "playback speed" });
+    expect(key).toHaveTextContent("1×");
+
+    await user.click(key);
+    expect(key).toHaveTextContent("1.25×");
+    expect(localStorage.getItem("seiyuu.rate")).toBe("1.25");
+
+    // a full lap comes back around to 1×
+    for (const expected of ["1.5×", "1.75×", "2×", "0.75×", "1×"]) {
+      await user.click(key);
+      expect(key).toHaveTextContent(expected);
+    }
+    expect(localStorage.getItem("seiyuu.rate")).toBe("1");
   });
 });
