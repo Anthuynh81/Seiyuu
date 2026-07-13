@@ -13,6 +13,7 @@ from seiyuu.attribute.models import (
     SegmentType,
 )
 from seiyuu.gpu import GpuResourceManager
+from seiyuu.ingest.models import Block, BlockType, Chapter
 from seiyuu.render import RenderError, render_book_multivoice
 from seiyuu.voices import VoiceAssignment, VoiceLibrary, VoiceMeta
 from seiyuu.voices.models import VoiceKind
@@ -213,6 +214,170 @@ def test_render_voice_args_addresses_each_kind():
     )
     voice, settings = render_voice_args(cloned)
     assert voice == "bob_x" and "blend" not in settings  # cloned addressed by voice_id (conds)
+
+
+def test_multivoice_subset_renders_merge_into_manifest(tmp_path, monkeypatch):
+    # Regression: a chapter-subset render clobbered manifest.json wholesale — after
+    # rendering ch1 then ch2, only ch2 survived for the summary/Listen/assembly.
+    _patch_engine(monkeypatch, FakeEngine())
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    out = tmp_path / "out"
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, out, chapters=(1,), gpu=GpuResourceManager()
+    )
+    # a re-saved assignment with the SAME voice map but churned metadata must still merge
+    resumed = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+        stage="final",
+        created_at="2020-01-01",
+    )
+    result = render_book_multivoice(
+        _report(), make_book(), lib, resumed, out, chapters=(2,), gpu=GpuResourceManager()
+    )
+
+    assert [c.index for c in result.manifest.chapters] == [1, 2]
+    assert set(result.manifest.voices_used) == {"narrator_v", "alice_v"}
+    from seiyuu.render import RenderManifest
+
+    reloaded = RenderManifest.model_validate_json(result.manifest_path.read_text(encoding="utf-8"))
+    assert reloaded == result.manifest
+    # carried-over chapter 1 entries intact, including the scene break
+    assert [s.block_id for s in reloaded.chapters[0].segments] == [
+        "ch001_b0001",
+        "ch001_b0002",
+        "ch001_b0003",
+        "ch001_b0004",
+    ]
+
+
+def test_multivoice_subset_merge_drops_ghosts_and_their_voices(tmp_path, monkeypatch):
+    # Re-uploading the same file with different split settings keeps the book_id but can
+    # SHRINK the chapter set (3 → 2 here). The old manifest's ch3 is a ghost: it must not
+    # survive a subset merge, and a voice ONLY it used must leave voices_used.
+    _patch_engine(monkeypatch, FakeEngine())
+    lib = _library(tmp_path)
+    lib.save(
+        VoiceMeta(
+            voice_id="bob_v",
+            name="Bob",
+            kind=VoiceKind.PRESET,
+            engine="kokoro",
+            preset_id="am_adam",
+        )  # fmt: skip
+    )
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v", "bob": "bob_v"},
+    )
+    big_book = make_book()
+    big_book.chapters.append(
+        Chapter(
+            title="Chapter 3",
+            blocks=[Block(id="ch003_b0001", type=BlockType.PARAGRAPH, text="Bob speaking.")],
+        )
+    )
+    big_report = _report()
+    big_report.registry.characters.append(Character(id="bob", canonical_name="Bob"))
+    big_report.chapters.append(
+        AttributedChapter(
+            index=3,
+            title="Chapter 3",
+            segments=[
+                Segment(
+                    block_id="ch003_b0001",
+                    type=SegmentType.DIALOGUE,
+                    text="Bob speaking.",
+                    speaker="bob",
+                )
+            ],
+        )
+    )
+    out = tmp_path / "out"
+    before = render_book_multivoice(
+        big_report, big_book, lib, assignment, out, gpu=GpuResourceManager()
+    )
+    assert set(before.manifest.voices_used) == {"narrator_v", "alice_v", "bob_v"}
+
+    # the book shrank to 2 chapters (same book_id, same assignment) — subset render ch2
+    result = render_book_multivoice(
+        _report(), make_book(), lib, assignment, out, chapters=(2,), gpu=GpuResourceManager()
+    )
+
+    assert [c.index for c in result.manifest.chapters] == [1, 2]  # ghost ch3 dropped
+    assert set(result.manifest.voices_used) == {"narrator_v", "alice_v"}  # bob_v was ghost-only
+    from seiyuu.render import RenderManifest
+
+    reloaded = RenderManifest.model_validate_json(result.manifest_path.read_text(encoding="utf-8"))
+    assert reloaded == result.manifest
+
+
+def test_multivoice_subset_assignment_mismatch_refused_before_synthesis(tmp_path, monkeypatch):
+    # Chapters outside the subset were rendered with the OLD voice map; merging under a new
+    # one would misdescribe them — refuse before any synthesis starts.
+    fake = FakeEngine()
+    _patch_engine(monkeypatch, fake)
+    lib = _library(tmp_path)
+    out = tmp_path / "out"
+    original = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    render_book_multivoice(
+        _report(), make_book(), lib, original, out, chapters=(1,), gpu=GpuResourceManager()
+    )
+    calls_before = len(fake.calls)
+    recast = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "narrator_v"},
+    )
+    with pytest.raises(RenderError, match="assignment"):
+        render_book_multivoice(
+            _report(), make_book(), lib, recast, out, chapters=(2,), gpu=GpuResourceManager()
+        )
+    assert len(fake.calls) == calls_before  # refused up front
+
+
+def test_subset_mode_mismatch_refused_both_directions(tmp_path, monkeypatch):
+    from seiyuu.render import render_book
+
+    fake = FakeEngine()
+    _patch_engine(monkeypatch, fake)
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+
+    # single-voice manifest exists → multivoice subset render refuses, naming both modes
+    single_out = tmp_path / "single_out"
+    render_book(make_book(), FakeEngine(), "test_voice", single_out)
+    with pytest.raises(RenderError, match="multivoice.*single-voice"):
+        render_book_multivoice(
+            _report(), make_book(), lib, assignment, single_out,
+            chapters=(2,), gpu=GpuResourceManager(),
+        )  # fmt: skip
+    assert fake.calls == []  # refused before any synthesis
+
+    # multivoice manifest exists → single-voice subset render refuses
+    multi_out = tmp_path / "multi_out"
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, multi_out, gpu=GpuResourceManager()
+    )
+    single_engine = FakeEngine()
+    with pytest.raises(RenderError, match="single-voice.*multivoice"):
+        render_book(make_book(), single_engine, "test_voice", multi_out, chapters=(2,))
+    assert single_engine.calls == []
 
 
 def test_segments_cached_on_second_run(tmp_path, monkeypatch):

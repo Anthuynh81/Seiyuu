@@ -207,6 +207,25 @@ def test_free_single_render_end_to_end(client, monkeypatch) -> None:
     assert missing.status_code == 404
 
 
+def test_subset_renders_accumulate_in_summary(client, monkeypatch) -> None:
+    # Regression: the frontend's "continue — next N chapters" preset enqueues subset
+    # renders; the second one used to clobber manifest.json so chapter 1 vanished from
+    # the summary (and from Listen/assembly) even though its WAVs sat in cache.
+    _patch_engines(monkeypatch, FakeEngine())
+    for chapters in ([1], [2, 3]):
+        resp = client.post(
+            f"/api/books/{client.book_id}/render",
+            json={"mode": "single", "single": {}, "chapters": chapters},
+        )
+        assert resp.status_code == 202, resp.text
+        done = _wait_terminal(client.app.state.store, resp.json()["job_id"])
+        assert done.state is JobState.SUCCEEDED, done.error
+
+    summary = client.get(f"/api/books/{client.book_id}/render").json()
+    assert [c["index"] for c in summary["chapters"]] == [1, 2, 3]
+    assert all(c["segments"] > 0 for c in summary["chapters"])
+
+
 def test_render_reads_404_before_render(client) -> None:
     assert client.get(f"/api/books/{client.book_id}/render").status_code == 404
     assert client.get(f"/api/books/{client.book_id}/validation").status_code == 404

@@ -53,6 +53,7 @@ function overviewFor(bookId: string, characters: CharacterSummary[]): Characters
     prompt_version: "v6",
     narration_segments: 120,
     low_confidence_segments: 3,
+    unattributed_quote_segments: 0,
     confidence_threshold: 0.7,
     characters,
     flagged: [],
@@ -95,6 +96,7 @@ function seg(overrides: Partial<SegmentRow> = {}): SegmentRow {
     speaker_name: null,
     text: "It was a dark night.",
     confidence: 0.99,
+    unattributed_quote: false,
     has_audio: false,
     audio_segment: null,
     duration_seconds: null,
@@ -387,6 +389,43 @@ describe("Review", () => {
     expect(screen.getByText(/chapter 2 of 2 · The Middle/)).toBeInTheDocument();
     expect(server.lastCall("GET", "/api/books/b1/chapters/2/segments")).toBeDefined();
     expect(screen.getByRole("button", { name: "›" })).toBeDisabled(); // last chapter
+  });
+
+  it("unattributed quotes join the review queue and render an 'unattributed' chip, not 'narration'", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const base = chapterOneSegments();
+    server.get("/api/books/b1/chapters/1/segments", {
+      ...base,
+      segments: [
+        ...base.segments,
+        seg({
+          block_id: "ch001_b0002",
+          segment_index: 0,
+          type: "narration",
+          text: '"Who goes there?"',
+          confidence: 0,
+          unattributed_quote: true,
+        }),
+      ],
+    } satisfies SegmentBrowserOut);
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [alice(), bob()]),
+      unattributed_quote_segments: 1,
+    });
+    renderWithProviders(<Review />);
+
+    // distinguishable chip: "unattributed", never passed off as plain narration
+    const chip = await screen.findByRole("button", { name: "unattributed" });
+    // the drainstrip counts it: the book-level stat AND the chapter queue (0.0 + the 0.55 dialogue)
+    expect(screen.getByText(/1 unattributed quote\(s\) · 2 in this chapter/)).toBeInTheDocument();
+    // it wears the in-review marker like any low-confidence attribution
+    expect(screen.getAllByText(/in review/)).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "next ▸" })).toBeEnabled();
+
+    // its chip opens the reassign popover — the queue leads straight to the fix
+    await user.click(chip);
+    expect(await screen.findByText(/reassign · ch001_b0002 \[0\]/)).toBeInTheDocument();
   });
 
   it("suggest cast previews via POST /assignment/suggest and apply drafts with strategy=smart", async () => {

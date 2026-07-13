@@ -98,6 +98,34 @@ def test_real_change_still_rejected_whitespace_insensitive():
     assert not reconstructs_block('"Stop!"—but he didn\'t.', ['"Stop!"', "—but he did."])
 
 
+# UK single-quote convention: the honest single-curly split must pass and tampered
+# variants must still be rejected (the quote fold collapses ‘/’ to ', never words).
+UK_BLOCK = "‘I won’t go,’ she said, trembling. ‘Not after everything.’"
+UK_HONEST = ["‘I won’t go,’", " she said, trembling. ", "‘Not after everything.’"]
+
+
+def test_single_curly_honest_split_reconstructs():
+    assert reconstructs_block(UK_BLOCK, UK_HONEST)
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        pytest.param(
+            ["‘I will not go,’", " she said, trembling. ", "‘Not after everything.’"],
+            id="uk-paraphrase",
+        ),
+        pytest.param(["‘I won’t go,’", " she said, trembling. "], id="uk-dropped-sentence"),
+        pytest.param(
+            ["‘Not after everything.’", " she said, trembling. ", "‘I won’t go,’"],
+            id="uk-reordered-dialogue",
+        ),
+    ],
+)
+def test_single_curly_tampered_splits_rejected(segments):
+    assert not reconstructs_block(UK_BLOCK, segments)
+
+
 def test_nfc_canonical_equivalence_tolerated():
     # Composed vs decomposed accent is the same text.
     assert reconstructs_block("café", ["café"])

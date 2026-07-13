@@ -241,6 +241,11 @@ class SegmentRow(BaseModel):
     speaker_name: str | None
     text: str
     confidence: float
+    # Additive: speaker is None but the text is a quoted span — a quote no attribution
+    # named a speaker for, so it renders in the narrator's voice. The Review queue shows
+    # these distinguishably instead of passing them off as narration; detection is
+    # attribute/spans.py's is_unattributed_quote (the single shared predicate).
+    unattributed_quote: bool = False
     has_audio: bool  # any rendered wav for this block in the manifest
     # Listen read-along timing (M6c-5, additive): which manifest segment of the block
     # plays this row (the ?segment= index for the audio route) and its duration. A

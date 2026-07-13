@@ -71,3 +71,28 @@ def test_attribute_unknown_book_is_actionable(tmp_path, fake_provider):
     result = CliRunner().invoke(main, ["attribute", "nope", "--books-dir", str(tmp_path)])
     assert result.exit_code != 0
     assert "seiyuu ingest" in result.output
+
+
+def test_attribute_cross_process_gpu_busy_is_a_clean_error(
+    tmp_path, books_dir, fake_provider, monkeypatch
+):
+    # Another PROCESS holds gpu.lock (a second manager instance — the OS lock is
+    # per-descriptor): the CLI must print the actionable refusal, not a traceback.
+    import seiyuu.services.attribution as attribution_service
+    from seiyuu.gpu import GpuBusyError, GpuResourceManager
+
+    class _Consumer:
+        def unload(self) -> None: ...
+
+    lock = tmp_path / "contended-gpu.lock"
+    holder = GpuResourceManager(lock_path=lock)
+    with holder.acquire(_Consumer(), "engine:kokoro"):
+        pass  # lazy residency keeps the card claimed (simulates the API server process)
+    monkeypatch.setattr(
+        attribution_service, "get_gpu_manager", lambda: GpuResourceManager(lock_path=lock)
+    )
+
+    result = CliRunner().invoke(main, ["attribute", "test-book", "--books-dir", str(books_dir)])
+    assert result.exit_code != 0
+    assert "another seiyuu process holds the GPU" in result.output  # ClickException, printed
+    assert not isinstance(result.exception, GpuBusyError)  # no raw traceback

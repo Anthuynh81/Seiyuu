@@ -247,6 +247,8 @@ export interface CharactersOverview {
   prompt_version: string;
   narration_segments: number;
   low_confidence_segments: number;
+  /** quoted spans nobody attributed — narrator-voiced, surfaced apart from narration */
+  unattributed_quote_segments: number;
   confidence_threshold: number;
   characters: CharacterSummary[];
   flagged: FlaggedBlock[];
@@ -262,6 +264,8 @@ export interface SegmentRow {
   speaker_name: string | null;
   text: string;
   confidence: number;
+  /** speaker is null but the text is a quoted span — an unattributed quote, not narration */
+  unattributed_quote: boolean;
   has_audio: boolean;
   audio_segment: number | null; // ?segment= index for the audio route; null = no timing
   duration_seconds: number | null;

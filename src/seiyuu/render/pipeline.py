@@ -6,6 +6,7 @@ goes through the segment cache.
 """
 
 import hashlib
+import json
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -229,6 +230,134 @@ def _synthesize_validated(
     return best_audio, best_result, attempts, best_words
 
 
+def _manifest_merge_base(
+    book_output_dir: Path, *, book_id: str, wanted: set[int], total_chapters: int, multivoice: bool
+) -> RenderManifest | None:
+    """The existing manifest a chapter-SUBSET render must merge into (None → plain overwrite).
+
+    A subset is a non-empty ``wanted`` that does not cover all ``total_chapters`` (1-based).
+    Full-book renders, and subset renders of a book with no manifest yet, keep the historical
+    overwrite-wholesale behavior. A subset render over a prior manifest must NOT clobber it:
+    chapters outside the subset would vanish from the render summary, Listen, and assembly
+    even though their WAVs still sit in cache. A mode mismatch is refused HERE — before any
+    synthesis — because a merged manifest cannot honestly describe both halves.
+    """
+    if not wanted or wanted == set(range(1, total_chapters + 1)):
+        return None
+    manifest_path = Path(book_output_dir) / MANIFEST_NAME
+    if not manifest_path.is_file():
+        return None
+    try:
+        existing = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # pydantic ValidationError is a ValueError
+        raise RenderError(
+            f"{book_id}: cannot merge a chapter-subset render into unreadable manifest "
+            f"{manifest_path}: {exc}; delete it or render the full book"
+        ) from exc
+    existing_mode = "single-voice" if existing.engine is not None else "multivoice"
+    new_mode = "multivoice" if multivoice else "single-voice"
+    if existing_mode != new_mode:
+        raise RenderError(
+            f"{book_id}: refusing a {new_mode} chapter-subset render: the existing manifest "
+            f"is {existing_mode}; render the full book to switch modes"
+        )
+    return existing
+
+
+def _check_single_merge_identity(
+    existing: RenderManifest,
+    *,
+    book_id: str,
+    engine: TTSEngine,
+    voice_id: str,
+    settings: dict[str, Any],
+    seed: int | None,
+) -> None:
+    """Refuse a single-voice subset merge whose voice identity differs from the manifest's.
+
+    The single-voice manifest stores ONE engine/model/voice/settings/seed at top level for
+    every chapter; merging chapters rendered under a different identity would make those
+    fields lie about the carried-over half. Settings are JSON-round-tripped because the
+    existing side was parsed from disk (they are JSON-serializable by SegmentKey contract).
+    """
+    ours = {
+        "engine": engine.engine_id,
+        "engine_model_version": engine.model_version,
+        "voice_id": voice_id,
+        "settings": json.loads(json.dumps(settings)),
+        "seed": seed,
+    }
+    theirs = {
+        "engine": existing.engine,
+        "engine_model_version": existing.engine_model_version,
+        "voice_id": existing.voice_id,
+        "settings": existing.settings,
+        "seed": existing.seed,
+    }
+    if ours != theirs:
+        fields = ", ".join(sorted(k for k in ours if ours[k] != theirs[k]))
+        raise RenderError(
+            f"{book_id}: refusing single-voice chapter-subset render: {fields} differ(s) from "
+            f"the existing manifest (existing voice={existing.voice_id!r} "
+            f"engine={existing.engine!r}, new voice={voice_id!r} engine={engine.engine_id!r}); "
+            f"render the full book to change the voice"
+        )
+
+
+# The assignment-snapshot fields that determine which voice renders which segment — exactly
+# what resolve_voice reads. stage/created_at churn from a re-saved assignment must not block
+# a resume.
+_ASSIGNMENT_IDENTITY = ("narrator_voice_id", "assignments", "thought_voice_id")
+
+
+def _check_multivoice_merge_identity(
+    existing: RenderManifest, assignment: VoiceAssignment, *, book_id: str
+) -> None:
+    """Refuse a multivoice subset merge whose voice map differs from the manifest snapshot's."""
+    snapshot = existing.assignment or {}
+    ours = assignment.model_dump(mode="json")
+    fields = [k for k in _ASSIGNMENT_IDENTITY if snapshot.get(k) != ours.get(k)]
+    if fields:
+        raise RenderError(
+            f"{book_id}: refusing multivoice chapter-subset render: the voice assignment "
+            f"({', '.join(fields)}) differs from the existing manifest's assignment snapshot; "
+            f"chapters outside the subset were rendered with the OLD voices — render the "
+            f"full book to apply the new assignment"
+        )
+
+
+def _merge_manifests(
+    existing: RenderManifest, new: RenderManifest, *, total_chapters: int
+) -> RenderManifest:
+    """Merge a chapter-subset render into the previous whole-book manifest.
+
+    Newly rendered chapters replace their old entries by index; untouched chapters carry
+    over — but only up to ``total_chapters``: a re-upload of the same file with different
+    split settings keeps the book_id yet can SHRINK the chapter set, leaving ghost entries
+    in the old manifest that must not survive the merge. Aggregates are recomputed over the
+    SURVIVING chapter set: validation_failures from the per-segment verdicts, voices_used
+    as a union restricted to voices a surviving segment actually used (new provenance wins
+    on overlap). Identity compatibility was enforced before synthesis started.
+    """
+    by_index = {ch.index: ch for ch in existing.chapters if ch.index <= total_chapters}
+    by_index.update((ch.index, ch) for ch in new.chapters)
+    chapters = [by_index[i] for i in sorted(by_index)]
+    surviving_voices = {seg.voice_id for ch in chapters for seg in ch.segments if seg.voice_id}
+    merged_voices = {**existing.voices_used, **new.voices_used}
+    return new.model_copy(
+        update={
+            "chapters": chapters,
+            "voices_used": {v: use for v, use in merged_voices.items() if v in surviving_voices},
+            "validation_failures": sum(
+                1
+                for chapter in chapters
+                for seg in chapter.segments
+                if seg.validation is not None and not seg.validation.ok
+            ),
+        }
+    )
+
+
 def render_book(
     book: NormalizedBook,
     engine: TTSEngine,
@@ -250,6 +379,10 @@ def render_book(
     lexicon: "CompiledLexicon | None" = None,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
+
+    A chapter-subset render MERGES into the book's existing manifest (same mode and voice
+    identity required — refused up front otherwise) instead of clobbering it; a full-book
+    render, or a subset with no prior manifest, overwrites wholesale as before.
 
     When ``library`` is given and ``voice_id`` refers to a library voice (a directory with
     meta.json or reference.wav), consent is verified before any synthesis — a cloned voice
@@ -301,6 +434,22 @@ def render_book(
         raise RenderError(
             f"{book.book_meta.book_id}: no such chapter(s) {sorted(unknown)} "
             f"(book has {len(book.chapters)})"
+        )
+    merge_base = _manifest_merge_base(
+        book_output_dir,
+        book_id=book.book_meta.book_id,
+        wanted=wanted,
+        total_chapters=len(book.chapters),
+        multivoice=False,
+    )
+    if merge_base is not None:
+        _check_single_merge_identity(
+            merge_base,
+            book_id=book.book_meta.book_id,
+            engine=engine,
+            voice_id=voice_id,
+            settings=effective_settings,
+            seed=effective_seed,
         )
 
     rendered_chapters: list[RenderedChapter] = []
@@ -418,6 +567,8 @@ def render_book(
         chapters=rendered_chapters,
         validation_failures=validation_failures,
     )
+    if merge_base is not None:
+        manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
     manifest_path = book_output_dir / MANIFEST_NAME
     atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(
@@ -458,6 +609,10 @@ def render_book_multivoice(
     the FROZEN SegmentKey. Segments are emitted in reading order; the per-segment cache key
     makes that order-independent for caching.
 
+    A chapter-subset render MERGES into the book's existing manifest (same mode and voice
+    assignment required — refused up front otherwise) instead of clobbering it; a full-book
+    render, or a subset with no prior manifest, overwrites wholesale as before.
+
     ``check_cancel`` (when given) is called between chapters and between segments and may
     raise to abort cooperatively; synthesized segments are already cached and no manifest
     is written, so a re-run resumes from the cache. The GPU is freed either way.
@@ -475,6 +630,15 @@ def render_book_multivoice(
 
     wanted = set(chapters)
     attributed = {ch.index: ch for ch in report.chapters}
+    merge_base = _manifest_merge_base(
+        book_output_dir,
+        book_id=book.book_meta.book_id,
+        wanted=wanted,
+        total_chapters=len(book.chapters),
+        multivoice=True,
+    )
+    if merge_base is not None:
+        _check_multivoice_merge_identity(merge_base, assignment, book_id=book.book_meta.book_id)
     engines: dict[str, TTSEngine] = {}
     metas: dict[str, VoiceMeta] = {}
     voices_used: dict[str, VoiceUse] = {}
@@ -658,6 +822,8 @@ def render_book_multivoice(
         assignment=assignment.model_dump(mode="json"),
         validation_failures=validation_failures,
     )
+    if merge_base is not None:
+        manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
     manifest_path = book_output_dir / MANIFEST_NAME
     atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(

@@ -28,12 +28,32 @@ from seiyuu.attribute.models import (
     SegmentType,
     ThoughtVerdict,
 )
-from seiyuu.attribute.spans import Span, quoted_ordinals, thought_candidate_spans
+from seiyuu.attribute.spans import (
+    DialogueConvention,
+    Span,
+    quoted_ordinals,
+    thought_candidate_spans,
+)
 
 # Prompt versions that use the F1 per-quote (hybrid) + F2 emotion contract: owned blocks with
 # >1 quote are indexed with ⟦Q{ordinal}⟧ markers and the model labels quotes BY INDEX. v6 is
 # v5 plus the thought-candidates section. v3/v4 stay on the whole-block-speaker contract.
 _PER_QUOTE_VERSIONS = frozenset({"v5", "v6"})
+
+# Cache-key marker for single-curly (UK) splitter mode: the pipeline suffixes the
+# prompt_version KEY COMPONENT with "-sq" (e.g. "v5-sq") so a single-quote book attributed
+# before convention detection existed (all-narration rows under the same chunk hashes) can
+# never be replayed. The suffix can therefore reach a provider (a user pinning
+# --prompt-version v5-sq), so every EXACT match on a version string — the prompt-file lookup
+# and the per-quote contract check — must compare the base form via base_prompt_version().
+SINGLE_QUOTE_KEY_SUFFIX = "-sq"
+
+
+def base_prompt_version(version: str) -> str:
+    """The version without the single-quote cache suffix ("v5-sq" -> "v5"; "v5" unchanged)."""
+    return version.removesuffix(SINGLE_QUOTE_KEY_SUFFIX)
+
+
 # ⟦ ⟧ (U+27E6/U+27E7) never occur in ordinary prose, so a marker can't collide with real text.
 # Markers live ONLY in the rendered prompt; assembly re-splits the RAW source (never the marked
 # string), so they can never reach a Span, a Segment.text, or a CharacterMention.
@@ -169,6 +189,10 @@ class AttributionLLM(ABC):
     # A confirmed thought below this confidence degrades to narration (never a low-confidence
     # or guessed thought voice). Precision over recall, matching the alias adjudicator.
     thought_confidence_floor: float = 0.5
+    # Book-level dialogue convention, set per run by the pipeline (attribute_book) before any
+    # chunk call; only SINGLE_CURLY changes the span split. The class default keeps every
+    # direct caller (tests, one-off structured calls) on the proven double-quote path.
+    dialogue_convention: DialogueConvention = DialogueConvention.DOUBLE
 
     def __init__(
         self,
@@ -202,15 +226,18 @@ class AttributionLLM(ABC):
         # quote-only split exactly and no candidates are generated — byte-identical to v3.
         spans_by_block = {
             b.id: thought_candidate_spans(
-                b.id, b.text, b.italic_spans if self.emit_thoughts else []
+                b.id,
+                b.text,
+                b.italic_spans if self.emit_thoughts else [],
+                convention=self.dialogue_convention,
             )
             for b in chunk.owned_blocks
         }
-        template = _prompt_template(self.prompts_dir, self.prompt_version)
+        template = _prompt_template(self.prompts_dir, base_prompt_version(self.prompt_version))
         candidates = _render_thought_candidates(spans_by_block) if self.emit_thoughts else "(none)"
         # v5/v6 index multi-quote blocks so the model labels quotes BY INDEX (F1); v3/v4 keep
         # the plain whole-block render. Single-quote blocks stay plain on every version.
-        per_quote = self.prompt_version in _PER_QUOTE_VERSIONS
+        per_quote = base_prompt_version(self.prompt_version) in _PER_QUOTE_VERSIONS
         owned_render = _render_owned_blocks_indexed(chunk, spans_by_block) if per_quote else None
         prompt = render_prompt(template, registry, chunk, candidates, owned_render)
         if attempt > 0:
@@ -259,8 +286,11 @@ class AttributionLLM(ABC):
         this can't fail on alignment. Per-quote (F1): when a block emitted ``quotes``, each
         quoted span is labeled by its quoted-span ORDINAL (via the shared
         :func:`quoted_ordinals`); an unlabeled/null/out-of-range quote degrades to narration
-        (never a guess-merge). When a block emitted no ``quotes`` (single-quote block or a
-        v3/v4-shaped row) the whole-block ``speaker`` labels every quote — byte-identical to
+        (never a guess-merge) at the model's reported confidence — 0.0 when it gave no usable
+        verdict — so unattributed quotes stay visible to the review surfaces. Genuine prose
+        narration keeps the default confidence 1.0. When a block emitted no ``quotes``
+        (single-quote block or a v3/v4-shaped row) the whole-block ``speaker`` labels every
+        quote — byte-identical to
         today. The returned ``emotions`` list is index-aligned to ``segments`` (F2): dialogue
         carries its emotion tag (or None); narration and thought carry None.
         """
@@ -325,6 +355,9 @@ class AttributionLLM(ABC):
                             )
                             emotions.append(quote.emotion)
                             continue
+                        # A labeled-but-null quote keeps the model's own confidence; an
+                        # unlabeled one has no verdict at all -> 0.0.
+                        degrade_conf = quote.confidence if quote is not None else 0.0
                     elif block_speaker:
                         segments.append(
                             Segment(
@@ -337,9 +370,23 @@ class AttributionLLM(ABC):
                         )
                         emotions.append(block_emotion)
                         continue
-                    # Unattributed / unlabeled quote -> narration (precision over recall).
+                    elif block is not None and not block.quotes:
+                        # Whole-block shape, speaker null: the model's block confidence.
+                        degrade_conf = block_conf
+                    else:
+                        # No row for the block, or per-quote-shaped output whose labels were
+                        # all invalid (out-of-range indexes): no usable verdict for this quote.
+                        degrade_conf = 0.0
+                    # Unattributed / unlabeled quote -> narration (precision over recall),
+                    # carrying the degraded confidence — NEVER the Segment default 1.0, which
+                    # made these quotes invisible to every review surface.
                     segments.append(
-                        Segment(block_id=block_id, type=SegmentType.NARRATION, text=span.text)
+                        Segment(
+                            block_id=block_id,
+                            type=SegmentType.NARRATION,
+                            text=span.text,
+                            confidence=degrade_conf,
+                        )
                     )
                     emotions.append(None)
                     continue

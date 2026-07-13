@@ -13,7 +13,7 @@ from fake_engine import FakeEngine
 from seiyuu.engines import AudioFile
 from seiyuu.gpu import GpuResourceManager
 from seiyuu.render import RenderError, render_book, render_book_multivoice
-from seiyuu.repository import RepositoryError, file_lock
+from seiyuu.repository import FileLockHandle, RepositoryError, file_lock
 from seiyuu.voices import (
     ConsentAttestation,
     VoiceAssignment,
@@ -216,6 +216,24 @@ def test_file_lock_times_out_loudly(tmp_path):
             pass
     release.set()
     t.join(5.0)
+
+
+def test_file_lock_and_handle_contend_on_the_same_lock(tmp_path):
+    # file_lock is built on FileLockHandle; both primitives must exclude each other
+    # on the same path (one descriptor lifecycle, one OS lock — not two lookalikes).
+    lock_path = tmp_path / "x.lock"
+    handle = FileLockHandle(lock_path)
+    with file_lock(lock_path):
+        assert not handle.try_acquire()
+    assert handle.try_acquire()
+    try:
+        with pytest.raises(RepositoryError, match="could not acquire"):
+            with file_lock(lock_path, timeout=0.2):
+                pass
+    finally:
+        handle.release()
+    with file_lock(lock_path, timeout=0.2):
+        pass  # released handle frees the path for file_lock again
 
 
 def test_registry_locked_rereads_from_disk(tmp_path):

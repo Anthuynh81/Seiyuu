@@ -398,6 +398,32 @@ def test_audition_in_flight_refusal(client, monkeypatch) -> None:
     assert _error(resp)["code"] == "audition_in_flight"
 
 
+def test_audition_cross_process_gpu_busy_is_409_with_the_actionable_message(
+    client, monkeypatch, tmp_path
+) -> None:
+    # Another PROCESS holds gpu.lock (a second manager instance — the OS lock is
+    # per-descriptor, so same-process contention exercises the real path). The refusal
+    # must be the envelope 409 gpu_busy, not the catch-all 500 that strips the message.
+    from seiyuu.gpu import GpuResourceManager
+
+    _patch_audition(monkeypatch)
+    _make_preset(client)
+    lock = tmp_path / "contended-gpu.lock"
+    holder = GpuResourceManager(lock_path=lock)
+    with holder.acquire(FakeEngine(), "engine:other-process"):
+        pass  # lazy residency keeps the card claimed after the with-block
+    monkeypatch.setattr(
+        "seiyuu.api.routes.voices.get_gpu_manager",
+        lambda: GpuResourceManager(lock_path=lock),
+    )
+
+    resp = client.post("/api/voices/v1/audition", json={})
+    assert resp.status_code == 409
+    err = _error(resp)
+    assert err["code"] == "gpu_busy"  # NOT gpu_busy_retry: the client must not auto-retry
+    assert "another seiyuu process holds the GPU" in err["message"]
+
+
 def test_cold_engine_refused_toward_warmup(client, monkeypatch) -> None:
     _patch_audition(monkeypatch)
     monkeypatch.setattr("seiyuu.api.routes.voices.weights_cached", lambda eid: False)
@@ -527,6 +553,28 @@ def test_preview_refused_while_gpu_job_live(client, monkeypatch) -> None:
     assert err["detail"]["job_id"] == job.job_id
     store.request_cancel(job.job_id)
     assert client.get("/api/engines/kokoro/preview?preset=af_heart").status_code == 200
+
+
+def test_preview_cross_process_gpu_busy_is_409_with_the_actionable_message(
+    client, monkeypatch, tmp_path
+) -> None:
+    from seiyuu.gpu import GpuResourceManager
+
+    _patch_preview(monkeypatch)
+    lock = tmp_path / "contended-gpu.lock"
+    holder = GpuResourceManager(lock_path=lock)
+    with holder.acquire(FakeEngine(), "engine:other-process"):
+        pass  # lazy residency keeps the card claimed after the with-block
+    monkeypatch.setattr(
+        "seiyuu.api.routes.engines.get_gpu_manager",
+        lambda: GpuResourceManager(lock_path=lock),
+    )
+
+    resp = client.get("/api/engines/kokoro/preview?preset=af_heart")
+    assert resp.status_code == 409
+    err = _error(resp)
+    assert err["code"] == "gpu_busy"
+    assert "another seiyuu process holds the GPU" in err["message"]
 
 
 # -- cover art ----------------------------------------------------------------------------

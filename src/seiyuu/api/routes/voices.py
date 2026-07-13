@@ -46,7 +46,7 @@ from seiyuu.api.schemas import (
     VoiceTagsWrite,
 )
 from seiyuu.engines import SynthesisError, get_engine_class, list_engine_ids
-from seiyuu.gpu import get_gpu_manager
+from seiyuu.gpu import GpuBusyError, get_gpu_manager
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.repository import Job, JobKind, JobState
 from seiyuu.services import ServiceError, delete_voice, voice_references
@@ -622,6 +622,11 @@ def audition(
                     audio = synth(engine)
                 # NO free_all(): the model stays lazily resident by design — the next
                 # audition (or single-voice render) re-acquires as an identity no-op.
+        except GpuBusyError as exc:
+            # cross-PROCESS contention (a CLI run holds gpu.lock): the same hard gpu_busy
+            # as the in-server refusals — NOT gpu_busy_retry, whose client auto-retry
+            # assumes a wait of seconds; another process won't yield that fast
+            raise ApiError(409, "gpu_busy", str(exc)) from exc
         except (SynthesisError, CloudVoiceError) as exc:
             raise ApiError(502, "upstream", str(exc)) from exc
         out_path = _audition_path(library, voice_id)

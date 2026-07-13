@@ -185,6 +185,14 @@ class Settings(BaseSettings):
     # HTTP API (M6b). Upload cap for EPUBs / reference audio / cover art; exposed to the
     # UI via /api/system limits so the client can refuse early instead of eating a 413.
     max_upload_bytes: int = Field(100 * 1024 * 1024, gt=0)
+    # Host-header allowlist for the API (comma-separated; ports are ignored when matching,
+    # so the Vite dev proxy's ``localhost:5173`` passes under "localhost"). DNS-rebinding
+    # guard: without it, any website can resolve its own domain to 127.0.0.1 and drive the
+    # paid endpoints same-origin. "testserver" is FastAPI TestClient's default Host; safe
+    # to allow because public DNS cannot make a browser send a bare single-label
+    # "testserver" Host. For LAN use (e.g. Listen on a tablet) add the machine's
+    # IP/hostname in .env: API_ALLOWED_HOSTS=localhost,127.0.0.1,testserver,192.168.1.20
+    api_allowed_hosts: str = "localhost,127.0.0.1,testserver"
 
     # Engine borrowing (F1). Max seconds an audition waits for a running render to lend its
     # resident engine between segments before falling back to a soft gpu_busy_retry; also
