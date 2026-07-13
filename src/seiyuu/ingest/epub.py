@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from bs4 import BeautifulSoup, CData, NavigableString
-from ebooklib import ITEM_DOCUMENT, ITEM_STYLE, epub
+from ebooklib import ITEM_COVER, ITEM_DOCUMENT, ITEM_STYLE, epub
 
 from seiyuu.ingest.common import (
     CHAPTER_TITLE_PATTERN,
@@ -228,6 +228,36 @@ def _build_italic_style_map(book: epub.EpubBook) -> ItalicStyleMap:
     return parse_css_italics(sheets)
 
 
+def _find_cover(book: epub.EpubBook) -> bytes | None:
+    """Bytes of the book's DECLARED cover image, or None when it declares none.
+
+    EPUB3 marks the image itself with the ``cover-image`` manifest property (ebooklib
+    types it ITEM_COVER); EPUB2 instead points ``<meta name="cover" content="..."/>`` at
+    a manifest item id. Declared covers only — no filename guessing; jpeg/png validation
+    happens at write time (``extract_cover_art``), not here.
+    """
+    for item in book.get_items_of_type(ITEM_COVER):
+        content = item.get_content()
+        if content:
+            return content
+    # The meta tag inherits the OPF default namespace in well-formed books; ancient
+    # files without one land under the None key. get_metadata raises KeyError (not [])
+    # when the whole namespace is absent from the book.
+    for namespace in ("OPF", None):
+        try:
+            metas = book.get_metadata(namespace, "meta")
+        except KeyError:
+            continue
+        for _value, attrs in metas:
+            if attrs.get("name") != "cover" or not attrs.get("content"):
+                continue
+            item = book.get_item_with_id(attrs["content"])
+            content = item.get_content() if item is not None else None
+            if content:
+                return content
+    return None
+
+
 def parse_epub(
     epub_path: Path,
     include_items: tuple[str, ...] = (),
@@ -296,6 +326,7 @@ def parse_epub(
         book=NormalizedBook(book_meta=meta, chapters=chapters),
         skipped_items=skipped,
         dropped_sections=dropped,
+        cover=_find_cover(book),
     )
 
 

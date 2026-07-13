@@ -28,15 +28,18 @@ CH3_HTML = """<html><body>
 </body></html>"""
 
 
-def build_synthetic_epub(path: Path) -> Path:
+def build_synthetic_epub(path: Path, cover_image: bytes | None = None) -> Path:
     """A tiny EPUB exercising every ingest heuristic: skippable cover, short
     front/back matter, multi-chapter files, cross-file chapter continuation,
-    all three scene-break forms, and caption stripping."""
+    all three scene-break forms, and caption stripping. ``cover_image`` adds a
+    DECLARED cover image (EPUB3 ``cover-image`` property + EPUB2 meta)."""
     book = epub.EpubBook()
     book.set_identifier("synthetic-test-001")
     book.set_title("Synthetic Test Book")
     book.set_language("en")
     book.add_author("Test Author")
+    if cover_image is not None:
+        book.set_cover("cover-image.png", cover_image, create_page=False)
 
     def page(title: str, file_name: str, content: str) -> epub.EpubHtml:
         item = epub.EpubHtml(title=title, file_name=file_name, lang="en")

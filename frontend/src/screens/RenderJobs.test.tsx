@@ -444,6 +444,113 @@ describe("RenderJobs", () => {
     });
   });
 
+  /* ---- cover art (Outputs panel) ------------------------------------------------------ */
+
+  const jpeg = () => new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], "cover.jpg", { type: "image/jpeg" });
+  const coverInput = (container: HTMLElement) =>
+    container.querySelector<HTMLInputElement>('input[type="file"][accept="image/jpeg,image/png"]');
+  const withCover = (card: BookCard): BookDetail => ({
+    ...makeDetail(card),
+    cover: { content_type: "image/jpeg", bytes: 4096 },
+  });
+
+  it("uploading a cover PUTs multipart to /cover, refetches the book detail, and shows a cache-busted preview", async () => {
+    const user = userEvent.setup();
+    const card = readyCard();
+    const server = mountRoutes(card)
+      .get("/api/books/demo/cost-estimate", makeEstimate())
+      .put("/api/books/demo/cover", { content_type: "image/jpeg", bytes: 4096 });
+    const { container } = renderWithProviders(<RenderJobs />);
+
+    // no cover yet: the control offers the first upload and shows no preview
+    expect(await screen.findByRole("button", { name: "upload cover" })).toBeInTheDocument();
+    expect(screen.queryByAltText("cover art")).not.toBeInTheDocument();
+
+    // the preview may only appear via the post-upload invalidation refetching the book
+    // detail — re-register the route so the refetch (and nothing else) carries the cover
+    server.get("/api/books/demo", withCover(card));
+    await user.upload(coverInput(container)!, jpeg());
+
+    const img = await screen.findByAltText("cover art");
+    expect(img.getAttribute("src")).toMatch(/^\/api\/books\/demo\/cover\?v=\d+$/);
+    const form = server.formBodyOf("PUT", "/cover");
+    expect((form.get("file") as File).name).toBe("cover.jpg");
+    expect(screen.getByRole("button", { name: "replace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "remove" })).toBeInTheDocument();
+  });
+
+  it("a 409 conflicting_job on cover upload explains the running master job in a refusal", async () => {
+    const user = userEvent.setup();
+    const card = readyCard();
+    const server = mockApi()
+      .get("/api/books", { books: [card] })
+      .get("/api/books/demo", withCover(card))
+      .get("/api/system", makeSystem())
+      .get("/api/books/demo/cost-estimate", makeEstimate());
+    server.error(
+      "PUT",
+      "/api/books/demo/cover",
+      409,
+      "conflicting_job",
+      "a master job for 'demo' is running; it reads the cover mid-run",
+    );
+    const { container } = renderWithProviders(<RenderJobs />);
+
+    await screen.findByAltText("cover art");
+    await user.upload(coverInput(container)!, jpeg());
+
+    expect(await screen.findByText("conflicting_job")).toBeInTheDocument();
+    expect(screen.getByText(/a master job is running and reads the cover mid-run/)).toBeInTheDocument();
+  });
+
+  it("a 415 on cover upload shows the envelope message inline", async () => {
+    const user = userEvent.setup();
+    const card = readyCard();
+    const server = mountRoutes(card).get("/api/books/demo/cost-estimate", makeEstimate());
+    server.error(
+      "PUT",
+      "/api/books/demo/cover",
+      415,
+      "unsupported_media_type",
+      "cover must be image/jpeg or image/png, got image/webp",
+    );
+    const { container } = renderWithProviders(<RenderJobs />);
+
+    await screen.findByRole("button", { name: "upload cover" });
+    await user.upload(coverInput(container)!, jpeg());
+
+    expect(
+      await screen.findByText("cover must be image/jpeg or image/png, got image/webp"),
+    ).toBeInTheDocument();
+  });
+
+  it("removing the cover takes an explicit confirm, DELETEs, and clears the preview", async () => {
+    const user = userEvent.setup();
+    const card = readyCard();
+    const server = mockApi()
+      .get("/api/books", { books: [card] })
+      .get("/api/books/demo", withCover(card))
+      .get("/api/system", makeSystem())
+      .get("/api/books/demo/cost-estimate", makeEstimate())
+      .delete("/api/books/demo/cover", null, 204);
+    renderWithProviders(<RenderJobs />);
+
+    await screen.findByAltText("cover art");
+    await user.click(screen.getByRole("button", { name: "remove" }));
+    // backing out deletes nothing
+    await user.click(screen.getByRole("button", { name: "keep" }));
+    expect(server.lastCall("DELETE", "/cover")).toBeUndefined();
+
+    // the refetch after the delete returns a coverless detail
+    server.get("/api/books/demo", makeDetail(card));
+    await user.click(screen.getByRole("button", { name: "remove" }));
+    await user.click(screen.getByRole("button", { name: "really remove" }));
+
+    await waitFor(() => expect(screen.queryByAltText("cover art")).not.toBeInTheDocument());
+    expect(server.lastCall("DELETE", "/cover")).toBeDefined();
+    expect(await screen.findByRole("button", { name: "upload cover" })).toBeInTheDocument();
+  });
+
   it("shows the book's jobs with running progress and failure reasons, and renders the whisper validation report", async () => {
     const card = makeBook({ attributed: true, assigned: true, rendered: true });
     const server = mockApi()
