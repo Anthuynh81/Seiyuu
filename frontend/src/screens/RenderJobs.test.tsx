@@ -64,6 +64,20 @@ function makeEstimate(over: Partial<CostEstimateOut> = {}): CostEstimateOut {
   };
 }
 
+function makeSummary(over: Partial<RenderSummaryOut> = {}): RenderSummaryOut {
+  return {
+    book_id: "demo",
+    mode: "multivoice",
+    chapters: [{ index: 1, title: "Chapter 1", segments: 300, duration_seconds: 1800 }],
+    total_seconds: 1800,
+    voices_used: {},
+    validation_failures: 0,
+    active_mode: "multi",
+    available_modes: ["multi"],
+    ...over,
+  };
+}
+
 function makeQuote(over: Partial<QuoteResponse> = {}): QuoteResponse {
   const now = Math.floor(Date.now() / 1000);
   return {
@@ -444,6 +458,101 @@ describe("RenderJobs", () => {
     });
   });
 
+  /* ---- active render mode (instant fallback) ------------------------------------------ */
+
+  const modeGroup = async () => within(await screen.findByRole("group", { name: "active render mode" }));
+  const renderedCard = () => makeBook({ attributed: true, assigned: true, rendered: true });
+  /** Routes every rendered book mounts (a rendered card also polls the validation report). */
+  const mountRendered = (card: BookCard) =>
+    mountRoutes(card)
+      .get("/api/books/demo/cost-estimate", makeEstimate())
+      .get("/api/books/demo/validation", { validated_segments: 0, validation_failures: 0, results: [] });
+
+  it("switching the active mode POSTs /render/mode and the refetched summary flips the active chip", async () => {
+    const user = userEvent.setup();
+    const server = mountRendered(renderedCard())
+      .get("/api/books/demo/render", makeSummary({ available_modes: ["single", "multi"] }))
+      .post("/api/books/demo/render/mode", makeSummary({ mode: "single", active_mode: "single", available_modes: ["single", "multi"] }));
+    renderWithProviders(<RenderJobs />);
+
+    const group = await modeGroup();
+    expect(group.getByRole("button", { name: "multivoice · active" })).toBeDisabled();
+    const switchBtn = group.getByRole("button", { name: "single voice · switch" });
+    expect(switchBtn).toBeEnabled();
+
+    // the flipped chip may only appear via the post-switch invalidation refetching the
+    // summary — re-register the GET so the refetch (and nothing else) carries it
+    server.get(
+      "/api/books/demo/render",
+      makeSummary({ mode: "single", active_mode: "single", available_modes: ["single", "multi"] }),
+    );
+    await user.click(switchBtn);
+
+    expect(await group.findByRole("button", { name: "single voice · active" })).toBeDisabled();
+    expect(group.getByRole("button", { name: "multivoice · switch" })).toBeEnabled();
+    expect(server.jsonBodyOf("POST", "/render/mode")).toEqual({ mode: "single" });
+  });
+
+  it("the mode control never mounts before the first render", async () => {
+    const server = mountRoutes(readyCard()).get("/api/books/demo/cost-estimate", makeEstimate());
+    renderWithProviders(<RenderJobs />);
+
+    await screen.findByRole("button", { name: "render multivoice — free, nothing to approve" });
+    expect(screen.queryByRole("group", { name: "active render mode" })).not.toBeInTheDocument();
+    expect(server.lastCall("GET", "/api/books/demo/render")).toBeUndefined();
+  });
+
+  it("a 409 conflicting_job on the switch renders the refusal with the envelope message", async () => {
+    const user = userEvent.setup();
+    const server = mountRendered(renderedCard()).get(
+      "/api/books/demo/render",
+      makeSummary({ available_modes: ["single", "multi"] }),
+    );
+    server.error(
+      "POST",
+      "/api/books/demo/render/mode",
+      409,
+      "conflicting_job",
+      "a render job for 'demo' is running; wait for it or cancel it before switching the active render mode",
+    );
+    renderWithProviders(<RenderJobs />);
+
+    await user.click((await modeGroup()).getByRole("button", { name: "single voice · switch" }));
+
+    expect(await screen.findByText("conflicting_job")).toBeInTheDocument();
+    expect(
+      screen.getByText(/a render job for 'demo' is running; wait for it or cancel it/),
+    ).toBeInTheDocument();
+  });
+
+  it("with only one mode rendered the other chip reads not-rendered and is disabled", async () => {
+    mountRendered(renderedCard()).get(
+      "/api/books/demo/render",
+      makeSummary({ mode: "single", active_mode: "single", available_modes: ["single"] }),
+    );
+    renderWithProviders(<RenderJobs />);
+
+    const group = await modeGroup();
+    expect(group.getByRole("button", { name: "single voice · active" })).toBeDisabled();
+    expect(group.getByRole("button", { name: "multivoice · not rendered" })).toBeDisabled();
+    expect(screen.getByText(/render the other mode once and you can switch/)).toBeInTheDocument();
+  });
+
+  it("while a render job runs both chips deaden and the hint says the job owns the render", async () => {
+    const card = {
+      ...renderedCard(),
+      active_job: { job_id: "j-1", kind: "render" as const, state: "running" as const },
+    };
+    mountRendered(card).get("/api/books/demo/render", makeSummary({ available_modes: ["single", "multi"] }));
+    renderWithProviders(<RenderJobs />);
+
+    const group = await modeGroup();
+    expect(group.getByRole("button", { name: "single voice · switch" })).toBeDisabled();
+    expect(
+      screen.getByText(/a render job is running and owns the render — wait for it or cancel it/),
+    ).toBeInTheDocument();
+  });
+
   /* ---- cover art (Outputs panel) ------------------------------------------------------ */
 
   const jpeg = () => new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], "cover.jpg", { type: "image/jpeg" });
@@ -580,15 +689,7 @@ describe("RenderJobs", () => {
       validation_failures: 1,
       results: [row],
     });
-    const summary: RenderSummaryOut = {
-      book_id: "demo",
-      mode: "multivoice",
-      chapters: [{ index: 1, title: "Chapter 1", segments: 300, duration_seconds: 1800 }],
-      total_seconds: 1800,
-      voices_used: {},
-      validation_failures: 1,
-    };
-    server.get("/api/books/demo/render", summary);
+    server.get("/api/books/demo/render", makeSummary({ validation_failures: 1 }));
     renderWithProviders(<RenderJobs />);
 
     expect(await screen.findByText("running")).toBeInTheDocument();

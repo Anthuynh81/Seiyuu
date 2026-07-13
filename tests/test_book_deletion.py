@@ -297,6 +297,86 @@ def test_paid_manifest_gates_when_cache_pruned(cfg) -> None:
     assert paid.engines == ["elevenlabs"]
 
 
+def test_paid_mode_archive_gates_when_cache_pruned_and_active_is_free(cfg) -> None:
+    """Per-mode archives are paid-work proof too: cache gone, active pointer on a free
+    multivoice render — the archived paid single render must still gate."""
+    import shutil as _shutil
+
+    from seiyuu.render import manifest_name_for_mode
+    from seiyuu.services.deletion import detect_paid_artifacts
+
+    # the fallback scan mirrors the archive names as literals; assert they stay in sync
+    assert manifest_name_for_mode("single") == "manifest.single.json"
+    assert manifest_name_for_mode("multi") == "manifest.multi.json"
+
+    _seed_render(cfg, "bk", engine="elevenlabs", voice_id="v-el", n=2)
+    o = cfg.output_dir / "bk"
+    (o / "manifest.single.json").write_text(
+        (o / "manifest.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    # a free MULTIVOICE render then took over the active pointer (and its own archive)
+    free = RenderManifest(
+        book_id="bk",
+        chapters=[
+            RenderedChapter(
+                index=1,
+                title="Chapter 1",
+                segments=[
+                    RenderedSegment(
+                        block_id="ch001_b0000",
+                        type="paragraph",
+                        wav="cache/x.wav",
+                        duration_seconds=1.0,
+                        voice_id="af_heart",
+                    )
+                ],
+            )
+        ],
+        voices_used={
+            "af_heart": {"engine": "kokoro", "engine_model_version": "k-x", "kind": "preset"}
+        },
+    )
+    (o / "manifest.multi.json").write_text(free.model_dump_json(), encoding="utf-8")
+    (o / "manifest.json").write_text(free.model_dump_json(), encoding="utf-8")
+    _shutil.rmtree(o / "cache")  # cache evicted: the manifests are the last proof
+
+    paid = detect_paid_artifacts(cfg, "bk")
+    assert paid.paid_segment_count == 2  # the archived paid render still gates
+    assert paid.engines == ["elevenlabs"]
+    assert paid.paid_voice_ids == ["v-el"]
+
+
+def test_paid_fallback_does_not_double_count_the_active_pointer(cfg) -> None:
+    """manifest.json is a byte copy of the single archive (the normal post-render state);
+    the fallback scan must count that render once, not twice."""
+    import shutil as _shutil
+
+    from seiyuu.services.deletion import detect_paid_artifacts
+
+    _seed_render(cfg, "bk", engine="elevenlabs", voice_id="v-el", n=2)
+    o = cfg.output_dir / "bk"
+    (o / "manifest.single.json").write_text(
+        (o / "manifest.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _shutil.rmtree(o / "cache")
+
+    paid = detect_paid_artifacts(cfg, "bk")
+    assert paid.paid_segment_count == 2  # once, not doubled by the pointer copy
+
+
+def test_delete_removes_mode_archives_with_output(client, cfg) -> None:
+    _seed_books_root(cfg, "bk")
+    _seed_render(cfg, "bk", engine="kokoro", voice_id="af_heart", n=1)
+    o = cfg.output_dir / "bk"
+    (o / "manifest.single.json").write_text(
+        (o / "manifest.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (o / "manifest.multi.json").write_text('{"book_id": "bk", "chapters": []}', encoding="utf-8")
+    resp = client.delete("/api/books/bk")
+    assert resp.status_code == 200, resp.json()
+    assert not o.exists()  # archives went with the whole output tree
+
+
 def test_paid_scan_skips_validation_and_tolerates_torn_sidecar(cfg) -> None:
     from seiyuu.services.deletion import detect_paid_artifacts
 

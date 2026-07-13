@@ -24,16 +24,34 @@ from seiyuu.settings import Settings
 PAID_ENGINES = frozenset({"elevenlabs", "fish"})
 
 
-def _load_manifest(odir: Path) -> RenderManifest | None:
-    """The render manifest, or None when there is no readable one. A torn or placeholder
-    manifest is treated as 'no signal', not an error."""
-    path = odir / "manifest.json"
+def _load_manifest(path: Path) -> RenderManifest | None:
+    """The render manifest at ``path``, or None when there is no readable one. A torn or
+    placeholder manifest is treated as 'no signal', not an error."""
     if not path.is_file():
         return None
     try:
         return RenderManifest.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def _fallback_manifests(odir: Path) -> list[RenderManifest]:
+    """One manifest per MODE for the fallback paid scan: both mode archives, plus a
+    pre-feature manifest.json standing in for its mode when that archive is missing.
+    Filenames are local literals mirroring ``render.pipeline.manifest_name_for_mode``
+    (same rationale as ``repository.books``: this module must stay too light to ever
+    import an engine); ``tests/test_book_deletion.py`` asserts they stay in sync. Never
+    two copies of the same render — the active pointer duplicates an archive, and
+    counting both would double-report its paid segments."""
+    by_mode: dict[str, RenderManifest] = {}
+    for mode in ("single", "multi"):
+        manifest = _load_manifest(odir / f"manifest.{mode}.json")
+        if manifest is not None:
+            by_mode[mode] = manifest
+    active = _load_manifest(odir / "manifest.json")
+    if active is not None:
+        by_mode.setdefault("single" if active.engine is not None else "multi", active)
+    return list(by_mode.values())
 
 
 def _manifest_paid_segments(manifest: RenderManifest) -> tuple[int, set[str], set[str]]:
@@ -97,12 +115,15 @@ def detect_paid_artifacts(cfg: Settings, book_id: str) -> PaidArtifacts:
     # Fallback ONLY when the cache scan found no paid segment: the content-addressed cache is
     # authoritative and is never pruned, so a paid render leaves its paid sidecars behind even
     # after a free re-render overwrites the manifest — those MUST gate. But if the cache dir is
-    # gone entirely the manifest is the last proof of paid work, so count its paid segments so
-    # the gate still fires instead of silently discarding paid audio.
+    # gone entirely the manifests are the last proof of paid work, so count paid segments
+    # across the per-mode manifests (both modes are about to be discarded) so the gate still
+    # fires instead of silently discarding paid audio.
     if paid_count == 0:
-        manifest = _load_manifest(odir)
-        if manifest is not None:
-            paid_count, engines, voice_ids = _manifest_paid_segments(manifest)
+        for manifest in _fallback_manifests(odir):
+            count, manifest_engines, manifest_voice_ids = _manifest_paid_segments(manifest)
+            paid_count += count
+            engines |= manifest_engines
+            voice_ids |= manifest_voice_ids
 
     return PaidArtifacts(
         paid_segment_count=paid_count,

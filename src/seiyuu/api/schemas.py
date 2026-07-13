@@ -475,6 +475,16 @@ class RenderSummaryOut(BaseModel):
     voices_used: dict[str, VoiceUseOut]
     validation_failures: int
     assignment_present: bool
+    # Per-mode archives (additive): which modes have an activatable render on disk, and
+    # which one manifest.json (everything above describes it) currently points at.
+    active_mode: Literal["single", "multi"]
+    available_modes: list[Literal["single", "multi"]]
+
+
+class RenderModeParams(BaseModel):
+    """POST /books/{id}/render/mode body: point the active manifest at this mode's archive."""
+
+    mode: Literal["single", "multi"]
 
 
 class ValidationRow(BaseModel):

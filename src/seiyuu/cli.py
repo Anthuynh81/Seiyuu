@@ -1687,6 +1687,41 @@ def master(
     )
 
 
+@main.command("render-mode")
+@click.argument("book_id")
+@click.argument("mode", type=click.Choice(["single", "multi"]))
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+def render_mode(book_id: str, mode: str, output_dir: Path | None) -> None:
+    """Switch the ACTIVE render (manifest.json — what listen/assemble/master read) to the
+    chosen mode's archived manifest. A pure file switch: no synthesis, no cache touch;
+    refused while a render/assemble/master job for the book is live."""
+    from seiyuu.repository import JobStore, RepositoryError, resolve_book_id
+    from seiyuu.repository.jobs import JOBS_DB_NAME
+    from seiyuu.services import ServiceError
+    from seiyuu.services.render_mode import activate_render_mode
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    out_root = output_dir or cfg.output_dir
+    try:
+        resolved = resolve_book_id(book_id, books_dir=cfg.books_dir, output_dir=out_root)
+    except RepositoryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    store = JobStore(cfg.data_dir / JOBS_DB_NAME)
+    try:
+        result = activate_render_mode(out_root, resolved, mode, store=store)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    label = "single-voice" if result.mode == "single" else "multivoice"
+    state = "now active" if result.changed else "already active"
+    click.echo(f"{resolved}: {label} render {state} ({result.chapters} chapter(s))")
+
+
 @main.command()
 @click.argument("book_id")
 @click.option("--wpm", type=float, default=None, help="Narration pace (default from settings).")

@@ -27,6 +27,7 @@ from seiyuu.api.schemas import (
     QuoteRequest,
     QuoteResponse,
     RenderChapterOut,
+    RenderModeParams,
     RenderParams,
     RenderSummaryOut,
     SingleSpec,
@@ -48,6 +49,12 @@ from seiyuu.render.models import RenderManifest
 from seiyuu.repository import BookStatus, JobKind, JobState
 from seiyuu.repository.books import MANIFEST_NAME
 from seiyuu.services import ServiceError
+from seiyuu.services.render_mode import (
+    RenderModeConflict,
+    RenderModeUnavailable,
+    activate_render_mode,
+    available_render_modes,
+)
 from seiyuu.settings import Settings
 from seiyuu.validate import SegmentWords
 from seiyuu.validate import ValidationError as ValidationErrorType
@@ -474,6 +481,7 @@ def render_summary(book_id: str, cfg: SettingsDep) -> RenderSummaryOut:
         )
         for ch in manifest.chapters
     ]
+    active_mode = "single" if manifest.engine is not None else "multi"
     return RenderSummaryOut(
         book_id=manifest.book_id,
         mode="single" if manifest.engine is not None else "multivoice",
@@ -488,7 +496,40 @@ def render_summary(book_id: str, cfg: SettingsDep) -> RenderSummaryOut:
         },
         validation_failures=manifest.validation_failures,
         assignment_present=manifest.assignment is not None,
+        active_mode=active_mode,
+        available_modes=available_render_modes(cfg.output_dir / book_id, active_mode=active_mode),
     )
+
+
+@router.post("/books/{book_id}/render/mode", response_model=RenderSummaryOut)
+def switch_render_mode(
+    book_id: str,
+    body: RenderModeParams,
+    request: Request,
+    cfg: SettingsDep,
+    store: StoreDep,
+) -> RenderSummaryOut:
+    """Point manifest.json (the render truth Listen/assemble/master read) at the chosen
+    mode's archived render — an atomic file copy, no synthesis, no cache touch. 404 if
+    that mode was never rendered; 409 conflicting_job while a render/assemble/master job
+    for the book is live. Guard + copy run under the enqueue mutex so a job cannot be
+    created for the book between the live-job check and the pointer move."""
+    status_or_404(cfg, book_id)
+    with request.app.state.enqueue_mutex:
+        try:
+            activate_render_mode(cfg.output_dir, book_id, body.mode, store=store)
+        except RenderModeConflict as exc:
+            raise ApiError(
+                409,
+                "conflicting_job",
+                str(exc),
+                detail=JobOut.from_job(exc.job).model_dump(mode="json"),
+            ) from exc
+        except RenderModeUnavailable as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        except ServiceError as exc:
+            raise ApiError(500, "corrupt_artifact", str(exc)) from exc
+    return render_summary(book_id, cfg)
 
 
 @router.get("/books/{book_id}/validation", response_model=ValidationReportOut)

@@ -347,37 +347,35 @@ def test_multivoice_subset_assignment_mismatch_refused_before_synthesis(tmp_path
     assert len(fake.calls) == calls_before  # refused up front
 
 
-def test_subset_mode_mismatch_refused_both_directions(tmp_path, monkeypatch):
-    from seiyuu.render import render_book
+def test_subset_cross_mode_starts_fresh_and_preserves_the_other_mode(tmp_path, monkeypatch):
+    """Pre-feature book: manifest.json is single-voice and NO mode archives exist. A
+    multivoice chapter-subset render must NOT refuse (the merge base is per-mode now): it
+    starts a fresh multi archive, promotes it to the active manifest.json, and the single
+    render survives byte-for-byte as the single archive — the mode-switch fallback."""
+    from seiyuu.render import MANIFEST_NAME, manifest_name_for_mode, render_book
 
-    fake = FakeEngine()
-    _patch_engine(monkeypatch, fake)
+    _patch_engine(monkeypatch, FakeEngine())
     lib = _library(tmp_path)
     assignment = VoiceAssignment(
         book_id="test-book-00000000",
         narrator_voice_id="narrator_v",
         assignments={"alice": "alice_v"},
     )
+    out = tmp_path / "out"
+    render_book(make_book(), FakeEngine(), "test_voice", out)
+    (out / manifest_name_for_mode("single")).unlink()  # pre-feature book: pointer only
+    single_raw = (out / MANIFEST_NAME).read_text(encoding="utf-8")
 
-    # single-voice manifest exists → multivoice subset render refuses, naming both modes
-    single_out = tmp_path / "single_out"
-    render_book(make_book(), FakeEngine(), "test_voice", single_out)
-    with pytest.raises(RenderError, match="multivoice.*single-voice"):
-        render_book_multivoice(
-            _report(), make_book(), lib, assignment, single_out,
-            chapters=(2,), gpu=GpuResourceManager(),
-        )  # fmt: skip
-    assert fake.calls == []  # refused before any synthesis
-
-    # multivoice manifest exists → single-voice subset render refuses
-    multi_out = tmp_path / "multi_out"
-    render_book_multivoice(
-        _report(), make_book(), lib, assignment, multi_out, gpu=GpuResourceManager()
+    result = render_book_multivoice(
+        _report(), make_book(), lib, assignment, out, chapters=(2,), gpu=GpuResourceManager()
     )
-    single_engine = FakeEngine()
-    with pytest.raises(RenderError, match="single-voice.*multivoice"):
-        render_book(make_book(), single_engine, "test_voice", multi_out, chapters=(2,))
-    assert single_engine.calls == []
+
+    # fresh multi archive holding only the subset, promoted to the active manifest
+    assert [c.index for c in result.manifest.chapters] == [2]
+    multi_raw = (out / manifest_name_for_mode("multi")).read_text(encoding="utf-8")
+    assert (out / MANIFEST_NAME).read_text(encoding="utf-8") == multi_raw
+    # the single render was preserved untouched as the single archive
+    assert (out / manifest_name_for_mode("single")).read_text(encoding="utf-8") == single_raw
 
 
 def test_segments_cached_on_second_run(tmp_path, monkeypatch):
