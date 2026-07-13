@@ -421,6 +421,9 @@ details.fine summary:hover { color: var(--tungsten); }
 .vcard { background: var(--console); border: 1px solid var(--hairline); padding: 14px; display: flex; flex-direction: column; gap: 9px; min-height: 190px; }
 .vcard .eng { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
 .vcard h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.namerow { display: flex; align-items: center; gap: 6px; }
+.namerow .rowedit { opacity: 0; }
+.vcard:hover .namerow .rowedit { opacity: 1; }
 .vcard .kind { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
 .vcard .consent { font-family: var(--mono); font-size: 10.5px; display: flex; gap: 6px; align-items: center; color: var(--ink-2); }
 .vcard .foot { margin-top: auto; }

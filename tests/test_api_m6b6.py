@@ -181,8 +181,31 @@ def test_tags_roundtrip_and_validation(client) -> None:
     assert client.patch("/api/voices/v1", json={"tags": []}).json()["tags"] == []
     assert client.patch("/api/voices/v1", json={"tags": ["x" * 41]}).status_code == 422
     assert client.patch("/api/voices/nope", json={"tags": []}).status_code == 404
-    # tags are the ONLY mutable field — anything else is refused by the schema
+    # name and tags are the ONLY mutable fields — recipe/seed/etc. are refused by the schema
     assert client.patch("/api/voices/v1", json={"tags": [], "seed": 1}).status_code == 422
+
+
+def test_rename_is_independent_and_leaves_recipe_untouched(client) -> None:
+    _make_preset(client)  # v1, name "Test Voice", preset_id "test_voice", tags []
+    client.patch("/api/voices/v1", json={"tags": ["hero"]})
+
+    # a name-only PATCH renames and leaves tags (and every recipe field) alone
+    resp = client.patch("/api/voices/v1", json={"name": "  Narrator  "})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "Narrator"  # trimmed
+    assert body["tags"] == ["hero"]  # untouched by a name-only write
+    assert body["preset_id"] == "test_voice" and body["seed"] == 41172
+    assert client.get("/api/voices/v1").json()["name"] == "Narrator"
+
+    # name + tags together apply both
+    both = client.patch("/api/voices/v1", json={"name": "Villain", "tags": ["baddie"]})
+    assert both.json()["name"] == "Villain" and both.json()["tags"] == ["baddie"]
+
+    # blank/whitespace name is refused; an empty body has nothing to do
+    assert client.patch("/api/voices/v1", json={"name": "   "}).status_code == 422
+    assert client.patch("/api/voices/v1", json={}).status_code == 422
+    assert client.patch("/api/voices/nope", json={"name": "x"}).status_code == 404
 
 
 # -- clone --------------------------------------------------------------------------------

@@ -43,7 +43,7 @@ from seiyuu.api.schemas import (
     VoiceListOut,
     VoiceOut,
     VoiceReferencesOut,
-    VoiceTagsWrite,
+    VoiceUpdate,
 )
 from seiyuu.engines import SynthesisError, get_engine_class, list_engine_ids
 from seiyuu.gpu import GpuBusyError, get_gpu_manager
@@ -359,26 +359,38 @@ def voice_detail(voice_id: str, cfg: SettingsDep) -> VoiceDetailOut:
 
 
 @router.patch("/voices/{voice_id}", response_model=VoiceOut)
-def update_voice_tags(
-    voice_id: str, body: VoiceTagsWrite, request: Request, cfg: SettingsDep
-) -> VoiceOut:
-    """Replace a voice's tags — the library's only mutable organization field. Never
-    touches recipe/seed/consent, so no cache key can drift."""
+def update_voice(voice_id: str, body: VoiceUpdate, request: Request, cfg: SettingsDep) -> VoiceOut:
+    """Rename and/or re-tag a voice — the library's only mutable fields. Both are optional
+    and applied independently. Neither name (a pure label; Characters reference voice_id)
+    nor tags feed any render cache key, so no cached audio can drift; recipe/seed/consent
+    stay immutable by design."""
     _check_voice_id(voice_id)
     library = VoiceLibrary(cfg.voices_dir)
-    tags: list[str] = []
-    seen: set[str] = set()
-    for raw in body.tags:
-        tag = raw.strip()
-        if not tag or len(tag) > 40:
-            raise ApiError(422, "invalid", f"bad tag {raw!r} (1-40 characters after trim)")
-        if tag.lower() in seen:
-            continue
-        seen.add(tag.lower())
-        tags.append(tag)
+    tags: list[str] | None = None
+    if body.tags is not None:
+        tags = []
+        seen: set[str] = set()
+        for raw in body.tags:
+            tag = raw.strip()
+            if not tag or len(tag) > 40:
+                raise ApiError(422, "invalid", f"bad tag {raw!r} (1-40 characters after trim)")
+            if tag.lower() in seen:
+                continue
+            seen.add(tag.lower())
+            tags.append(tag)
+    name: str | None = None
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise ApiError(422, "invalid", "name must not be blank")
+    if name is None and tags is None:
+        raise ApiError(422, "invalid", "nothing to update — provide name and/or tags")
     with request.app.state.voices_mutex:
         meta = _load_or_404(library, voice_id)
-        meta.tags = tags
+        if name is not None:
+            meta.name = name
+        if tags is not None:
+            meta.tags = tags
         try:
             library.save(meta)
         except (VoiceLibraryError, ValueError) as exc:
