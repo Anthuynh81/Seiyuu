@@ -13,17 +13,22 @@ from seiyuu.render.gate import (
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
 from seiyuu.render.pipeline import (
     MANIFEST_NAME,
+    RENDER_MODES,
     CostEstimate,
     RenderError,
     RenderResult,
     estimate_render_cost,
     estimate_render_cost_single,
+    manifest_mode,
+    manifest_name_for_mode,
+    preserve_unarchived_manifest,
     render_book,
     render_book_multivoice,
 )
 
 __all__ = [
     "MANIFEST_NAME",
+    "RENDER_MODES",
     "CostEstimate",
     "CostGateError",
     "CostQuote",
@@ -41,6 +46,9 @@ __all__ = [
     "estimate_render_cost_single",
     "hash_assignment",
     "issue_quote",
+    "manifest_mode",
+    "manifest_name_for_mode",
+    "preserve_unarchived_manifest",
     "render_book",
     "render_book_multivoice",
     "verify_quote",

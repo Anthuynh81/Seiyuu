@@ -41,6 +41,58 @@ from seiyuu.voices.models import VoiceMeta
 
 MANIFEST_NAME = "manifest.json"
 
+# Per-mode manifest archives: a completed render writes its manifest to the mode archive
+# AND promotes the same content to MANIFEST_NAME (the ACTIVE pointer every consumer —
+# Listen, assemble, master, GET /render — reads). Both modes' renders coexist; switching
+# is an atomic copy of an archive over the pointer, never a re-render.
+RENDER_MODES = ("single", "multi")
+
+
+def manifest_name_for_mode(mode: str) -> str:
+    """Archive filename for a render mode: manifest.single.json / manifest.multi.json."""
+    if mode not in RENDER_MODES:
+        raise ValueError(f"unknown render mode {mode!r} (expected one of {RENDER_MODES})")
+    return f"manifest.{mode}.json"
+
+
+def manifest_mode(manifest: RenderManifest) -> str:
+    """'single' iff the manifest carries the single-voice engine identity, else 'multi'."""
+    return "single" if manifest.engine is not None else "multi"
+
+
+def preserve_unarchived_manifest(book_output_dir: Path, *, exclude_mode: str) -> None:
+    """Lazy migration for pre-feature books: if manifest.json parses to a mode OTHER than
+    ``exclude_mode`` and that mode's archive is missing, copy it (byte-for-byte, atomic)
+    to that archive BEFORE the caller overwrites manifest.json — activating one mode must
+    never discard the other mode's only completed render. An absent/unreadable
+    manifest.json preserves nothing: there is no provable render to keep."""
+    active_path = Path(book_output_dir) / MANIFEST_NAME
+    if not active_path.is_file():
+        return
+    try:
+        raw = active_path.read_text(encoding="utf-8")
+        existing_mode = manifest_mode(RenderManifest.model_validate_json(raw))
+    except (OSError, ValueError):
+        return
+    if existing_mode == exclude_mode:
+        return
+    archive = Path(book_output_dir) / manifest_name_for_mode(existing_mode)
+    if not archive.is_file():
+        atomic_write_text(archive, raw)
+
+
+def _write_mode_manifests(book_output_dir: Path, manifest: RenderManifest, mode: str) -> Path:
+    """Persist a completed render: mode archive first, then promote the SAME content to
+    manifest.json (rendering a mode activates it — you rendered it to hear it). Two atomic
+    writes, archive before active, so a crash between them leaves the archive (the
+    recoverable truth) rather than an active pointer with no archive behind it."""
+    preserve_unarchived_manifest(book_output_dir, exclude_mode=mode)
+    payload = manifest.model_dump_json(indent=2)
+    atomic_write_text(Path(book_output_dir) / manifest_name_for_mode(mode), payload)
+    active_path = Path(book_output_dir) / MANIFEST_NAME
+    atomic_write_text(active_path, payload)
+    return active_path
+
 
 class RenderError(Exception):
     """Loud render failure naming book/chapter/block."""
@@ -233,20 +285,29 @@ def _synthesize_validated(
 def _manifest_merge_base(
     book_output_dir: Path, *, book_id: str, wanted: set[int], total_chapters: int, multivoice: bool
 ) -> RenderManifest | None:
-    """The existing manifest a chapter-SUBSET render must merge into (None → plain overwrite).
+    """The existing SAME-MODE manifest a chapter-SUBSET render must merge into (None →
+    plain overwrite).
 
     A subset is a non-empty ``wanted`` that does not cover all ``total_chapters`` (1-based).
     Full-book renders, and subset renders of a book with no manifest yet, keep the historical
     overwrite-wholesale behavior. A subset render over a prior manifest must NOT clobber it:
     chapters outside the subset would vanish from the render summary, Listen, and assembly
-    even though their WAVs still sit in cache. A mode mismatch is refused HERE — before any
-    synthesis — because a merged manifest cannot honestly describe both halves.
+    even though their WAVs still sit in cache. The merge base comes from the mode's ARCHIVE
+    (manifest.single.json / manifest.multi.json); a pre-feature book with only manifest.json
+    contributes it iff it parses to the SAME mode (lazy migration). A different-mode
+    manifest.json is simply not a merge base — cross-mode subset renders start fresh in
+    their own archive, so the mode-mismatch refusal below guards only a hand-edited archive
+    whose content contradicts its name (unreachable via normal flows).
     """
     if not wanted or wanted == set(range(1, total_chapters + 1)):
         return None
-    manifest_path = Path(book_output_dir) / MANIFEST_NAME
-    if not manifest_path.is_file():
-        return None
+    mode = "multi" if multivoice else "single"
+    manifest_path = Path(book_output_dir) / manifest_name_for_mode(mode)
+    from_archive = manifest_path.is_file()
+    if not from_archive:
+        manifest_path = Path(book_output_dir) / MANIFEST_NAME
+        if not manifest_path.is_file():
+            return None
     try:
         existing = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:  # pydantic ValidationError is a ValueError
@@ -254,12 +315,15 @@ def _manifest_merge_base(
             f"{book_id}: cannot merge a chapter-subset render into unreadable manifest "
             f"{manifest_path}: {exc}; delete it or render the full book"
         ) from exc
-    existing_mode = "single-voice" if existing.engine is not None else "multivoice"
-    new_mode = "multivoice" if multivoice else "single-voice"
-    if existing_mode != new_mode:
+    if manifest_mode(existing) != mode:
+        if not from_archive:
+            # pre-feature manifest.json of the OTHER mode: not a merge base for this mode;
+            # it stays in place as that mode's archive fallback (preserved at write time)
+            return None
         raise RenderError(
-            f"{book_id}: refusing a {new_mode} chapter-subset render: the existing manifest "
-            f"is {existing_mode}; render the full book to switch modes"
+            f"{book_id}: mode archive {manifest_path.name} holds a {manifest_mode(existing)} "
+            f"manifest, not {mode} — the archive is inconsistent; delete it or render the "
+            f"full book"
         )
     return existing
 
@@ -380,9 +444,11 @@ def render_book(
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
-    A chapter-subset render MERGES into the book's existing manifest (same mode and voice
-    identity required — refused up front otherwise) instead of clobbering it; a full-book
-    render, or a subset with no prior manifest, overwrites wholesale as before.
+    A chapter-subset render MERGES into the book's existing SAME-MODE manifest archive
+    (same voice identity required — refused up front otherwise) instead of clobbering it;
+    a full-book render, or a subset with no prior single-voice manifest, overwrites
+    wholesale as before. The completed manifest lands in manifest.single.json AND becomes
+    the active manifest.json.
 
     When ``library`` is given and ``voice_id`` refers to a library voice (a directory with
     meta.json or reference.wav), consent is verified before any synthesis — a cloned voice
@@ -569,8 +635,7 @@ def render_book(
     )
     if merge_base is not None:
         manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
-    manifest_path = book_output_dir / MANIFEST_NAME
-    atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
+    manifest_path = _write_mode_manifests(book_output_dir, manifest, "single")
     return RenderResult(
         manifest=manifest,
         manifest_path=manifest_path,
@@ -609,9 +674,11 @@ def render_book_multivoice(
     the FROZEN SegmentKey. Segments are emitted in reading order; the per-segment cache key
     makes that order-independent for caching.
 
-    A chapter-subset render MERGES into the book's existing manifest (same mode and voice
-    assignment required — refused up front otherwise) instead of clobbering it; a full-book
-    render, or a subset with no prior manifest, overwrites wholesale as before.
+    A chapter-subset render MERGES into the book's existing SAME-MODE manifest archive
+    (same voice assignment required — refused up front otherwise) instead of clobbering it;
+    a full-book render, or a subset with no prior multivoice manifest, overwrites wholesale
+    as before. The completed manifest lands in manifest.multi.json AND becomes the active
+    manifest.json.
 
     ``check_cancel`` (when given) is called between chapters and between segments and may
     raise to abort cooperatively; synthesized segments are already cached and no manifest
@@ -824,8 +891,7 @@ def render_book_multivoice(
     )
     if merge_base is not None:
         manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
-    manifest_path = book_output_dir / MANIFEST_NAME
-    atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
+    manifest_path = _write_mode_manifests(book_output_dir, manifest, "multi")
     return RenderResult(
         manifest=manifest,
         manifest_path=manifest_path,
