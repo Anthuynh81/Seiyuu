@@ -90,13 +90,15 @@ def _check_chapters(book: NormalizedBook, chapters: list[int]) -> tuple[int, ...
     return tuple(sorted(set(chapters)))
 
 
-def _estimate_or_http(cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None):
+def _estimate_or_http(
+    cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None, force=False
+):
     """compute_estimate with the read-path error mapping (422 unknown voice/engine;
     residual ServiceError = corrupt artifact -> 500; marker checks already ran)."""
     try:
         return compute_estimate(
             cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single,
-            apply_emotion=apply_emotion,
+            apply_emotion=apply_emotion, force=force,
         )  # fmt: skip
     except ValidationError as exc:
         # BEFORE ValueError (its superclass): a corrupt assignments.json is a server
@@ -180,6 +182,7 @@ def cost_estimate(
     speed: Annotated[float, Query(gt=0)] = 1.0,
     seed: int = 41172,
     apply_emotion: Annotated[bool | None, Query()] = None,  # F2b: None -> cfg default
+    force: Annotated[bool, Query()] = False,  # re-render: price cache HITs as billable work
 ) -> CostEstimateOut:
     """Pure read: exact frozen SegmentKeys vs the segment cache. No network, no GPU,
     no consent check, and NEVER the signing-key state."""
@@ -198,7 +201,7 @@ def cost_estimate(
     )
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=mode, chapters=wanted, single=single,
-        apply_emotion=apply_emotion,
+        apply_emotion=apply_emotion, force=force,
     )  # fmt: skip
     return CostEstimateOut(
         total_usd=ctx.est.total_usd,
@@ -231,7 +234,7 @@ def mint_quote(
     single = _resolve_single_or_422(cfg, body.single) if body.mode == "single" else None
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=body.mode, chapters=wanted, single=single,
-        apply_emotion=body.apply_emotion,
+        apply_emotion=body.apply_emotion, force=body.force,
     )  # fmt: skip
     if ctx.est.total_usd <= 0:
         raise ApiError(
@@ -319,7 +322,7 @@ def render_job(
     single = _resolve_single_or_422(cfg, params.single) if params.mode == "single" else None
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=params.mode, chapters=wanted, single=single,
-        apply_emotion=params.apply_emotion,
+        apply_emotion=params.apply_emotion, force=params.force,
     )  # fmt: skip
     _preflight_renderability(cfg, params.mode, single, ctx, book_id)
     if ctx.est.total_usd > 0:

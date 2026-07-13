@@ -396,6 +396,11 @@ class QuoteRequest(BaseModel):
     # fingerprint (via the estimate), so a quote minted with one value is refused by a render
     # sent with another — the token authorizes exactly the emotion-folded keys it priced.
     apply_emotion: bool | None = None
+    # Re-render: mint the quote over a FORCED estimate so forced-in-scope paid segments are
+    # priced as billable (cache HITs no longer discount them). Must match the render's ``force``
+    # or the token under-authorizes: a force=True render against a force=False quote is refused
+    # (recomputed total drifts upward past what was quoted).
+    force: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> "QuoteRequest":
@@ -443,6 +448,14 @@ class RenderParams(BaseModel):
     # cost estimate resolve the SAME effective value, so the cost gate authorizes exactly what
     # render bills (parity). OFF keeps the SegmentKey byte-identical to a no-emotion render.
     apply_emotion: bool | None = None
+    # Re-render: bypass the segment cache for the in-scope chapters, re-synthesizing and
+    # overwriting even a byte-identical cache HIT. Pair with ``chapters=[N]`` to redo one
+    # chapter fresh (e.g. a hallucination that slipped validation). NOT a SegmentKey field —
+    # the cache write overwrites the same key_hash. Paid parity: force turns forced-in-scope
+    # paid segments back into billed work in the estimate, so a forced cloud re-render still
+    # routes through the cost token; a quote minted force=False is refused (cost_drift) if the
+    # render is sent force=True, since the recomputed total then exceeds what was quoted.
+    force: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> "RenderParams":

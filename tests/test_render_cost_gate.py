@@ -153,3 +153,38 @@ def test_render_allows_paid_and_resolves_cloud_voice(tmp_path, monkeypatch):
     est = estimate_render_cost(_report(), make_book(), lib, _assignment(), out)
     assert est.paid_segments == 0 and est.total_usd == 0.0
     assert est.cached_segments == 5
+
+
+def test_force_reprices_cached_paid_and_a_nonforce_quote_is_refused(tmp_path, monkeypatch):
+    # Parity: after a paid render caches everything, a FORCE estimate must re-price the cached
+    # paid segments as billable (matching what a forced re-render actually calls), keep the SAME
+    # paid fingerprint, and — crucially — a quote minted from the cheap non-force estimate must be
+    # refused when a forced render's higher total is verified against it. That drift-up refusal is
+    # why `force` rides the existing money check with NO new field in the signed token.
+    from seiyuu.render import CostGateError, hash_assignment, issue_quote, verify_quote
+
+    _patch(monkeypatch, FakeElevenEngine())
+    lib, out = _library(tmp_path), tmp_path / "out"
+    assignment = _assignment()
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, out,
+        gpu=GpuResourceManager(), allow_paid=True,
+    )  # fmt: skip
+
+    cached = estimate_render_cost(_report(), make_book(), lib, assignment, out)
+    forced = estimate_render_cost(_report(), make_book(), lib, assignment, out, force=True)
+    assert cached.paid_segments == 0 and cached.total_usd == 0.0
+    assert forced.paid_segments == 2 and forced.total_usd > 0.0 and forced.cached_segments == 0
+    assert forced.fingerprint == cached.fingerprint  # fingerprint is force-independent
+
+    ah = hash_assignment(assignment)
+    quote = issue_quote(
+        cached, book_id="test-book-00000000", chapters=(),
+        assignment_hash=ah, max_usd=25.0, ttl_seconds=900, data_dir=tmp_path,
+    )  # fmt: skip
+    with pytest.raises(CostGateError, match="drifted upward"):
+        verify_quote(
+            quote, book_id="test-book-00000000", chapters=(),
+            fingerprint=forced.fingerprint, assignment_hash=ah,
+            recomputed_total_usd=forced.total_usd, max_usd=25.0, data_dir=tmp_path,
+        )  # fmt: skip

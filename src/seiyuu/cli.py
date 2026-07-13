@@ -147,6 +147,12 @@ def _voices_dir_option(fn):
     "(multivoice only; default from settings.apply_emotion). Off keeps renders byte-identical.",
 )
 @click.option(
+    "--force",
+    is_flag=True,
+    help="Re-render: bypass the segment cache for the in-scope chapters, re-synthesizing "
+    "and overwriting even a cache HIT. Pair with --chapter to redo one chapter fresh.",
+)
+@click.option(
     "--cost-token",
     default=None,
     help="Signed cost token from `seiyuu estimate-cost --token`; refused if anything "
@@ -175,6 +181,7 @@ def render(
     multivoice: bool,
     confirm_cost: bool,
     apply_emotion: bool | None,
+    force: bool,
     cost_token: str | None,
     books_dir: Path | None,
     output_dir: Path | None,
@@ -196,6 +203,7 @@ def render(
         _render_multivoice_cli(
             cfg, book, book_dir, output_dir, voices_dir, chapter_indices,
             confirm_cost=confirm_cost, cost_token=cost_token, apply_emotion=apply_emotion,
+            force=force,
         )  # fmt: skip
         return
 
@@ -218,7 +226,7 @@ def render(
         est = estimate_render_cost_single(
             book, engine, voice, out_book_dir,
             settings={"speed": speed}, seed=seed, chapters=chapter_indices, library=lib,
-            lexicon=lexicon,
+            lexicon=lexicon, force=force,
         )  # fmt: skip
         approved_usd = _pass_cost_gate(
             cfg, est,
@@ -243,6 +251,7 @@ def render(
             allow_paid=approved_usd is not None,
             max_paid_usd=approved_usd,
             lexicon=lexicon,
+            force=force,
         )
     # SynthesisError covers indextts2's model_version raising on missing checkpoints (the only
     # engine whose model_version can fail) — surface it as a clean click error, not a traceback.
@@ -313,7 +322,7 @@ def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cos
 
 def _render_multivoice_cli(
     cfg, book, book_dir, output_dir, voices_dir, chapter_indices, *,
-    confirm_cost=False, cost_token=None, apply_emotion=None,
+    confirm_cost=False, cost_token=None, apply_emotion=None, force=False,
 ):  # fmt: skip
     """Shared multi-voice render: load inputs, cost-gate paid engines, render, echo summary."""
     from seiyuu.render import (
@@ -346,7 +355,7 @@ def _render_multivoice_cli(
     # cost gate: estimate first; paid segments require the ceiling + explicit approval
     est = estimate_render_cost(
         report, book, lib, assignment, out_book_dir, chapters=chapter_indices, lexicon=lexicon,
-        apply_emotion=apply_emotion,
+        apply_emotion=apply_emotion, force=force,
     )  # fmt: skip
     approved_usd = _pass_cost_gate(
         cfg, est,
@@ -373,6 +382,7 @@ def _render_multivoice_cli(
             cloud_max_slots=cfg.elevenlabs_max_voice_slots,
             lexicon=lexicon,
             apply_emotion=apply_emotion,
+            force=force,
         )
     except (RenderError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
