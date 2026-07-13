@@ -146,6 +146,12 @@ export interface ChapterDownload extends FileDownload {
   index: number;
 }
 
+/** BookDetail.cover and the PUT /cover response (mirrors CoverOut in schemas.py). */
+export interface CoverOut {
+  content_type: string;
+  bytes: number;
+}
+
 export interface BookDetail {
   status: Omit<BookCard, "active_job">;
   chapters: ChapterSummary[] | null;
@@ -153,7 +159,7 @@ export interface BookDetail {
   active_job: ActiveJobSummary | null;
   recent_jobs: JobOut[];
   downloads: { m4b: FileDownload | null; chapter_mp3s: ChapterDownload[] };
-  cover: { content_type: string; bytes: number } | null;
+  cover: CoverOut | null;
 }
 
 export type RenderMode = "multivoice" | "single";

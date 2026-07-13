@@ -13,6 +13,7 @@ import type {
   CharactersOverview,
   CloudSlotsOut,
   CostEstimateOut,
+  CoverOut,
   EditLog,
   EditRequest,
   EngineVoicesOut,
@@ -390,6 +391,30 @@ export function useStartJob(bookId: string, path: "render" | "assemble" | "maste
     mutationFn: (body: RenderRequest | Record<string, never>) =>
       postJson<JobOut>(`/api/books/${bookId}/${path}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+/** Cover art for the .m4b master (and the Listen shelf). PUT multipart replaces; DELETE is
+    idempotent. Both invalidate the book detail so `cover` refreshes everywhere — but the
+    GET /cover URL itself never changes, so the caller must cache-bust its preview (the
+    audio_key ?v= trick). 415/413/409 surface as ApiError for the control to render. */
+export function useUploadCover(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      return api<CoverOut>(`/api/books/${bookId}/cover`, { method: "PUT", body: form });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["book", bookId] }),
+  });
+}
+
+export function useDeleteCover(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<void>(`/api/books/${bookId}/cover`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["book", bookId] }),
   });
 }
 
