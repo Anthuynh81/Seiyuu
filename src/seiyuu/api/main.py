@@ -119,10 +119,18 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     # before routing, and the legitimate frontend's Host is always allowed, so no real
     # client ever sees it.
     host_cfg = settings or get_settings()
-    app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=[h.strip() for h in host_cfg.api_allowed_hosts.split(",") if h.strip()],
-    )
+    allowed_hosts = [h.strip() for h in host_cfg.api_allowed_hosts.split(",") if h.strip()]
+    if not allowed_hosts:
+        # TrustedHostMiddleware treats an empty allowlist as deny-ALL: every request
+        # would get its bare 400 with no route ever reached — a silent total lockout.
+        # Repo policy is to fail loudly instead, at construction, naming the setting.
+        default = Settings.model_fields["api_allowed_hosts"].default
+        raise ValueError(
+            "API_ALLOWED_HOSTS parsed to an empty host allowlist, which would reject "
+            "every request to the API. Set it to a comma-separated list of hosts "
+            f"(default: {default!r}) or unset it to use the default."
+        )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
     register_error_handlers(app)
     app.include_router(system_routes.router, prefix="/api")
     app.include_router(engines_routes.router, prefix="/api")

@@ -61,3 +61,14 @@ def test_custom_allowlist_admits_lan_host(tmp_path) -> None:
         assert c.get("/api/health", headers={"Host": "tablet.lan:8000"}).status_code == 200
         # The allowlist is exact: unlisted hosts stay rejected even with a custom value.
         assert c.get("/api/health", headers={"Host": "evil.example.com"}).status_code == 400
+
+
+@pytest.mark.parametrize("raw", ["", " , "])
+def test_empty_allowlist_refuses_app_construction(tmp_path, raw: str) -> None:
+    # An empty parsed allowlist makes TrustedHostMiddleware deny EVERY request with
+    # its bare 400 — a silent total lockout. create_app must refuse loudly instead,
+    # naming the setting and its default so the fix is obvious from the traceback.
+    settings = make_settings(tmp_path, api_allowed_hosts=raw)
+    with pytest.raises(ValueError, match="API_ALLOWED_HOSTS") as exc_info:
+        create_app(settings=settings)
+    assert "localhost,127.0.0.1,testserver" in str(exc_info.value)

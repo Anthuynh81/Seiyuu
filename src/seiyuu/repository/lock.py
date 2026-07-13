@@ -50,27 +50,22 @@ def file_lock(path: Path, *, timeout: float = 30.0, poll_seconds: float = 0.05) 
     """Hold an exclusive OS lock on ``path`` for the ``with`` body.
 
     Blocks up to ``timeout`` seconds waiting for a competing holder, then raises
-    ``RepositoryError`` — a hung competitor should surface loudly, not deadlock."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "a+b")  # created if missing; content is irrelevant, only the lock is
+    ``RepositoryError`` — a hung competitor should surface loudly, not deadlock.
+    Built on ``FileLockHandle`` so the descriptor lifecycle lives in one place;
+    this wrapper only adds the poll-until-deadline and with-scoped release."""
+    handle = FileLockHandle(path)
+    deadline = time.monotonic() + timeout
+    while not handle.try_acquire():
+        if time.monotonic() >= deadline:
+            raise RepositoryError(
+                f"could not acquire lock {handle.path} within {timeout:.0f}s "
+                f"(another seiyuu process holding it?)"
+            )
+        time.sleep(poll_seconds)
     try:
-        f.seek(0)
-        deadline = time.monotonic() + timeout
-        while not _try_lock(f.fileno()):
-            if time.monotonic() >= deadline:
-                raise RepositoryError(
-                    f"could not acquire lock {path} within {timeout:.0f}s "
-                    f"(another seiyuu process holding it?)"
-                )
-            time.sleep(poll_seconds)
-        try:
-            yield
-        finally:
-            f.seek(0)
-            _unlock(f.fileno())
+        yield
     finally:
-        f.close()
+        handle.release()
 
 
 class FileLockHandle:
