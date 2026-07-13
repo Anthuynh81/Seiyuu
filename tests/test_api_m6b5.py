@@ -444,6 +444,31 @@ def test_multivoice_render_end_to_end(client, monkeypatch) -> None:
     assert summary["assignment_present"] is True
     assert summary["voices_used"]
 
+    # staleness signal: the render's cast hash is present and equals the CURRENT cast's
+    # estimate hash (same hash function) — so a fresh render reads as "not stale".
+    est = client.get(f"/api/books/{book_id}/cost-estimate?mode=multivoice").json()
+    assert summary["rendered_assignment_hash"] is not None
+    assert summary["rendered_assignment_hash"] == est["assignment_hash"]
+
+    # ...and reassigning a character makes the current cast diverge from the rendered one,
+    # which is exactly what drives the "re-render to hear it" banner.
+    assignment = client.get(f"/api/books/{book_id}/assignment").json()
+    voices = set(assignment["assignments"].values())
+    new_narrator = next((v for v in voices if v != assignment["narrator_voice_id"]), None)
+    assert new_narrator, "fixture needs a character voice distinct from the narrator"
+    put = client.put(
+        f"/api/books/{book_id}/assignment",
+        json={
+            "stage": assignment["stage"],
+            "narrator_voice_id": new_narrator,
+            "assignments": assignment["assignments"],
+            "thought_voice_id": assignment.get("thought_voice_id"),
+        },
+    )
+    assert put.status_code == 200, put.text
+    est2 = client.get(f"/api/books/{book_id}/cost-estimate?mode=multivoice").json()
+    assert est2["assignment_hash"] != summary["rendered_assignment_hash"]
+
 
 # -- review-workflow regression fixes (M6b-5 findings) --------------------------------------
 

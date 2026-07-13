@@ -202,6 +202,9 @@ export interface RenderRequest {
   single?: { engine?: string; voice?: string; speed?: number; seed?: number };
   // F2b: per-render emotion override (undefined -> the server default cfg.apply_emotion)
   apply_emotion?: boolean;
+  // Re-render: bypass the segment cache for the in-scope chapters, re-synthesizing even a
+  // cache HIT. Must match the force value the estimate/quote were computed with.
+  force?: boolean;
 }
 
 export interface RenderSummaryOut {
@@ -211,6 +214,9 @@ export interface RenderSummaryOut {
   total_seconds: number;
   voices_used: Record<string, { engine: string; engine_model_version: string; kind: string }>;
   validation_failures: number;
+  /** canonical hash of the cast this multivoice render was built with (null for single voice);
+      compare to the current CostEstimateOut.assignment_hash to detect a cast change since render */
+  rendered_assignment_hash: string | null;
   /** which mode's archive manifest.json (everything above describes it) points at */
   active_mode: ArchivedRenderMode;
   /** modes with an activatable render on disk, canonical (single, multi) order */

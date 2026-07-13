@@ -488,6 +488,11 @@ class RenderSummaryOut(BaseModel):
     voices_used: dict[str, VoiceUseOut]
     validation_failures: int
     assignment_present: bool
+    # Canonical hash of the assignment this multivoice render was built with (None for single
+    # voice). The UI compares it against the CURRENT assignment's hash (CostEstimateOut.
+    # assignment_hash) to tell the user "your cast changed since this render — re-render to hear
+    # it." Same hash function the cost quote binds, so the two are directly comparable.
+    rendered_assignment_hash: str | None = None
     # Per-mode archives (additive): which modes have an activatable render on disk, and
     # which one manifest.json (everything above describes it) currently points at.
     active_mode: Literal["single", "multi"]

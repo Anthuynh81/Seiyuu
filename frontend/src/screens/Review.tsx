@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
@@ -744,6 +744,17 @@ export function Review() {
                       : "error"}
                   </span>
                   <p>{(draftCast.error ?? saveCast.error)?.message}</p>
+                </div>
+              )}
+              {saveCast.isSuccess && !castingDirty && book.data?.status.rendered && (
+                <div className="caststrip flex-wrap gap-2 text-[11px]">
+                  <span className="tag">audio is stale</span>
+                  <span className="mono text-ink-2">
+                    casting saved — the rendered audio still uses the old voices.
+                  </span>
+                  <Link className="link" to={`/render?book=${encodeURIComponent(bookId)}`}>
+                    re-render in Render &amp; Jobs →
+                  </Link>
                 </div>
               )}
               {overview.isPending && <div className="loadline p-3.5">reading the registry…</div>}

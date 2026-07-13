@@ -565,8 +565,13 @@ export function RenderJobs() {
   const applyEmotion = emotionChoice ?? emotionDefault;
   const emotionArg = mode === "multivoice" ? applyEmotion : undefined;
 
+  // Re-render: bypass the segment cache for the in-scope chapters (redo a bad chapter, or
+  // re-hear a changed cast). Reset on a real book switch so it never sticks across books.
+  const [force, setForce] = useState(false);
+  useEffect(() => setForce(false), [bookId]);
+
   const ready = !!status?.ingested && (mode === "single" || (status?.attributed && status?.assigned));
-  const estimate = useEstimate(bookId, mode, chapters, ready, emotionArg);
+  const estimate = useEstimate(bookId, mode, chapters, ready, emotionArg, force);
   const jobs = useBookJobs(bookId);
   const validation = useValidation(bookId, !!status?.rendered);
   const summary = useRenderSummary(bookId, !!status?.rendered);
@@ -650,6 +655,9 @@ export function RenderJobs() {
   const chainBusy = chain !== null || assemble.isPending || master.isPending;
 
   const [ticket, setTicket] = useState<TicketState>({ kind: "none" });
+  // Toggling force re-prices the render (cached segments become billable/free work), so any
+  // live quote no longer matches — drop it and make the user mint against the new estimate.
+  useEffect(() => setTicket({ kind: "none" }), [force]);
   const [confirmFull, setConfirmFull] = useState<{ speakable_blocks: number; runtime_estimate_seconds: number } | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
 
@@ -658,7 +666,7 @@ export function RenderJobs() {
   const doMint = () => {
     setFlowError(null);
     mint.mutate(
-      { mode, chapters, applyEmotion: emotionArg },
+      { mode, chapters, applyEmotion: emotionArg, force },
       {
         onSuccess: (quote) => setTicket({ kind: "live", quote }),
         onError: (e) => setFlowError(e instanceof ApiError ? e.message : String(e)),
@@ -674,6 +682,7 @@ export function RenderJobs() {
         chapters,
         ...singleSpec,
         ...(emotionArg === undefined ? {} : { apply_emotion: emotionArg }),
+        ...(force ? { force: true } : {}),
         ...(opts.token ? { cost_token: opts.token } : {}),
         ...(opts.confirmFull ? { confirm_full: true } : {}),
       },
@@ -773,9 +782,39 @@ export function RenderJobs() {
           {book.data?.chapters && (
             <ScopeRow scope={scope} setScope={setScope} chapters={book.data.chapters} renderedSet={renderedSet} />
           )}
+          {status?.rendered && (
+            <div className="scoperow">
+              <span className="tag">re-render</span>
+              <label
+                className="mono flex items-center gap-1.5 text-xs"
+                title="Re-synthesize the in-scope chapters from scratch, overwriting the cached audio. Use it to redo a bad chapter (a misread that slipped the check) — pick a chapter range above, then force. Paid voices re-bill, so the estimate re-prices what force will re-synthesize."
+              >
+                <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+                force re-render — ignore cached audio
+              </label>
+              <span className="mono scopehint">
+                {force
+                  ? "every in-scope segment is re-synthesized fresh — a bad chapter gets redone"
+                  : "cached segments are reused — nothing already rendered is re-synthesized"}
+              </span>
+            </div>
+          )}
           {summary.data && (
             <ActiveModeControl bookId={bookId} summary={summary.data} conflict={manifestOwner} />
           )}
+          {mode === "multivoice" &&
+            summary.data?.rendered_assignment_hash &&
+            estimate.data?.assignment_hash &&
+            summary.data.rendered_assignment_hash !== estimate.data.assignment_hash && (
+              <div className="refusal mb-3.5">
+                <span className="tag">casting changed</span>
+                <p>
+                  the current cast differs from the rendered audio — re-render (multivoice) to hear
+                  the new voices. Only the reassigned characters' lines re-synthesize; every
+                  unchanged voice is reused from cache, so this is fast and mostly free.
+                </p>
+              </div>
+            )}
           {mode === "multivoice" && (
             <div className="scoperow">
               <span className="tag">emotion</span>

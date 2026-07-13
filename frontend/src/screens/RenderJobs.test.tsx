@@ -72,6 +72,7 @@ function makeSummary(over: Partial<RenderSummaryOut> = {}): RenderSummaryOut {
     total_seconds: 1800,
     voices_used: {},
     validation_failures: 0,
+    rendered_assignment_hash: null,
     active_mode: "multi",
     available_modes: ["multi"],
     ...over,
@@ -551,6 +552,68 @@ describe("RenderJobs", () => {
     expect(
       screen.getByText(/a render job is running and owns the render — wait for it or cancel it/),
     ).toBeInTheDocument();
+  });
+
+  /* ---- re-render (force) + stale-cast banner ------------------------------------------ */
+
+  const forceToggle = () =>
+    screen.findByRole("checkbox", { name: "force re-render — ignore cached audio" });
+
+  it("the force toggle threads force=true into the estimate URL and the render body", async () => {
+    const user = userEvent.setup();
+    const server = mountRendered(renderedCard())
+      .get("/api/books/demo/render", makeSummary())
+      .post("/api/books/demo/render", makeJob({ kind: "render", state: "queued" }));
+    renderWithProviders(<RenderJobs />);
+
+    await user.click(await forceToggle());
+    await waitFor(() =>
+      expect(server.lastCall("GET", "/cost-estimate")?.url).toContain("force=true"),
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "render multivoice — free, nothing to approve" }),
+    );
+    await waitFor(() => expect(server.lastCall("POST", "/render")).toBeDefined());
+    expect(server.jsonBodyOf("POST", "/render")).toEqual({
+      mode: "multivoice",
+      chapters: [],
+      apply_emotion: false,
+      force: true,
+    });
+  });
+
+  it("the force toggle only appears once a render exists (nothing to re-render otherwise)", async () => {
+    mountRoutes(readyCard()).get("/api/books/demo/cost-estimate", makeEstimate());
+    renderWithProviders(<RenderJobs />);
+    await screen.findByRole("button", { name: "render multivoice — free, nothing to approve" });
+    expect(
+      screen.queryByRole("checkbox", { name: "force re-render — ignore cached audio" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns that the cast changed when the rendered assignment differs from the current one", async () => {
+    // estimate default assignment_hash is "ah-1"; the render was built with "ah-OLD" -> stale
+    mountRendered(renderedCard()).get(
+      "/api/books/demo/render",
+      makeSummary({ rendered_assignment_hash: "ah-OLD" }),
+    );
+    renderWithProviders(<RenderJobs />);
+    expect(
+      await screen.findByText(/the current cast differs from the rendered audio/),
+    ).toBeInTheDocument();
+  });
+
+  it("no cast-changed warning when the rendered assignment matches the current one", async () => {
+    mountRendered(renderedCard()).get(
+      "/api/books/demo/render",
+      makeSummary({ rendered_assignment_hash: "ah-1" }),
+    );
+    renderWithProviders(<RenderJobs />);
+    await forceToggle(); // the rendered summary has loaded
+    expect(
+      screen.queryByText(/the current cast differs from the rendered audio/),
+    ).not.toBeInTheDocument();
   });
 
   /* ---- one-click finish (assemble → master) ------------------------------------------- */

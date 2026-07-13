@@ -134,13 +134,15 @@ export function useEstimate(
   chapters: number[],
   ready: boolean,
   applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
+  force = false, // re-render: price cached in-scope segments as billable work (parity with render)
 ) {
   const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
+  const frc = force ? "&force=true" : "";
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force],
     queryFn: () =>
       api<CostEstimateOut>(
-        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}`,
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}`,
       ),
     enabled: bookId !== null && ready,
   });
@@ -190,16 +192,19 @@ export function useMintQuote(bookId: string) {
       mode,
       chapters,
       applyEmotion,
+      force,
     }: {
       mode: RenderMode;
       chapters: number[];
       applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
+      force?: boolean; // re-render: quote must be minted force=True to authorize a forced render
     }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
         ...(mode === "single" ? { single: {} } : {}),
         ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
+        ...(force ? { force: true } : {}),
       }),
   });
 }
@@ -463,6 +468,9 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
   qc.invalidateQueries({ queryKey: ["books"] }); // the assigned stage flag flips
   qc.invalidateQueries({ queryKey: ["book", bookId] });
   qc.invalidateQueries({ queryKey: ["estimate", bookId] }); // assignment hash drifts quotes
+  // A cast change makes any existing render stale: refresh the summary so its
+  // rendered_assignment_hash is re-read and the "re-render to hear it" banner surfaces.
+  qc.invalidateQueries({ queryKey: ["render-summary", bookId] });
 }
 
 export interface DraftInput {

@@ -42,6 +42,7 @@ from seiyuu.render.gate import (
     FULL_RENDER_CONFIRM_BLOCKS,
     CostGateError,
     CostQuote,
+    hash_assignment,
     quote_consumed,
     verify_quote,
 )
@@ -499,6 +500,9 @@ def render_summary(book_id: str, cfg: SettingsDep) -> RenderSummaryOut:
         },
         validation_failures=manifest.validation_failures,
         assignment_present=manifest.assignment is not None,
+        rendered_assignment_hash=(
+            hash_assignment(manifest.assignment) if manifest.assignment is not None else None
+        ),
         active_mode=active_mode,
         available_modes=available_render_modes(cfg.output_dir / book_id, active_mode=active_mode),
     )

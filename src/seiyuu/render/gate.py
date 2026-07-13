@@ -85,8 +85,14 @@ class CostQuote(BaseModel):
 
 
 def hash_assignment(assignment) -> str:
-    """Canonical hash of a VoiceAssignment, binding a quote to who-speaks-with-which-voice."""
-    payload = json.dumps(assignment.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """Canonical hash of a VoiceAssignment, binding a quote to who-speaks-with-which-voice.
+
+    Accepts a VoiceAssignment OR its already-serialized ``model_dump(mode="json")`` dict — the
+    render manifest stores the latter (an assignment snapshot), and GET /render hashes it to
+    report ``rendered_assignment_hash``. Same canonicalization either way, so the render summary's
+    hash is directly comparable to the estimate's hash of the current cast."""
+    dumped = assignment if isinstance(assignment, dict) else assignment.model_dump(mode="json")
+    payload = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

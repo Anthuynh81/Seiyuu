@@ -54,6 +54,7 @@ const summary: RenderSummaryOut = {
   total_seconds: 120,
   voices_used: { "v-narr": { engine: "kokoro", engine_model_version: "1.0", kind: "preset" } },
   validation_failures: 0,
+  rendered_assignment_hash: null,
   active_mode: "multi",
   available_modes: ["multi"],
 };
