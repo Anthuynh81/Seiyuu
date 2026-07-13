@@ -54,6 +54,9 @@ class IngestResult:
     book: NormalizedBook
     skipped_items: list[str]
     dropped_sections: list[str]
+    # Raw bytes of the source's DECLARED cover image (EPUB only today); validated
+    # (jpeg/png magic) only when written, by ``extract_cover_art``.
+    cover: bytes | None = None
 
 
 def collapse(text: str) -> str:

@@ -42,15 +42,22 @@ def main() -> None:
     default=None,
     help="Output root directory (default: settings.books_dir).",
 )
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root where extracted cover art lands (default: settings.output_dir).",
+)
 def ingest(
     book_path: Path,
     include_items: tuple[str, ...],
     exclude_items: tuple[str, ...],
     split_level: int,
     books_dir: Path | None,
+    output_dir: Path | None,
 ) -> None:
     """Ingest an EPUB or PDF into normalized JSON (books/{book_id}/normalized.json)."""
-    from seiyuu.ingest import IngestError, parse_book, write_normalized
+    from seiyuu.ingest import IngestError, extract_cover_art, parse_book, write_normalized
     from seiyuu.settings import get_settings
 
     try:
@@ -64,6 +71,7 @@ def ingest(
         raise click.ClickException(str(exc)) from exc
 
     out_path = write_normalized(result.book, books_dir or get_settings().books_dir)
+    cover_path = extract_cover_art(result, output_dir or get_settings().output_dir)
 
     meta = result.book.book_meta
     n_blocks = sum(len(c.blocks) for c in result.book.chapters)
@@ -74,6 +82,8 @@ def ingest(
         click.echo(f"skipped spine item: {name}")
     for section in result.dropped_sections:
         click.echo(f"dropped section:    {section}")
+    if cover_path is not None:
+        click.echo(f"cover:    {cover_path} (extracted from the book)")
     click.echo(f"wrote: {out_path}")
 
 

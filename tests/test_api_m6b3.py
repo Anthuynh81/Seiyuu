@@ -126,6 +126,33 @@ def test_ingest_upload_and_idempotency(client, epub_bytes) -> None:
     assert not any(uploads.iterdir()) if uploads.is_dir() else True
 
 
+def test_ingest_extracts_embedded_cover(client, tmp_path) -> None:
+    png_cover = b"\x89PNG\r\n\x1a\n" + b"embedded-cover"
+    data = build_synthetic_epub(tmp_path / "covered.epub", cover_image=png_cover).read_bytes()
+    resp = _upload(client, data)
+    assert resp.status_code == 201, resp.text
+    book_id = resp.json()["book"]["book_id"]
+
+    cfg = client.app.state.settings
+    assert (cfg.output_dir / book_id / "cover.png").read_bytes() == png_cover
+    detail = client.get(f"/api/books/{book_id}").json()
+    assert detail["cover"] == {"content_type": "image/png", "bytes": len(png_cover)}
+    served = client.get(f"/api/books/{book_id}/cover")
+    assert served.status_code == 200
+    assert served.content == png_cover
+
+    # a user-uploaded cover wins over re-ingest: replace with a jpeg, upload the same EPUB
+    user_jpeg = b"\xff\xd8\xff\xe0user-cover"
+    put = client.put(
+        f"/api/books/{book_id}/cover", files={"file": ("c.jpg", user_jpeg, "image/jpeg")}
+    )
+    assert put.status_code == 200, put.text
+    again = _upload(client, data)
+    assert again.status_code == 200
+    assert (cfg.output_dir / book_id / "cover.jpg").read_bytes() == user_jpeg
+    assert not (cfg.output_dir / book_id / "cover.png").exists()
+
+
 def test_ingest_bad_epub_is_422(client) -> None:
     resp = _upload(client, b"this is not an epub at all")
     assert resp.status_code == 422

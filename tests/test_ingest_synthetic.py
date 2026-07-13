@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+from ebooklib import epub
 
-from seiyuu.ingest import BlockType, NormalizedBook, parse_epub, write_normalized
+from conftest import build_synthetic_epub
+from seiyuu.ingest import BlockType, NormalizedBook, extract_cover_art, parse_epub, write_normalized
 from seiyuu.ingest.epub import _collapse, _collapse_with_italics
 
 
@@ -80,6 +82,84 @@ def test_book_meta(synthetic_epub: Path) -> None:
     assert meta.language == "en"
     assert meta.book_id.startswith("synthetic-test-book-")
     assert len(meta.source_sha256) == 64
+
+
+# -- embedded cover extraction --------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"png-payload"
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
+
+
+def _epub2_meta_cover_book(path: Path, cover: bytes) -> Path:
+    """EPUB2-style declared cover: a plain manifest image plus ``<meta name="cover">``
+    pointing at its id — no EPUB3 ``cover-image`` property anywhere."""
+    book = epub.EpubBook()
+    book.set_identifier("epub2-cover-001")
+    book.set_title("Epub2 Cover Book")
+    book.set_language("en")
+    ch = epub.EpubHtml(title="Chapter 1", file_name="c1.xhtml", lang="en")
+    ch.set_content("<html><body><h2>Chapter 1</h2><p>Some chapter text.</p></body></html>")
+    book.add_item(ch)
+    book.add_item(
+        epub.EpubImage(
+            uid="cover-img", file_name="images/cover.jpg", media_type="image/jpeg", content=cover
+        )
+    )
+    book.add_metadata(None, "meta", "", {"name": "cover", "content": "cover-img"})
+    book.spine = [ch]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    epub.write_epub(str(path), book)
+    return path
+
+
+def test_declared_cover_extracted_to_output_dir(tmp_path: Path) -> None:
+    src = build_synthetic_epub(tmp_path / "with-cover.epub", cover_image=PNG_BYTES)
+    result = parse_epub(src)
+    assert result.cover == PNG_BYTES
+    out = extract_cover_art(result, tmp_path / "output")
+    book_dir = tmp_path / "output" / result.book.book_meta.book_id
+    assert out == book_dir / "cover.png"
+    assert out.read_bytes() == PNG_BYTES
+    assert not (book_dir / "cover.jpg").exists()
+
+
+def test_epub2_meta_cover_extracted(tmp_path: Path) -> None:
+    src = _epub2_meta_cover_book(tmp_path / "epub2.epub", JPEG_BYTES)
+    result = parse_epub(src)
+    assert result.cover == JPEG_BYTES
+    out = extract_cover_art(result, tmp_path / "output")
+    assert out is not None
+    assert out.name == "cover.jpg"
+    assert out.read_bytes() == JPEG_BYTES
+
+
+def test_no_declared_cover_is_skipped(synthetic_epub: Path, tmp_path: Path) -> None:
+    # the fixture has a cover PAGE in the spine, but no declared cover IMAGE
+    result = parse_epub(synthetic_epub)
+    assert result.cover is None
+    assert extract_cover_art(result, tmp_path / "output") is None
+    assert not (tmp_path / "output" / result.book.book_meta.book_id).exists()
+
+
+def test_corrupt_declared_cover_skipped_silently(tmp_path: Path) -> None:
+    src = build_synthetic_epub(tmp_path / "bad-cover.epub", cover_image=b"GIF89a not jpeg/png")
+    result = parse_epub(src)
+    assert result.cover is not None  # declared, but fails jpeg/png validation
+    assert extract_cover_art(result, tmp_path / "output") is None
+    assert not (tmp_path / "output" / result.book.book_meta.book_id).exists()
+
+
+def test_existing_cover_survives_reingest(tmp_path: Path) -> None:
+    src = build_synthetic_epub(tmp_path / "with-cover.epub", cover_image=PNG_BYTES)
+    result = parse_epub(src)
+    book_dir = tmp_path / "output" / result.book.book_meta.book_id
+    book_dir.mkdir(parents=True)
+    user_cover = book_dir / "cover.jpg"
+    user_cover.write_bytes(JPEG_BYTES)  # a user-uploaded cover already on disk wins
+    assert extract_cover_art(result, tmp_path / "output") is None
+    assert user_cover.read_bytes() == JPEG_BYTES
+    assert not (book_dir / "cover.png").exists()
 
 
 def test_inline_comment_excluded_matches_get_text() -> None:

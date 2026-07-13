@@ -7,7 +7,6 @@ attribution read goes through ``load_report`` (edits overlay applied) and carrie
 omit job progress (polling discipline — poll ``/api/jobs/{id}``).
 """
 
-import os
 import re
 import secrets
 import shutil
@@ -47,9 +46,10 @@ from seiyuu.api.schemas import (
 )
 from seiyuu.attribute.spans import is_unattributed_quote
 from seiyuu.duration import estimate_runtime_seconds, format_hms
-from seiyuu.ingest import IngestError, parse_book, write_normalized
+from seiyuu.ingest import IngestError, extract_cover_art, parse_book, write_normalized
 from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_books
 from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME, delete_book_trees
+from seiyuu.repository.covers import COVER_MAGIC, COVER_TYPES, CoverTypeError, write_cover
 from seiyuu.services import ServiceError, characters_overview
 from seiyuu.services.characters import CharactersOverview
 from seiyuu.services.deletion import detect_paid_artifacts
@@ -57,7 +57,6 @@ from seiyuu.voices import drop_book_everywhere
 
 router = APIRouter(tags=["books"])
 
-_COVER_TYPES = {"cover.jpg": "image/jpeg", "cover.png": "image/png"}
 _UPLOAD_CHUNK = 1024 * 1024
 
 
@@ -150,6 +149,9 @@ def ingest_book(
             )
         existed = (cfg.books_dir / book_id / NORMALIZED_NAME).is_file()
         write_normalized(book, cfg.books_dir)
+        # Optional garnish: the EPUB's declared cover, skipped silently when absent,
+        # invalid, or already on disk (a user-uploaded cover survives re-ingest).
+        extract_cover_art(result, cfg.output_dir)
         response.status_code = 200 if existed else 201
         response.headers["Location"] = f"/api/books/{book_id}"
         return IngestResponse(
@@ -205,7 +207,7 @@ def book_detail(book_id: str, cfg: SettingsDep, store: StoreDep) -> BookDetail:
     cover = next(
         (
             CoverOut(content_type=ctype, bytes=(odir / name).stat().st_size)
-            for name, ctype in _COVER_TYPES.items()
+            for name, ctype in COVER_TYPES.items()
             if (odir / name).is_file()
         ),
         None,
@@ -535,11 +537,6 @@ def characters(
 
 # -- cover art ----------------------------------------------------------------------------
 
-_COVER_MAGIC = {
-    "image/jpeg": (b"\xff\xd8\xff", "cover.jpg"),
-    "image/png": (b"\x89PNG", "cover.png"),
-}
-
 
 def _guard_master_active(store, book_id: str) -> None:
     """A master job reads the cover mid-run (and on Windows, unlinking a file ffmpeg
@@ -566,27 +563,19 @@ def upload_cover(
     status_or_404(cfg, book_id)
     _guard_master_active(store, book_id)
     content_type = (file.content_type or "").lower()
-    if content_type not in _COVER_MAGIC:
+    if content_type not in COVER_MAGIC:
         raise ApiError(
             415,
             "unsupported_media_type",
             f"cover must be image/jpeg or image/png, got {content_type or 'unknown'}",
         )
-    magic, target_name = _COVER_MAGIC[content_type]
     data = file.file.read(cfg.max_upload_bytes + 1)
     if len(data) > cfg.max_upload_bytes:
         raise ApiError(413, "payload_too_large", "cover exceeds the upload limit")
-    if not data.startswith(magic):
-        raise ApiError(415, "unsupported_media_type", "file content does not match its image type")
-    odir = cfg.output_dir / book_id
-    odir.mkdir(parents=True, exist_ok=True)
-    for other in _COVER_TYPES:
-        if other != target_name:
-            (odir / other).unlink(missing_ok=True)
-    target = odir / target_name
-    tmp = target.with_suffix(target.suffix + ".part")
-    tmp.write_bytes(data)
-    os.replace(tmp, target)
+    try:
+        write_cover(cfg.output_dir / book_id, data, content_type)
+    except CoverTypeError as exc:
+        raise ApiError(415, "unsupported_media_type", str(exc)) from exc
     return CoverOut(content_type=content_type, bytes=len(data))
 
 
@@ -595,7 +584,7 @@ def get_cover(book_id: str, cfg: SettingsDep) -> FileResponse:
     """Serve the uploaded cover art (the M6c shelf shows books by cover)."""
     status_or_404(cfg, book_id)
     odir = cfg.output_dir / book_id
-    for name, ctype in _COVER_TYPES.items():
+    for name, ctype in COVER_TYPES.items():
         path = odir / name
         if path.is_file():
             return FileResponse(path, media_type=ctype)
@@ -608,7 +597,7 @@ def delete_cover(book_id: str, cfg: SettingsDep, store: StoreDep) -> None:
     status_or_404(cfg, book_id)
     _guard_master_active(store, book_id)
     odir = cfg.output_dir / book_id
-    for name in _COVER_TYPES:
+    for name in COVER_TYPES:
         (odir / name).unlink(missing_ok=True)
 
 
