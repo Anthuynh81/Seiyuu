@@ -231,17 +231,18 @@ def _synthesize_validated(
 
 
 def _manifest_merge_base(
-    book_output_dir: Path, *, book_id: str, subset: bool, multivoice: bool
+    book_output_dir: Path, *, book_id: str, wanted: set[int], total_chapters: int, multivoice: bool
 ) -> RenderManifest | None:
     """The existing manifest a chapter-SUBSET render must merge into (None → plain overwrite).
 
+    A subset is a non-empty ``wanted`` that does not cover all ``total_chapters`` (1-based).
     Full-book renders, and subset renders of a book with no manifest yet, keep the historical
     overwrite-wholesale behavior. A subset render over a prior manifest must NOT clobber it:
     chapters outside the subset would vanish from the render summary, Listen, and assembly
     even though their WAVs still sit in cache. A mode mismatch is refused HERE — before any
     synthesis — because a merged manifest cannot honestly describe both halves.
     """
-    if not subset:
+    if not wanted or wanted == set(range(1, total_chapters + 1)):
         return None
     manifest_path = Path(book_output_dir) / MANIFEST_NAME
     if not manifest_path.is_file():
@@ -325,21 +326,28 @@ def _check_multivoice_merge_identity(
         )
 
 
-def _merge_manifests(existing: RenderManifest, new: RenderManifest) -> RenderManifest:
+def _merge_manifests(
+    existing: RenderManifest, new: RenderManifest, *, total_chapters: int
+) -> RenderManifest:
     """Merge a chapter-subset render into the previous whole-book manifest.
 
     Newly rendered chapters replace their old entries by index; untouched chapters carry
-    over. Aggregates are recomputed over the MERGED chapter set: validation_failures from
-    the per-segment verdicts, voices_used as a union (new provenance wins on overlap).
-    Identity compatibility was enforced before synthesis started.
+    over — but only up to ``total_chapters``: a re-upload of the same file with different
+    split settings keeps the book_id yet can SHRINK the chapter set, leaving ghost entries
+    in the old manifest that must not survive the merge. Aggregates are recomputed over the
+    SURVIVING chapter set: validation_failures from the per-segment verdicts, voices_used
+    as a union restricted to voices a surviving segment actually used (new provenance wins
+    on overlap). Identity compatibility was enforced before synthesis started.
     """
-    by_index = {ch.index: ch for ch in existing.chapters}
+    by_index = {ch.index: ch for ch in existing.chapters if ch.index <= total_chapters}
     by_index.update((ch.index, ch) for ch in new.chapters)
     chapters = [by_index[i] for i in sorted(by_index)]
+    surviving_voices = {seg.voice_id for ch in chapters for seg in ch.segments if seg.voice_id}
+    merged_voices = {**existing.voices_used, **new.voices_used}
     return new.model_copy(
         update={
             "chapters": chapters,
-            "voices_used": {**existing.voices_used, **new.voices_used},
+            "voices_used": {v: use for v, use in merged_voices.items() if v in surviving_voices},
             "validation_failures": sum(
                 1
                 for chapter in chapters
@@ -430,7 +438,8 @@ def render_book(
     merge_base = _manifest_merge_base(
         book_output_dir,
         book_id=book.book_meta.book_id,
-        subset=bool(wanted) and wanted != set(range(1, len(book.chapters) + 1)),
+        wanted=wanted,
+        total_chapters=len(book.chapters),
         multivoice=False,
     )
     if merge_base is not None:
@@ -559,7 +568,7 @@ def render_book(
         validation_failures=validation_failures,
     )
     if merge_base is not None:
-        manifest = _merge_manifests(merge_base, manifest)
+        manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
     manifest_path = book_output_dir / MANIFEST_NAME
     atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(
@@ -624,7 +633,8 @@ def render_book_multivoice(
     merge_base = _manifest_merge_base(
         book_output_dir,
         book_id=book.book_meta.book_id,
-        subset=bool(wanted) and wanted != set(range(1, len(book.chapters) + 1)),
+        wanted=wanted,
+        total_chapters=len(book.chapters),
         multivoice=True,
     )
     if merge_base is not None:
@@ -813,7 +823,7 @@ def render_book_multivoice(
         validation_failures=validation_failures,
     )
     if merge_base is not None:
-        manifest = _merge_manifests(merge_base, manifest)
+        manifest = _merge_manifests(merge_base, manifest, total_chapters=len(book.chapters))
     manifest_path = book_output_dir / MANIFEST_NAME
     atomic_write_text(manifest_path, manifest.model_dump_json(indent=2))
     return RenderResult(

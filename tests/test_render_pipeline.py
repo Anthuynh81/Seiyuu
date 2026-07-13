@@ -4,7 +4,8 @@ import soundfile as sf
 from factories import make_book
 from fake_engine import FakeEngine
 from seiyuu.ingest.models import BlockType
-from seiyuu.render import MANIFEST_NAME, RenderError, RenderManifest, render_book
+from seiyuu.render import MANIFEST_NAME, RenderedChapter, RenderError, RenderManifest, render_book
+from seiyuu.validate import ValidationResult
 
 
 def test_render_full_book(tmp_path) -> None:
@@ -92,6 +93,36 @@ def test_subset_render_merges_into_existing_manifest(tmp_path) -> None:
     # re-rendering an already-merged chapter replaces its entry, never duplicates it
     again = render_book(make_book(), FakeEngine(), "test_voice", out, chapters=(1,))
     assert [c.index for c in again.manifest.chapters] == [1, 2]
+
+
+def test_subset_merge_drops_ghost_chapters_beyond_current_book(tmp_path) -> None:
+    # Re-uploading the same file with different split settings keeps the book_id but can
+    # SHRINK the chapter set; manifest entries beyond the current count are ghosts and must
+    # not be carried over — nor may their verdicts count toward the merged aggregates.
+    out = tmp_path / "book"
+    render_book(make_book(), FakeEngine(), "test_voice", out)
+    manifest_path = out / MANIFEST_NAME
+    manifest = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    ghost_seg = (
+        manifest.chapters[1]
+        .segments[1]
+        .model_copy(
+            update={
+                "block_id": "ch003_b0001",
+                "validation": ValidationResult(ok=False, score=0.1, transcript="x", expected="y"),
+            }
+        )
+    )
+    manifest.chapters.append(RenderedChapter(index=3, title="Ghost", segments=[ghost_seg]))
+    manifest.validation_failures = 1
+    manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+
+    result = render_book(make_book(), FakeEngine(), "test_voice", out, chapters=(1,))
+
+    assert [c.index for c in result.manifest.chapters] == [1, 2]  # ghost ch3 dropped
+    assert result.manifest.validation_failures == 0  # ghost's failed verdict not counted
+    loaded = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    assert loaded == result.manifest
 
 
 def test_full_render_still_overwrites_manifest(tmp_path) -> None:
