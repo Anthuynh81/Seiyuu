@@ -85,12 +85,26 @@ _SINGLE_FLOOR = 20
 
 @dataclass(frozen=True)
 class ConventionDetection:
-    """Book-level dialogue-convention verdict plus the run counts that justify it."""
+    """Book-level dialogue-convention verdict plus the run counts that justify it.
+
+    ``double_runs`` counts double runs OUTSIDE single-curly runs (see
+    :func:`detect_dialogue_convention`) — the count the verdict is actually judged on.
+    """
 
     convention: DialogueConvention
     double_runs: int
     single_curly_runs: int
     single_straight_runs: int
+
+    @property
+    def mixed_single_curly(self) -> bool:
+        """A DOUBLE verdict where the curly count ITSELF clears the floor: doubles dominate
+        so the splitter rightly stays on double quotes, but the book plausibly mixes in real
+        single-curly dialogue that will read as narration — worth a loud note, never silence.
+        """
+        return (
+            self.convention is DialogueConvention.DOUBLE and self.single_curly_runs >= _SINGLE_FLOOR
+        )
 
 
 def detect_dialogue_convention(text: str) -> ConventionDetection:
@@ -100,10 +114,17 @@ def detect_dialogue_convention(text: str) -> ConventionDetection:
     SINGLE_CURLY / SINGLE_STRAIGHT require guarded single runs to dominate doubles by
     ``_SINGLE_DOMINANCE_RATIO`` and clear ``_SINGLE_FLOOR``. UNKNOWN marks a book with zero
     double runs and a single-quote mix too scattered to classify either way.
+
+    Doubles are counted with single-curly runs removed first: UK books nest reported speech
+    in doubles (‘… “inner” …’ — deliberately kept inside the run by ``_SINGLE_CURLY_RUN``),
+    and counting those nested pairs inflated the double count enough to hide a genuine UK
+    book behind the dominance ratio. A real double book is unaffected: its decorative curly
+    runs are guarded, lazy, and close at the first guarded closer, so they contain doubles
+    only in the vanishingly rare literal ‘… "…" …’ shape.
     """
-    doubles = sum(1 for _ in _QUOTED_RUN.finditer(text))
     curly = sum(1 for _ in _SINGLE_CURLY_RUN.finditer(text))
     straight = sum(1 for _ in _SINGLE_STRAIGHT_RUN.finditer(text))
+    doubles = sum(1 for _ in _QUOTED_RUN.finditer(_SINGLE_CURLY_RUN.sub("", text)))
     if curly >= _SINGLE_FLOOR and curly > _SINGLE_DOMINANCE_RATIO * doubles:
         verdict = DialogueConvention.SINGLE_CURLY
     elif straight >= _SINGLE_FLOOR and straight > _SINGLE_DOMINANCE_RATIO * doubles:

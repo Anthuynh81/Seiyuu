@@ -68,6 +68,46 @@ def test_double_book_with_decorative_singles_stays_double():
     assert detect_dialogue_convention(text).convention is DialogueConvention.DOUBLE
 
 
+def test_single_curly_with_pervasive_nested_doubles_still_detected():
+    # ~15% of UK lines nesting reported speech in doubles used to inflate the double count
+    # (curly/doubles ≈ 6.7 < the dominance ratio) and silently flip the verdict to DOUBLE —
+    # the whole book then rendered as narration. Nested doubles live INSIDE the curly runs,
+    # so they must not count against the single-curly verdict.
+    lines = [
+        f"‘She said “nested {i}” to me, don’t you know,’ said Tom."
+        if i % 7 == 0
+        else f"‘Line {i} here, don’t you think,’ said Tom."
+        for i in range(40)
+    ]
+    detection = detect_dialogue_convention(" ".join(lines))
+    assert detection.convention is DialogueConvention.SINGLE_CURLY
+    assert detection.double_runs == 0  # all doubles were nested inside curly runs
+
+
+def test_double_book_with_curly_run_wrapping_a_double_stays_double():
+    # Symmetric guard: stripping curly runs before counting doubles must not eat enough of
+    # a real double book's dialogue to flip it (decorative runs close at the first guarded
+    # closer, so at most the rare literal ‘… "…" …’ shape loses its one nested double).
+    text = " ".join(f'"Line {i}," said Ann.' for i in range(50))
+    text += " The plaque read ‘as they say, “per aspera,”’ in brass."
+    detection = detect_dialogue_convention(text)
+    assert detection.convention is DialogueConvention.DOUBLE
+    assert detection.double_runs == 50
+
+
+def test_mixed_book_stays_double_but_flags_single_curly():
+    # Doubles dominate (verdict DOUBLE, splitter unchanged) but the curly count clears the
+    # floor on its own — the residual risk of missed single-curly dialogue must be flagged.
+    text = " ".join(f'"Line {i}," said Ann.' for i in range(60))
+    text += " " + " ".join(f"‘Aside {i} here, mind you,’ said Tom." for i in range(24))
+    detection = detect_dialogue_convention(text)
+    assert detection.convention is DialogueConvention.DOUBLE
+    assert detection.mixed_single_curly
+    # A handful of decorative singles (below the floor) never flags.
+    clean = detect_dialogue_convention(" ".join(f'"Line {i}," said Ann.' for i in range(60)))
+    assert not clean.mixed_single_curly
+
+
 def test_detects_single_straight_book():
     text = " ".join(f"'Line {i} here, don't stop,' said Tom." for i in range(25))
     assert detect_dialogue_convention(text).convention is DialogueConvention.SINGLE_STRAIGHT

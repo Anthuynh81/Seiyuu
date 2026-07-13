@@ -105,7 +105,8 @@ def _drop_superseded_notes(notes: list[str], merged_names: set[str]) -> list[str
 
 
 def _convention_note(detection: ConventionDetection) -> str:
-    """The registry_notes entry surfacing a non-DOUBLE dialogue convention.
+    """The registry_notes entry surfacing a non-DOUBLE dialogue convention (or a DOUBLE
+    verdict over a mixed book — ``mixed_single_curly``).
 
     The stable "dialogue convention:" prefix is what the CLI attribute command filters on to
     echo it; `seiyuu characters` and the API already print every registry note verbatim.
@@ -114,6 +115,12 @@ def _convention_note(detection: ConventionDetection) -> str:
         f"{detection.single_curly_runs} curly / {detection.single_straight_runs} straight "
         f"single-quote runs vs {detection.double_runs} double"
     )
+    if detection.convention is DialogueConvention.DOUBLE:
+        return (
+            f"dialogue convention: mixed quote conventions detected ({counts}); double "
+            "quotes dominate so the splitter stays on double-quote boundaries — "
+            "single-curly dialogue may be missed, review recommended"
+        )
     if detection.convention is DialogueConvention.SINGLE_CURLY:
         return (
             f"dialogue convention: single curly quotes (‘…’) detected ({counts}); "
@@ -214,7 +221,7 @@ def attribute_book(
     flagged: list[FlaggedBlock] = []
     out_chapters: list[AttributedChapter] = []
 
-    if detection.convention is not DialogueConvention.DOUBLE:
+    if detection.convention is not DialogueConvention.DOUBLE or detection.mixed_single_curly:
         note = _convention_note(detection)
         notes.append(note)
         say(note)
