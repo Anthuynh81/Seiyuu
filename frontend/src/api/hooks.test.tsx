@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { makeQueryClient, mockApi } from "../test/utils";
 import { ApiError } from "./client";
 import type { SegmentWordsClip } from "./hooks";
-import { useDeleteVoice, useSaveLexicon, useSegmentWords } from "./hooks";
+import { useDeleteVoice, useSaveLexicon, useSegmentWords, useSwitchRenderMode } from "./hooks";
 import type { LexiconEntry, LexiconSaved, SegmentWords } from "./types";
 
 function createWrapper() {
@@ -94,6 +94,27 @@ describe("useDeleteVoice", () => {
     expect(out).toEqual({ deleted: "v2" });
     expect(server.lastCall("DELETE", "/api/voices/v2")).toBeDefined();
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["voices"] });
+  });
+});
+
+describe("useSwitchRenderMode", () => {
+  it("POSTs the mode and invalidates every reader of the active manifest — including the exact keys Listen mounts", async () => {
+    const server = mockApi();
+    server.post("/api/books/b1/render/mode", { book_id: "b1", active_mode: "single" });
+    const { queryClient, Wrapper } = createWrapper();
+    // seed the precise key shapes Listen uses (useRenderSummary folds `rendered`, useSegments
+    // folds the chapter) so this fails if the prefix invalidation ever stops covering them
+    queryClient.setQueryData(["render-summary", "b1", true], { active_mode: "multi" });
+    queryClient.setQueryData(["segments", "b1", 1], { segments: [] });
+    const { result } = renderHook(() => useSwitchRenderMode("b1"), { wrapper: Wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync("single");
+    });
+
+    expect(server.jsonBodyOf("POST", "/api/books/b1/render/mode")).toEqual({ mode: "single" });
+    expect(queryClient.getQueryState(["render-summary", "b1", true])?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(["segments", "b1", 1])?.isInvalidated).toBe(true);
   });
 });
 

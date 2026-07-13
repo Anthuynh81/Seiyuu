@@ -2,6 +2,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 
 import { api, ApiError, postForm, postJson } from "./client";
 import type {
+  ArchivedRenderMode,
   AssignmentDraftResponse,
   AssignmentWrite,
   AttributionOut,
@@ -159,6 +160,27 @@ export function useValidation(bookId: string | null, rendered: boolean) {
     queryKey: ["validation", bookId],
     queryFn: () => api<ValidationReportOut>(`/api/books/${bookId}/validation`),
     enabled: bookId !== null && rendered,
+  });
+}
+
+/** Point manifest.json — the render truth Listen/assemble/master read — at the chosen mode's
+    archived render: an atomic pointer move on the server, no synthesis, no cache touch.
+    Invalidates every reader of the active manifest: the render summary (Render & Jobs AND
+    Listen's provenance/chapter list), the segment rows (has_audio/audio_key drive the
+    read-along; word timings are content-addressed by audio_key so they follow the refetch),
+    the validation report, and the book detail. A 409 conflicting_job (a render/assemble/
+    master job owns the manifest right now) surfaces as ApiError for the control to render. */
+export function useSwitchRenderMode(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: ArchivedRenderMode) =>
+      postJson<RenderSummaryOut>(`/api/books/${bookId}/render/mode`, { mode }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["render-summary", bookId] });
+      qc.invalidateQueries({ queryKey: ["segments", bookId] });
+      qc.invalidateQueries({ queryKey: ["validation", bookId] });
+      qc.invalidateQueries({ queryKey: ["book", bookId] });
+    },
   });
 }
 

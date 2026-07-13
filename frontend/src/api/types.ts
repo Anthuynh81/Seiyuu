@@ -164,6 +164,10 @@ export interface BookDetail {
 
 export type RenderMode = "multivoice" | "single";
 
+/** Per-mode manifest archive identity (manifest.single.json / manifest.multi.json). NOT the
+    render-request RenderMode: the request says "multivoice", the archives say "multi". */
+export type ArchivedRenderMode = "single" | "multi";
+
 export interface CostEstimateOut {
   total_usd: number;
   paid_segments: number;
@@ -207,6 +211,10 @@ export interface RenderSummaryOut {
   total_seconds: number;
   voices_used: Record<string, { engine: string; engine_model_version: string; kind: string }>;
   validation_failures: number;
+  /** which mode's archive manifest.json (everything above describes it) points at */
+  active_mode: ArchivedRenderMode;
+  /** modes with an activatable render on disk, canonical (single, multi) order */
+  available_modes: ArchivedRenderMode[];
 }
 
 export interface ValidationRow {
