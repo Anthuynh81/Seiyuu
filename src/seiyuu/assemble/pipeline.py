@@ -154,13 +154,32 @@ def _measure_loudness(wav_path: Path, target: LoudnessTarget) -> dict:
         "-af", f"{_loudnorm_filter(target)}:print_format=json",
         "-f", "null", "-",
     ]  # fmt: skip
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_ffmpeg_timeout(wav_path)
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssembleError(f"loudness measurement timed out for {wav_path.name}") from exc
     start, end = proc.stderr.rfind("{"), proc.stderr.rfind("}")
     if start == -1 or end == -1 or end < start:
         raise AssembleError(
             f"loudness measurement failed for {wav_path.name}: {proc.stderr.strip()[-400:]}"
         )
     return json.loads(proc.stderr[start : end + 1])
+
+
+def _ffmpeg_timeout(*inputs: Path) -> float:
+    """Hang guard, not a performance bound: a generous floor plus an ultra-conservative
+    per-byte rate, so a legitimate encode can never trip it while a wedged ffmpeg fails
+    the job loudly instead of pinning it in 'running' until a server restart. Cancel is
+    only checked between chapters, so this is the ONLY exit from a stuck subprocess."""
+    total = 0
+    for path in inputs:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return 600.0 + total / 200_000
 
 
 def _encode_mp3(
@@ -181,7 +200,13 @@ def _encode_mp3(
         "-f", "mp3",
         str(tmp),
     ]  # fmt: skip
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_ffmpeg_timeout(wav_path)
+        )
+    except subprocess.TimeoutExpired as exc:
+        tmp.unlink(missing_ok=True)
+        raise AssembleError(f"ffmpeg timed out encoding {mp3_path.name}") from exc
     if proc.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise AssembleError(f"ffmpeg failed for {mp3_path.name}: {proc.stderr.strip()}")
@@ -287,7 +312,13 @@ def _encode_m4b(
     # re-master that then fails. -f ipod: the MP4/iTunes audiobook muxer (chapters + cover).
     tmp = m4b_path.with_name(m4b_path.name + ".part")
     cmd += ["-c:a", "aac", "-b:a", bitrate, "-ar", str(sample_rate), "-f", "ipod", str(tmp)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_ffmpeg_timeout(book_wav)
+        )
+    except subprocess.TimeoutExpired as exc:
+        tmp.unlink(missing_ok=True)
+        raise AssembleError(f"ffmpeg timed out encoding {m4b_path.name}") from exc
     if proc.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise AssembleError(f"ffmpeg failed for {m4b_path.name}: {proc.stderr.strip()}")
