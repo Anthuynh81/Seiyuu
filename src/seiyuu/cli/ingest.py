@@ -104,7 +104,7 @@ def _convert_multivoice(
     hybrid: bool | None,
     confirm_cost: bool = False,
 ):
-    """convert --multivoice: attribute → auto-assign draft voices → multi-voice render."""
+    """convert --multivoice: attribute -> auto-assign draft voices -> multi-voice render."""
     from seiyuu.attribute import AttributionError
     from seiyuu.gpu import GpuBusyError
     from seiyuu.services import ServiceError, draft_assignment, run_attribution, save_assignment

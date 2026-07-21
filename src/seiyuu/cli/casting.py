@@ -100,7 +100,7 @@ def assign(
     output_dir: Path | None,
     voices_dir: Path | None,
 ) -> None:
-    """Build a character→voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
+    """Build a character->voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.gpu import GpuBusyError
     from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
