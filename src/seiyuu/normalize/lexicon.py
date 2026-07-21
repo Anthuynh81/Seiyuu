@@ -81,9 +81,7 @@ class CompiledLexicon:
         ordered = sorted(entries, key=lambda e: len(e.term), reverse=True)
         # Content identity for the normalize_text memo: two compiles of the same entries
         # must key identically, so the estimate/dry-run/verify/render walks all hit.
-        self._fingerprint = tuple(
-            (e.term, e.respelling, e.ipa, e.case_sensitive) for e in ordered
-        )
+        self._fingerprint = tuple((e.term, e.respelling, e.ipa, e.case_sensitive) for e in ordered)
         parts: list[str] = []
         self._respellings: list[str] = []
         self._ipas: list[str | None] = []
