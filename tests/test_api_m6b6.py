@@ -693,7 +693,9 @@ def test_route_surface_is_complete() -> None:
     # render-mode switch (per-mode manifests)
     assert ("/api/books/{book_id}/lexicon/suggest-respellings", "POST") in paths
     assert ("/api/books/{book_id}/render/mode", "POST") in paths  # per-mode active pointer
-    assert len(paths) == 64
+    # batch read-along timings: one manifest parse per chapter instead of one per clip
+    assert ("/api/books/{book_id}/chapters/{chapter}/words", "GET") in paths
+    assert len(paths) == 65
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
