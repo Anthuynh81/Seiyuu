@@ -823,4 +823,12 @@ describe("RenderJobs", () => {
     expect(screen.getByText("He drew the blade.")).toBeInTheDocument();
     expect(screen.getByText("He threw the blade.")).toBeInTheDocument();
   });
+
+  it("assembled-but-not-rendered (the post-reclone signature) shows the stale-audio banner", async () => {
+    // a voice re-clone drops the manifests (rendered flips false) but deliberately keeps
+    // the assembled mp3s/m4b — this banner is the loud-staleness half of that decision
+    mountRoutes(makeBook({ assembled: true, mastered: true }));
+    renderWithProviders(<RenderJobs />);
+    expect(await screen.findByText("audio predates a voice change")).toBeInTheDocument();
+  });
 });

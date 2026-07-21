@@ -33,6 +33,7 @@ import type {
 import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
 import { TalkSelect } from "../components/Select";
+import { StaleAudioBanner } from "../components/StaleAudio";
 import { Tip } from "../components/Tooltip";
 import { classifyRenderFailure } from "../lib/money";
 import { continueRange, scopeChapters, type Scope } from "../lib/scope";
@@ -747,6 +748,7 @@ export function RenderJobs() {
       </p>
       {book.isError && <div className="errline">{book.error.message}</div>}
       <StageRail status={status} activeJob={book.data?.active_job ?? null} />
+      <StaleAudioBanner status={status} />
       <div className="rjgrid">
         <div>
           <div className="modewrap">

@@ -5,6 +5,7 @@ import { useBook, useBooks, useRenderSummary, useSegments, useSegmentWords } fro
 import type { SegmentWordsClip } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
 import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
+import { StaleAudioBanner } from "../components/StaleAudio";
 import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
@@ -353,6 +354,7 @@ export function Listen() {
           )}
         </div>
       )}
+      <StaleAudioBanner status={book.data?.status} />
       {segments.isPending && <div className="loadline">setting the page…</div>}
       {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
       {segments.data && playableRows.length === 0 && (

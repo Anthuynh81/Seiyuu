@@ -217,6 +217,25 @@ def _manifest_uses_voice(manifest: RenderManifest, voice_id: str) -> bool:
     return any(seg.voice_id == voice_id for ch in manifest.chapters for seg in ch.segments)
 
 
+def _referencing_manifests(output_dir: Path, voice_id: str) -> dict[str, list[Path]]:
+    """book_id -> manifest paths (active pointer + mode archives) referencing ``voice_id``.
+    Read-only: the reclone_blocked 409 names these books BEFORE anything is deleted, so
+    the user consents to the actual blast radius; the post-purge invalidation then drops
+    exactly this set."""
+    hits: dict[str, list[Path]] = {}
+    if not output_dir.is_dir():
+        return hits
+    for book_dir in output_dir.iterdir():
+        for mpath in book_dir.glob("manifest*.json"):
+            try:
+                manifest = RenderManifest.model_validate_json(mpath.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # torn manifest: not provably this voice's — leave for review
+            if _manifest_uses_voice(manifest, voice_id):
+                hits.setdefault(book_dir.name, []).append(mpath)
+    return hits
+
+
 def _invalidate_voice_manifests(output_dir: Path, voice_id: str) -> list[str]:
     """Purge-on-reclone follow-through: with the voice's cache wavs gone, any manifest
     that references it claims a render that can no longer play or assemble (rendered=true
@@ -224,23 +243,13 @@ def _invalidate_voice_manifests(output_dir: Path, voice_id: str) -> list[str]:
     manifests — the active pointer AND the mode archives — so the books flip to
     un-rendered; the next render re-synthesizes only this voice's segments (other voices'
     cache entries survive the purge). Assembled mp3s/m4b keep the OLD voice until then —
-    deleting finished (possibly paid) audio is not this endpoint's call to make."""
-    affected: list[str] = []
-    if not output_dir.is_dir():
-        return affected
-    for book_dir in output_dir.iterdir():
-        dropped = False
-        for mpath in book_dir.glob("manifest*.json"):
-            try:
-                manifest = RenderManifest.model_validate_json(mpath.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue  # torn manifest: not provably this voice's — leave for review
-            if _manifest_uses_voice(manifest, voice_id):
-                mpath.unlink(missing_ok=True)
-                dropped = True
-        if dropped:
-            affected.append(book_dir.name)
-    return affected
+    deleting finished (possibly paid) audio is not this endpoint's call to make; the UI
+    surfaces the assembled-but-not-rendered signature as a staleness banner instead."""
+    hits = _referencing_manifests(output_dir, voice_id)
+    for paths in hits.values():
+        for mpath in paths:
+            mpath.unlink(missing_ok=True)
+    return sorted(hits)
 
 
 def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
@@ -328,13 +337,20 @@ def clone_voice(
         with request.app.state.voices_mutex:
             exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
             if exists and not replace:
+                # dry-run scan so the consent step names the actual blast radius
+                stale = sorted(_referencing_manifests(cfg.output_dir, vid))
+                flips = (
+                    f"; {len(stale)} rendered book(s) flip to un-rendered: {', '.join(stale)}"
+                    if stale
+                    else ""
+                )
                 raise ApiError(
                     409,
                     "reclone_blocked",
                     f"voice {vid!r} already exists; re-clone replaces its consent-attested "
-                    "reference audio — re-send with replace=true to confirm (cached "
-                    "segments for this voice are purged, books rendered with it flip to "
-                    "un-rendered, and paid segments re-bill)",
+                    f"reference audio — re-send with replace=true to confirm (cached "
+                    f"segments for this voice are purged and paid segments re-bill{flips})",
+                    detail={"stale_books": stale},
                 )
             if exists:
                 # a running render may be reading/writing exactly the cache files the

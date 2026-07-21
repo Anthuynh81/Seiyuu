@@ -944,6 +944,13 @@ def test_reclone_drops_manifests_referencing_voice(client) -> None:
     (bk1 / "manifest.single.json").write_text(single_other, encoding="utf-8")  # kept
     (bk2 / "manifest.json").write_text(by_segment, encoding="utf-8")  # per-segment ref -> dropped
 
+    # the consent 409 names the blast radius BEFORE anything is deleted
+    blocked = _clone(client, data=b"RIFF-new-take")
+    assert blocked.status_code == 409
+    assert _error(blocked)["detail"]["stale_books"] == ["bk1", "bk2"]
+    assert "2 rendered book(s) flip to un-rendered: bk1, bk2" in _error(blocked)["message"]
+    assert (bk1 / "manifest.json").exists()  # dry-run: nothing dropped yet
+
     assert _clone(client, data=b"RIFF-new-take", replace="true").status_code == 201
     assert not (bk1 / "manifest.json").exists()
     assert not (bk1 / "manifest.multi.json").exists()
