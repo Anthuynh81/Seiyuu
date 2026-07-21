@@ -10,6 +10,7 @@ Number/word expansion is identical across engines so there is one spoken-word re
 M4 whisper validation; only punctuation handling differs per profile.
 """
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from seiyuu.normalize.profiles import apply_profile, profile_for
@@ -26,7 +27,24 @@ def normalize_text(
     ``lexicon`` (F3), when given, is a pre-compiled per-book pronunciation matcher applied as
     a respell pass right after unicode cleanup. It is passed IN (never read from disk here) so
     this stays a pure, deterministic, fixture-testable function.
+
+    Results are memoized (bounded, in-process): one render click walks the same segments in
+    the estimate, the enqueue dry-run, the quote-consume verify, AND the render loop, so
+    identical (text, profile, lexicon-content) triples repeat thousands of times. The
+    lexicon participates by content fingerprint, so a recompile of the same entries hits.
     """
+    if lexicon:
+        return _normalize_lex(text, profile, lexicon)
+    return _normalize_plain(text, profile)
+
+
+@lru_cache(maxsize=32768)
+def _normalize_plain(text: str, profile: str) -> str:
+    return apply_profile(text, profile)
+
+
+@lru_cache(maxsize=32768)
+def _normalize_lex(text: str, profile: str, lexicon: "CompiledLexicon") -> str:
     return apply_profile(text, profile, lexicon=lexicon)
 
 
