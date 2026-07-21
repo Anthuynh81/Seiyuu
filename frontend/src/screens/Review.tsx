@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
@@ -521,6 +521,30 @@ export function Review() {
     const debut = chapterOfBlock(c.first_appearance);
     return debut !== null && debut > frontier;
   };
+  const cast = useMemo(() => overview.data?.characters ?? [], [overview.data]);
+  // Set-ified isMasked for the segment loop: the per-row `cast.some(...)` was
+  // O(segments × cast) on every render, and this screen re-renders on each live-jobs tick.
+  // (Hooks, so they live ABOVE the isPending/no-book early returns.)
+  const maskedIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!spoilerSafe) return ids;
+    for (const c of cast) {
+      if (revealed.has(c.id)) continue;
+      const debut = chapterOfBlock(c.first_appearance);
+      if (debut !== null && debut > frontier) ids.add(c.id);
+    }
+    return ids;
+  }, [cast, spoilerSafe, revealed, frontier]);
+  // Stable per-key handlers so the memoized SegmentPair rows skip re-rendering when
+  // nothing about THEM changed (fresh closures per row would defeat the memo).
+  const handleChip = useCallback((key: string) => {
+    setEmoAt(null);
+    setPopoverAt((cur) => (cur === key ? null : key));
+  }, []);
+  const handleEmotion = useCallback((key: string) => {
+    setPopoverAt(null);
+    setEmoAt((cur) => (cur === key ? null : key));
+  }, []);
 
   const jumpToLowConf = () => {
     const first = lowConfInChapter[0];
@@ -531,6 +555,7 @@ export function Review() {
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
+  if (books.isError) return <section className="screen"><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
     return (
       <section className="screen">
@@ -540,7 +565,6 @@ export function Review() {
     );
   }
 
-  const cast = overview.data?.characters ?? [];
   const warnings = segments.data?.edit_warnings ?? [];
   const flaggedHere = overview.data?.flagged.filter((f) => f.chapter_index === chapter) ?? [];
 
@@ -782,6 +806,7 @@ export function Review() {
                 </div>
               )}
               {overview.isPending && <div className="loadline p-3.5">reading the registry…</div>}
+              {overview.isError && <div className="errline p-3.5">{overview.error.message}</div>}
               <table>
                 <tbody>
                   <tr>
@@ -883,30 +908,25 @@ export function Review() {
                   {segments.data.segments.map((s) => {
                     const key = `${s.block_id}:${s.segment_index}`;
                     const low = isReviewable(s, threshold);
-                    const dimmed = spoilerSafe && s.speaker !== null && cast.some((c) => c.id === s.speaker && isMasked(c));
+                    const dimmed = s.speaker !== null && maskedIds.has(s.speaker);
                     const emotion = emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null;
                     return (
                       <SegmentPair
                         key={key}
+                        segKey={key}
                         row={s}
                         low={low}
                         maskedName={dimmed}
                         emotion={emotion}
                         open={popoverAt === key}
-                        onChip={() => {
-                          setEmoAt(null);
-                          setPopoverAt(popoverAt === key ? null : key);
-                        }}
+                        onChip={handleChip}
                         popover={
                           popoverAt === key ? (
                             <ReassignPopover row={s} cast={cast} bookId={bookId} onClose={() => setPopoverAt(null)} />
                           ) : null
                         }
                         emoOpen={emoAt === key}
-                        onEmotion={() => {
-                          setPopoverAt(null);
-                          setEmoAt(emoAt === key ? null : key);
-                        }}
+                        onEmotion={handleEmotion}
                         emotionPopover={
                           emoAt === key ? (
                             <EmotionPopover row={s} current={emotion} bookId={bookId} onClose={() => setEmoAt(null)} />
@@ -933,7 +953,8 @@ export function Review() {
   );
 }
 
-function SegmentPair({
+const SegmentPair = memo(function SegmentPair({
+  segKey,
   row,
   low,
   maskedName,
@@ -945,15 +966,16 @@ function SegmentPair({
   onEmotion,
   emotionPopover,
 }: {
+  segKey: string;
   row: SegmentRow;
   low: boolean;
   maskedName: boolean;
   emotion: EmotionVerdict | null;
   open: boolean;
-  onChip: () => void;
+  onChip: (key: string) => void;
   popover: React.ReactNode;
   emoOpen: boolean;
-  onEmotion: () => void;
+  onEmotion: (key: string) => void;
   emotionPopover: React.ReactNode;
 }) {
   const dialogueish = row.type !== "narration";
@@ -974,13 +996,13 @@ function SegmentPair({
         {popover}
       </p>
       <div className="margin relative">
-        <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={onChip} role="button" tabIndex={0}>
+        <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={() => onChip(segKey)} role="button" tabIndex={0}>
           {row.speaker === null ? chipLabel : chipLabel.toUpperCase()}
         </span>
         {emotion ? (
           <span
             className={`emochip ${emotion.label} ${emoOpen ? "on" : ""}`}
-            onClick={onEmotion}
+            onClick={() => onEmotion(segKey)}
             role="button"
             tabIndex={0}
             title="click to change or clear this line's emotion — voiced at render only when emotion rendering is enabled"
@@ -991,7 +1013,7 @@ function SegmentPair({
           dialogueish && (
             <button
               className="emoadd"
-              onClick={onEmotion}
+              onClick={() => onEmotion(segKey)}
               title="tag this line with an emotion (voiced at render when emotion rendering is on)"
             >
               + emotion
@@ -1006,4 +1028,4 @@ function SegmentPair({
       </div>
     </>
   );
-}
+});

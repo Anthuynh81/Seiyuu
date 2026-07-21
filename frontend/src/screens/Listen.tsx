@@ -261,6 +261,7 @@ export function Listen() {
 
   /* ---------------- shelf (no book chosen) ---------------- */
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
+  if (books.isError) return <section className="screen"><h1>Listen</h1><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
     return (
       <section className="screen">

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError } from "../api/client";
 import {
@@ -747,35 +747,45 @@ export function Voices() {
   const [sort, setSort] = useState<VoiceSort>("name");
 
   // auto-cast tags a voice with the book_id it was cast for — show the title instead
-  const titleFor = (tag: string) => books.data?.books.find((b) => b.book_id === tag)?.title ?? tag;
+  const titleFor = useCallback(
+    (tag: string) => books.data?.books.find((b) => b.book_id === tag)?.title ?? tag,
+    [books.data],
+  );
 
-  const all = voices.data?.voices ?? [];
-  const allTags = [...new Set(all.flatMap((v) => v.tags))].sort((a, b) =>
-    titleFor(a).localeCompare(titleFor(b)),
+  // Memoized: this screen re-renders on every 2s job poll (useBooks), and the tag-union +
+  // triple filter + sort chains over the whole library are pure functions of these inputs.
+  const all = useMemo(() => voices.data?.voices ?? [], [voices.data]);
+  const allTags = useMemo(
+    () => [...new Set(all.flatMap((v) => v.tags))].sort((a, b) => titleFor(a).localeCompare(titleFor(b))),
+    [all, titleFor],
   );
   const q = query.trim().toLowerCase();
-  const shown = all
-    .filter((v) => kindFilter === "all" || v.kind === kindFilter)
-    .filter((v) => tagFilter === null || v.tags.includes(tagFilter))
-    .filter(
-      (v) =>
-        !q ||
-        v.name.toLowerCase().includes(q) ||
-        v.voice_id.toLowerCase().includes(q) ||
-        v.tags.some((t) => titleFor(t).toLowerCase().includes(q)),
-    )
-    .sort((a, b) => {
-      switch (sort) {
-        case "newest":
-          return b.created_at.localeCompare(a.created_at) || a.name.localeCompare(b.name);
-        case "kind":
-          return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
-        case "engine":
-          return a.engine.localeCompare(b.engine) || a.name.localeCompare(b.name);
-        default:
-          return a.name.localeCompare(b.name);
-      }
-    });
+  const shown = useMemo(
+    () =>
+      all
+        .filter((v) => kindFilter === "all" || v.kind === kindFilter)
+        .filter((v) => tagFilter === null || v.tags.includes(tagFilter))
+        .filter(
+          (v) =>
+            !q ||
+            v.name.toLowerCase().includes(q) ||
+            v.voice_id.toLowerCase().includes(q) ||
+            v.tags.some((t) => titleFor(t).toLowerCase().includes(q)),
+        )
+        .sort((a, b) => {
+          switch (sort) {
+            case "newest":
+              return b.created_at.localeCompare(a.created_at) || a.name.localeCompare(b.name);
+            case "kind":
+              return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+            case "engine":
+              return a.engine.localeCompare(b.engine) || a.name.localeCompare(b.name);
+            default:
+              return a.name.localeCompare(b.name);
+          }
+        }),
+    [all, kindFilter, tagFilter, q, sort, titleFor],
+  );
 
   return (
     <section className="screen">

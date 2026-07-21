@@ -720,6 +720,7 @@ export function RenderJobs() {
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
+  if (books.isError) return <section className="screen"><h1>Render &amp; Jobs</h1><div className="errline">{books.error.message}</div></section>;
   if (!bookId || !books.data?.books.length) {
     return (
       <section className="screen">
@@ -744,6 +745,7 @@ export function RenderJobs() {
       <p className="sub">
         Free renders start with one click; paid work always shows its exact price first.
       </p>
+      {book.isError && <div className="errline">{book.error.message}</div>}
       <StageRail status={status} activeJob={book.data?.active_job ?? null} />
       <div className="rjgrid">
         <div>

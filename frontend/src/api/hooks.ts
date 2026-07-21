@@ -55,6 +55,9 @@ export function useLiveJobs() {
     queryKey: ["jobs", "live"],
     queryFn: () => api<JobsOut>("/api/jobs?state=queued&state=running"),
     refetchInterval: 2000,
+    // keep polling in hidden tabs: JobCompletionWatcher and the finish chain both clock
+    // off this poll, and "keep this page open" must not secretly mean "and visible"
+    refetchIntervalInBackground: true,
   });
 }
 
@@ -111,7 +114,7 @@ export function useBook(bookId: string | null) {
   // Stable key (see useBooks): invalidation-driven freshness instead of key churn.
   return useQuery({
     queryKey: ["book", bookId],
-    queryFn: () => api<BookDetail>(`/api/books/${bookId}`),
+    queryFn: ({ signal }) => api<BookDetail>(`/api/books/${bookId}`, { signal }),
     enabled: bookId !== null,
   });
 }
@@ -122,6 +125,7 @@ export function useBookJobs(bookId: string | null) {
     queryFn: () => api<JobsOut>(`/api/jobs?book_id=${encodeURIComponent(bookId!)}&limit=25`),
     enabled: bookId !== null,
     refetchInterval: 2500,
+    refetchIntervalInBackground: true, // the assemble->master finish chain advances on this poll
   });
 }
 
@@ -302,7 +306,10 @@ export function useCharacters(bookId: string | null, attributed: boolean) {
 export function useSegments(bookId: string | null, chapter: number, attributed: boolean) {
   return useQuery({
     queryKey: ["segments", bookId, chapter],
-    queryFn: () => api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`),
+    // signal: rapid chapter paging aborts the superseded fetch instead of letting the
+    // server finish a whole-chapter payload nobody will read
+    queryFn: ({ signal }) =>
+      api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`, { signal }),
     enabled: bookId !== null && attributed,
   });
 }
@@ -314,7 +321,8 @@ export function useSegments(bookId: string | null, chapter: number, attributed: 
 export function useChapterAttribution(bookId: string | null, chapter: number, attributed: boolean) {
   return useQuery({
     queryKey: ["attribution", bookId, chapter],
-    queryFn: () => api<AttributionOut>(`/api/books/${bookId}/attribution?chapters=${chapter}`),
+    queryFn: ({ signal }) =>
+      api<AttributionOut>(`/api/books/${bookId}/attribution?chapters=${chapter}`, { signal }),
     enabled: bookId !== null && attributed,
   });
 }
@@ -363,9 +371,11 @@ export function useSegmentWords(
   const clipsSig = resolvedSig(clips);
   const q = useQuery({
     queryKey: ["segment-words", bookId, chapter, clipsSig],
-    queryFn: async (): Promise<ChapterWordsOut | null> => {
+    queryFn: async ({ signal }): Promise<ChapterWordsOut | null> => {
       try {
-        return await api<ChapterWordsOut>(`/api/books/${bookId}/chapters/${chapter}/words`);
+        return await api<ChapterWordsOut>(`/api/books/${bookId}/chapters/${chapter}/words`, {
+          signal,
+        });
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) return null; // not rendered — interpolate
         throw e;
