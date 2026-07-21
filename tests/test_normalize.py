@@ -88,3 +88,24 @@ def test_roman_parser_rejects_non_numerals():
     assert roman_to_int("MCMLXXX4") is None
     assert roman_to_int("hello") is None
     assert roman_to_int("") is None
+
+
+def test_memoization_keys_on_lexicon_content() -> None:
+    # normalize_text is memoized; the lexicon participates by CONTENT fingerprint, so a
+    # recompile of the same entries hits while different entries can never collide.
+    from seiyuu.normalize.lexicon import BookLexicon, LexiconEntry, compile_lexicon
+
+    def lex(respelling: str):
+        return compile_lexicon(
+            BookLexicon(book_id="b", entries=[LexiconEntry(term="Xy", respelling=respelling)])
+        )
+
+    a, a2, b = lex("zed"), lex("zed"), lex("kew")
+    assert a == a2 and hash(a) == hash(a2)
+    assert a != b
+    assert "zed" in normalize_text("Xy said.", lexicon=a)
+    assert "kew" in normalize_text("Xy said.", lexicon=b)  # no cross-lexicon collision
+    assert "zed" in normalize_text("Xy said.", lexicon=a2)  # equal recompile still respells
+    # an empty lexicon is byte-identical to no lexicon
+    empty = compile_lexicon(BookLexicon(book_id="b", entries=[]))
+    assert normalize_text("Xy said.", lexicon=empty) == normalize_text("Xy said.")

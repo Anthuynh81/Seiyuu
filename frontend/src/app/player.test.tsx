@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "../test/utils";
 import { PlayerProvider } from "./player";
-import { usePlayer, type PlayClip, type PlayerApi } from "./usePlayer";
+import { usePlayer, usePlayerTime, type PlayClip, type PlayerApi } from "./usePlayer";
 
 /** jsdom's HTMLMediaElement never flips `paused` (the setup shims make play/pause safe
     no-ops), but toggle() branches on it — so mirror play/pause into a controllable
@@ -36,18 +36,21 @@ const clip = (src: string, duration: number): PlayClip => ({
 });
 
 /** Mount the real PlayerProvider (via the app's provider stack) and expose the live api
-    through a probe consumer; `holder.api` always reflects the latest render. */
-function renderPlayer(): { api: PlayerApi } {
-  const holder: { api?: PlayerApi } = {};
+    through a probe consumer; `holder.api`/`holder.time` always reflect the latest render
+    (clip-elapsed lives in its own PlayerTimeContext so timeupdates don't re-render every
+    player consumer). */
+function renderPlayer(): { api: PlayerApi; time: number } {
+  const holder: { api?: PlayerApi; time: number } = { time: 0 };
   function Probe() {
     const api = usePlayer();
     if (!api) throw new Error("usePlayer() returned null — PlayerProvider missing");
     holder.api = api;
+    holder.time = usePlayerTime();
     return null;
   }
   renderWithProviders(<Probe />);
   if (!holder.api) throw new Error("probe never rendered");
-  return holder as { api: PlayerApi };
+  return holder as { api: PlayerApi; time: number };
 }
 
 const absolute = (src: string) => new URL(src, window.location.href).href;
@@ -172,7 +175,7 @@ describe("PlayerProvider", () => {
 
     act(() => player.api.seekFraction(0.4));
     expect(player.api.index).toBe(1);
-    expect(player.api.clipElapsed).toBe(14);
+    expect(player.time).toBe(14);
     expect(audio.src).toBe(absolute("/audio/b.wav"));
 
     // the seek is gated on loadedmetadata (seeking an unloaded src is ignored)

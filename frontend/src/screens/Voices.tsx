@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError } from "../api/client";
 import {
@@ -27,6 +27,12 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
   const audition = useAudition(voice.voice_id);
   const warmup = useWarmup();
   const [playerOpen, setPlayerOpen] = useState(false);
+  // Cache-buster latched once per successful audition. Date.now() inline in the src
+  // would mint a new URL every parent re-render (the 2s job poll), restarting playback.
+  const [take, setTake] = useState(0);
+  useEffect(() => {
+    if (audition.isSuccess) setTake(Date.now());
+  }, [audition.isSuccess]);
   const err = audition.error instanceof ApiError ? audition.error : null;
 
   // gpu_busy_retry is a SOFT refusal: a render is lending the GPU between segments, so the
@@ -143,7 +149,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
         <audio
           controls
           autoPlay={audition.isSuccess}
-          src={`/api/voices/${voice.voice_id}/audition.wav?t=${audition.isSuccess ? Date.now() : 0}`}
+          src={`/api/voices/${voice.voice_id}/audition.wav?t=${take}`}
           className="mt-2 h-[30px] w-full"
         />
       )}
@@ -218,7 +224,7 @@ function NameRow({ voice }: { voice: VoiceOut }) {
       <h3 className="namerow">
         {voice.name}
         <button
-          className="rowedit ml-1.5"
+          className="rowedit visible ml-1.5"
           title="rename voice"
           aria-label="rename voice"
           onClick={() => {
@@ -741,35 +747,45 @@ export function Voices() {
   const [sort, setSort] = useState<VoiceSort>("name");
 
   // auto-cast tags a voice with the book_id it was cast for — show the title instead
-  const titleFor = (tag: string) => books.data?.books.find((b) => b.book_id === tag)?.title ?? tag;
+  const titleFor = useCallback(
+    (tag: string) => books.data?.books.find((b) => b.book_id === tag)?.title ?? tag,
+    [books.data],
+  );
 
-  const all = voices.data?.voices ?? [];
-  const allTags = [...new Set(all.flatMap((v) => v.tags))].sort((a, b) =>
-    titleFor(a).localeCompare(titleFor(b)),
+  // Memoized: this screen re-renders on every 2s job poll (useBooks), and the tag-union +
+  // triple filter + sort chains over the whole library are pure functions of these inputs.
+  const all = useMemo(() => voices.data?.voices ?? [], [voices.data]);
+  const allTags = useMemo(
+    () => [...new Set(all.flatMap((v) => v.tags))].sort((a, b) => titleFor(a).localeCompare(titleFor(b))),
+    [all, titleFor],
   );
   const q = query.trim().toLowerCase();
-  const shown = all
-    .filter((v) => kindFilter === "all" || v.kind === kindFilter)
-    .filter((v) => tagFilter === null || v.tags.includes(tagFilter))
-    .filter(
-      (v) =>
-        !q ||
-        v.name.toLowerCase().includes(q) ||
-        v.voice_id.toLowerCase().includes(q) ||
-        v.tags.some((t) => titleFor(t).toLowerCase().includes(q)),
-    )
-    .sort((a, b) => {
-      switch (sort) {
-        case "newest":
-          return b.created_at.localeCompare(a.created_at) || a.name.localeCompare(b.name);
-        case "kind":
-          return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
-        case "engine":
-          return a.engine.localeCompare(b.engine) || a.name.localeCompare(b.name);
-        default:
-          return a.name.localeCompare(b.name);
-      }
-    });
+  const shown = useMemo(
+    () =>
+      all
+        .filter((v) => kindFilter === "all" || v.kind === kindFilter)
+        .filter((v) => tagFilter === null || v.tags.includes(tagFilter))
+        .filter(
+          (v) =>
+            !q ||
+            v.name.toLowerCase().includes(q) ||
+            v.voice_id.toLowerCase().includes(q) ||
+            v.tags.some((t) => titleFor(t).toLowerCase().includes(q)),
+        )
+        .sort((a, b) => {
+          switch (sort) {
+            case "newest":
+              return b.created_at.localeCompare(a.created_at) || a.name.localeCompare(b.name);
+            case "kind":
+              return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+            case "engine":
+              return a.engine.localeCompare(b.engine) || a.name.localeCompare(b.name);
+            default:
+              return a.name.localeCompare(b.name);
+          }
+        }),
+    [all, kindFilter, tagFilter, q, sort, titleFor],
+  );
 
   return (
     <section className="screen">

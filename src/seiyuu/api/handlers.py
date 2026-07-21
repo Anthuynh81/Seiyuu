@@ -167,7 +167,7 @@ def build_handlers(
             eff_apply_emotion = effective_apply_emotion(cfg, params.apply_emotion)
             est_ctx = compute_estimate(
                 cfg, registry, book, book_id, mode=params.mode, chapters=chapters, single=single,
-                apply_emotion=params.apply_emotion,
+                apply_emotion=params.apply_emotion, force=params.force,
             )  # fmt: skip
             # The estimate walks every block (seconds on a big book): a cancel filed in
             # that window must land BEFORE consumption, or a job that synthesizes
@@ -224,6 +224,7 @@ def build_handlers(
                     # override, else the cfg default) — the verified quote authorizes exactly
                     # this emotion-folded bill.
                     apply_emotion=eff_apply_emotion,
+                    force=params.force,  # re-render: bypass cache HITs for in-scope chapters
                 )
             else:
                 render_book(
@@ -243,6 +244,7 @@ def build_handlers(
                     check_cancel=ctx.check_cancel,
                     broker=broker,  # lend the resident engine to auditions between segments
                     lexicon=lexicon,
+                    force=params.force,  # re-render: bypass cache HITs for in-scope chapters
                 )
 
     # assemble/master deliberately do NOT hold the heavy-work gate: they are pure

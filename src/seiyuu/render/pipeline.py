@@ -441,6 +441,7 @@ def render_book(
     check_cancel: Callable[[], None] | None = None,
     broker: "BorrowBroker | None" = None,
     lexicon: "CompiledLexicon | None" = None,
+    force: bool = False,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
 
@@ -545,7 +546,9 @@ def render_book(
                     seed=effective_seed,
                     normalized_text=text,
                 )
-                wav_path = cache.get(key)
+                # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
+                # same key_hash. In-scope only — the chapter-skip above already excludes the rest.
+                wav_path = None if force else cache.get(key)
                 if wav_path is not None:
                     cache_hits += 1
                     duration = sf.info(str(wav_path)).duration
@@ -664,6 +667,7 @@ def render_book_multivoice(
     broker: "BorrowBroker | None" = None,
     lexicon: "CompiledLexicon | None" = None,
     apply_emotion: bool = False,
+    force: bool = False,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -785,7 +789,9 @@ def render_book_multivoice(
                         seed=meta.seed,
                         normalized_text=text,
                     )
-                    wav_path = cache.get(key)
+                    # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
+                    # same key_hash. In-scope only — the chapter-skip above excludes the rest.
+                    wav_path = None if force else cache.get(key)
                     if wav_path is not None:
                         cache_hits += 1
                         duration = sf.info(str(wav_path)).duration
@@ -911,6 +917,7 @@ def estimate_render_cost(
     chapters: tuple[int, ...] = (),
     lexicon: "CompiledLexicon | None" = None,
     apply_emotion: bool = False,
+    force: bool = False,
 ) -> CostEstimate:
     """Pre-flight cost of a multi-voice render: USD over the segments that aren't already cached.
 
@@ -972,7 +979,9 @@ def estimate_render_cost(
                 cost = engine.cost_estimate(text)
                 if cost > 0:
                     paid_hashes.append(key.key_hash)  # paid identity, cached or not
-                if cache.get(key) is not None:
+                # force: price forced-in-scope segments as work (a HIT no longer discounts them),
+                # so the quote authorizes the paid re-synthesis. Fingerprint is unchanged above.
+                if not force and cache.get(key) is not None:
                     cached += 1
                     continue
                 if cost > 0:
@@ -1000,6 +1009,7 @@ def estimate_render_cost_single(
     chapters: tuple[int, ...] = (),
     library: VoiceLibrary | None = None,
     lexicon: "CompiledLexicon | None" = None,
+    force: bool = False,
 ) -> CostEstimate:
     """Pre-flight cost of a SINGLE-VOICE render (M6a) — the counterpart the M5 gate lacked,
     so a paid engine could be authorized with no estimate at all. Same loop and FROZEN
@@ -1035,7 +1045,8 @@ def estimate_render_cost_single(
             cost = engine.cost_estimate(text)
             if cost > 0:
                 paid_hashes.append(key.key_hash)
-            if cache.get(key) is not None:
+            # force: price forced-in-scope segments as work (see estimate_render_cost).
+            if not force and cache.get(key) is not None:
                 cached += 1
                 continue
             if cost > 0:

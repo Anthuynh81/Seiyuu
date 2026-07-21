@@ -26,7 +26,6 @@ export interface PlayerApi {
   index: number;
   clips: PlayClip[];
   playing: boolean;
-  clipElapsed: number;
   load: (bookId: string, chapterTitle: string, clips: PlayClip[], opts?: LoadOptions) => void;
   toggle: () => void;
   seekClip: (index: number, offset?: number) => void;
@@ -43,3 +42,10 @@ export interface PlayerApi {
 
 export const PlayerContext = createContext<PlayerApi | null>(null);
 export const usePlayer = () => useContext(PlayerContext);
+
+/** Seconds into the current clip, updated ~4×/s by `timeupdate` while playing. A SEPARATE
+    context so only the transport clock re-renders on every tick — with it folded into
+    PlayerApi, the whole Listen page (hundreds of segment rows) re-rendered 4×/s for the
+    entire listening session. */
+export const PlayerTimeContext = createContext(0);
+export const usePlayerTime = () => useContext(PlayerTimeContext);

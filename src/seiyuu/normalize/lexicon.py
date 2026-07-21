@@ -73,12 +73,15 @@ class CompiledLexicon:
     and passed into ``normalize_text`` so the pure function does no compilation or I/O per
     call. Empty lexicons compile to a no-op (``bool(compiled) is False``)."""
 
-    __slots__ = ("_regex", "_respellings", "_ipas")
+    __slots__ = ("_regex", "_respellings", "_ipas", "_fingerprint")
 
     def __init__(self, entries: Iterable[LexiconEntry]) -> None:
         # Longest term first: regex alternation is ordered (first alternative that matches at
         # a position wins), so this yields longest-match preference at every start position.
         ordered = sorted(entries, key=lambda e: len(e.term), reverse=True)
+        # Content identity for the normalize_text memo: two compiles of the same entries
+        # must key identically, so the estimate/dry-run/verify/render walks all hit.
+        self._fingerprint = tuple((e.term, e.respelling, e.ipa, e.case_sensitive) for e in ordered)
         parts: list[str] = []
         self._respellings: list[str] = []
         self._ipas: list[str | None] = []
@@ -93,6 +96,14 @@ class CompiledLexicon:
 
     def __bool__(self) -> bool:
         return self._regex is not None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CompiledLexicon):
+            return NotImplemented
+        return self._fingerprint == other._fingerprint
+
+    def __hash__(self) -> int:
+        return hash(self._fingerprint)
 
     def apply(self, text: str, *, profile: str) -> str:
         """Respell every lexicon term in ``text``. On the Kokoro profile an entry's IPA (if

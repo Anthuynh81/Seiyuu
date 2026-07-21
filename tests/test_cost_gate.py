@@ -193,6 +193,19 @@ def test_hash_assignment_binds_voice_changes():
     assert hash_assignment(changed) != a
 
 
+def test_hash_assignment_ignores_stage_and_created_at():
+    # A re-save / draft->final promote regenerates created_at (a today date) and may flip stage
+    # WITHOUT changing any voice — the hash must not move, or it would spuriously invalidate a
+    # cost quote and false-positive GET /render's rendered_assignment_hash staleness banner.
+    from seiyuu.voices import AssignmentStage
+
+    base = _assignment()
+    churned = base.model_copy(update={"stage": AssignmentStage.FINAL, "created_at": "1999-01-01"})
+    assert hash_assignment(churned) == hash_assignment(base)
+    # ...and the already-serialized dict form (the manifest snapshot) hashes identically too.
+    assert hash_assignment(churned.model_dump(mode="json")) == hash_assignment(base)
+
+
 # --- the CLI gate helper ---
 
 

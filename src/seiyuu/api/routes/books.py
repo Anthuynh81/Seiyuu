@@ -170,7 +170,7 @@ def ingest_book(
 
 @router.get("/books/{book_id}", response_model=BookDetail)
 def book_detail(book_id: str, cfg: SettingsDep, store: StoreDep) -> BookDetail:
-    status = status_or_404(cfg, book_id)
+    status = status_or_404(cfg, book_id, read_meta=True)  # BookDetail serializes title/authors
     chapters = None
     runtime = None
     if status.ingested:

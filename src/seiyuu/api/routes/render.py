@@ -21,6 +21,7 @@ from seiyuu.api.money import compute_estimate, gate_code, resolve_single
 from seiyuu.api.routes.common import load_book, status_or_404
 from seiyuu.api.schemas import (
     AssembleParams,
+    ChapterWordsOut,
     CostEstimateOut,
     JobOut,
     MasterParams,
@@ -42,6 +43,7 @@ from seiyuu.render.gate import (
     FULL_RENDER_CONFIRM_BLOCKS,
     CostGateError,
     CostQuote,
+    hash_assignment,
     quote_consumed,
     verify_quote,
 )
@@ -90,13 +92,15 @@ def _check_chapters(book: NormalizedBook, chapters: list[int]) -> tuple[int, ...
     return tuple(sorted(set(chapters)))
 
 
-def _estimate_or_http(cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None):
+def _estimate_or_http(
+    cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None, force=False
+):
     """compute_estimate with the read-path error mapping (422 unknown voice/engine;
     residual ServiceError = corrupt artifact -> 500; marker checks already ran)."""
     try:
         return compute_estimate(
             cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single,
-            apply_emotion=apply_emotion,
+            apply_emotion=apply_emotion, force=force,
         )  # fmt: skip
     except ValidationError as exc:
         # BEFORE ValueError (its superclass): a corrupt assignments.json is a server
@@ -180,6 +184,7 @@ def cost_estimate(
     speed: Annotated[float, Query(gt=0)] = 1.0,
     seed: int = 41172,
     apply_emotion: Annotated[bool | None, Query()] = None,  # F2b: None -> cfg default
+    force: Annotated[bool, Query()] = False,  # re-render: price cache HITs as billable work
 ) -> CostEstimateOut:
     """Pure read: exact frozen SegmentKeys vs the segment cache. No network, no GPU,
     no consent check, and NEVER the signing-key state."""
@@ -198,7 +203,7 @@ def cost_estimate(
     )
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=mode, chapters=wanted, single=single,
-        apply_emotion=apply_emotion,
+        apply_emotion=apply_emotion, force=force,
     )  # fmt: skip
     return CostEstimateOut(
         total_usd=ctx.est.total_usd,
@@ -231,7 +236,7 @@ def mint_quote(
     single = _resolve_single_or_422(cfg, body.single) if body.mode == "single" else None
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=body.mode, chapters=wanted, single=single,
-        apply_emotion=body.apply_emotion,
+        apply_emotion=body.apply_emotion, force=body.force,
     )  # fmt: skip
     if ctx.est.total_usd <= 0:
         raise ApiError(
@@ -319,7 +324,7 @@ def render_job(
     single = _resolve_single_or_422(cfg, params.single) if params.mode == "single" else None
     ctx = _estimate_or_http(
         cfg, registry, book, book_id, mode=params.mode, chapters=wanted, single=single,
-        apply_emotion=params.apply_emotion,
+        apply_emotion=params.apply_emotion, force=params.force,
     )  # fmt: skip
     _preflight_renderability(cfg, params.mode, single, ctx, book_id)
     if ctx.est.total_usd > 0:
@@ -496,6 +501,9 @@ def render_summary(book_id: str, cfg: SettingsDep) -> RenderSummaryOut:
         },
         validation_failures=manifest.validation_failures,
         assignment_present=manifest.assignment is not None,
+        rendered_assignment_hash=(
+            hash_assignment(manifest.assignment) if manifest.assignment is not None else None
+        ),
         active_mode=active_mode,
         available_modes=available_render_modes(cfg.output_dir / book_id, active_mode=active_mode),
     )
@@ -651,3 +659,37 @@ def segment_words(
         raise ApiError(
             500, "alignment_failed", f"forced alignment failed for {block_id!r}[{segment}]: {exc}"
         ) from exc
+
+
+@router.get("/books/{book_id}/chapters/{chapter}/words", response_model=ChapterWordsOut)
+def chapter_words(
+    book_id: str, chapter: int, cfg: SettingsDep, aligner: AlignerDep
+) -> ChapterWordsOut:
+    """Batch F2 word timings: every audio-bearing segment of one chapter from ONE manifest
+    parse. Opening a chapter in Listen used to fire a /segments/{block}/words request per
+    clip, each re-parsing the full manifest server-side — ~100 parses for a 100-block
+    chapter. Clips whose wav is missing on disk or whose alignment fails are OMITTED (the
+    client keeps its length-interpolated fallback for them, mirroring the per-clip 404
+    path); the per-clip endpoint stays for spot lookups and compatibility."""
+    status = status_or_404(cfg, book_id)
+    manifest = _manifest_or_http(cfg, book_id, status)
+    ch = next((c for c in manifest.chapters if c.index == chapter), None)
+    if ch is None:
+        raise ApiError(404, "not_found", f"chapter {chapter} has no rendered audio")
+    book_output_dir = (cfg.output_dir / book_id).resolve()
+    validator, lock = aligner
+    words: dict[str, SegmentWords] = {}
+    ordinal: dict[str, int] = {}  # per-block segment index, matching /audio's counting
+    for seg in ch.segments:
+        idx = ordinal.get(seg.block_id, 0)
+        ordinal[seg.block_id] = idx + 1
+        if not seg.wav:
+            continue
+        wav = (book_output_dir / seg.wav).resolve()
+        if not wav.is_file() or not wav.is_relative_to(book_output_dir):
+            continue
+        try:
+            words[f"{seg.block_id}:{idx}"] = ensure_words(wav, validator, lock)
+        except ValidationErrorType:
+            continue  # alignment failure degrades that clip to interpolation, not the page
+    return ChapterWordsOut(book_id=book_id, chapter=chapter, words=words)

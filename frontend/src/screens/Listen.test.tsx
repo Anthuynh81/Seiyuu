@@ -54,6 +54,7 @@ const summary: RenderSummaryOut = {
   total_seconds: 120,
   voices_used: { "v-narr": { engine: "kokoro", engine_model_version: "1.0", kind: "preset" } },
   validation_failures: 0,
+  rendered_assignment_hash: null,
   active_mode: "multi",
   available_modes: ["multi"],
 };
@@ -100,8 +101,8 @@ function serveBook() {
     .get("/api/books/b1/render", summary)
     .get("/api/books/b1/chapters/1/segments", ch1)
     .get("/api/books/b1/chapters/2/segments", ch2)
-    .error("GET", "/api/books/b1/segments/blk1/words?segment=0", 404, "not_found", "no word timings")
-    .error("GET", "/api/books/b1/segments/blk2/words?segment=0", 404, "not_found", "no word timings");
+    .error("GET", "/api/books/b1/chapters/1/words", 404, "not_found", "no word timings")
+    .error("GET", "/api/books/b1/chapters/2/words", 404, "not_found", "no word timings");
 }
 
 /** The reader hands clips to the player context; TransportBar (mounted the way main.tsx does)
@@ -198,7 +199,11 @@ describe("Listen", () => {
       audio_duration: 90,
       source: "whisper",
     };
-    server.get("/api/books/b1/segments/blk1/words?segment=0", whisper); // overrides the 404 default
+    server.get("/api/books/b1/chapters/1/words", {
+      book_id: "b1",
+      chapter: 1,
+      words: { "blk1:0": whisper },
+    }); // overrides the 404 default
     renderListen();
 
     await screen.findByRole("button", { name: "play/pause" });
@@ -218,7 +223,7 @@ describe("Listen", () => {
     renderListen();
 
     await screen.findByRole("button", { name: "play/pause" });
-    await waitFor(() => expect(server.lastCall("GET", "words?segment=0")).toBeDefined());
+    await waitFor(() => expect(server.lastCall("GET", "chapters/1/words")).toBeDefined());
     // the reader stays intact — no refusal banner of either flavor
     expect(screen.queryByText(/not attributed/)).not.toBeInTheDocument();
     expect(screen.queryByText(/no audio yet/)).not.toBeInTheDocument();

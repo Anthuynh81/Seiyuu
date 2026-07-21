@@ -4,7 +4,7 @@ import { useCancelJob, useLiveJobs } from "../api/hooks";
 import type { JobOut } from "../api/types";
 import { TalkSlider } from "../components/Slider";
 import { Tip } from "../components/Tooltip";
-import { usePlayer } from "./usePlayer";
+import { usePlayer, usePlayerTime } from "./usePlayer";
 
 function ledFor(job: JobOut): string {
   if (job.state === "running") return job.cancel_requested ? "cxl" : "run";
@@ -18,9 +18,10 @@ const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
 
 function AudioTransport() {
   const player = usePlayer()!;
+  const clipElapsed = usePlayerTime();
   const total = player.totalDuration;
   const before = player.clips.slice(0, player.index).reduce((a, c) => a + c.duration, 0);
-  const elapsed = before + player.clipElapsed;
+  const elapsed = before + clipElapsed;
   const clip = player.clips[player.index];
   return (
     <div className="transport">

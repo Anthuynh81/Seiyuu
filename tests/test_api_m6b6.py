@@ -693,7 +693,9 @@ def test_route_surface_is_complete() -> None:
     # render-mode switch (per-mode manifests)
     assert ("/api/books/{book_id}/lexicon/suggest-respellings", "POST") in paths
     assert ("/api/books/{book_id}/render/mode", "POST") in paths  # per-mode active pointer
-    assert len(paths) == 64
+    # batch read-along timings: one manifest parse per chapter instead of one per clip
+    assert ("/api/books/{book_id}/chapters/{chapter}/words", "GET") in paths
+    assert len(paths) == 65
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
@@ -874,3 +876,83 @@ def test_cover_writes_refused_while_master_live(client) -> None:
     assert client.delete("/api/books/bk/cover").status_code == 409
     client.app.state.store.request_cancel(job.job_id)
     assert client.delete("/api/books/bk/cover").status_code == 204
+
+
+def test_replace_clone_and_delete_refused_while_assemble_live(client) -> None:
+    # Assemble (and master) stream the same cache wavs the purge deletes — the guard
+    # must refuse on them exactly as it does on a live render, or the purge yanks
+    # files out from under a mid-run chapter mix.
+    assert _clone(client).status_code == 201
+    store: JobStore = client.app.state.store
+    assemble = store.create("some-book", "assemble")
+
+    blocked = _clone(client, data=b"RIFF-new", replace="true")
+    assert blocked.status_code == 409
+    assert _error(blocked)["code"] == "render_active"
+    assert "assemble" in _error(blocked)["message"]
+    assert _error(blocked)["detail"]["job_id"] == assemble.job_id
+
+    deleted = client.delete("/api/voices/clone1")
+    assert deleted.status_code == 409
+
+    store.request_cancel(assemble.job_id)
+    assert _clone(client, data=b"RIFF-new", replace="true").status_code == 201
+
+
+def test_reclone_drops_manifests_referencing_voice(client) -> None:
+    # Purge-on-reclone follow-through: with clone1's cache wavs purged, any manifest
+    # referencing it claims a render that can no longer play or assemble — those books
+    # must flip to un-rendered instead of 404ing at playback / dying at assembly.
+    assert _clone(client).status_code == 201
+    cfg = client.app.state.settings
+
+    uses = {"engine": "chatterbox", "engine_model_version": "v1", "kind": "cloned"}
+    multi = json.dumps({"book_id": "bk1", "chapters": [], "voices_used": {"clone1": uses}})
+    single_other = json.dumps(
+        {
+            "book_id": "bk1",
+            "engine": "kokoro",
+            "engine_model_version": "v1",
+            "voice_id": "other",
+            "chapters": [],
+        }
+    )
+    by_segment = json.dumps(
+        {
+            "book_id": "bk2",
+            "chapters": [
+                {
+                    "index": 1,
+                    "title": "One",
+                    "segments": [
+                        {
+                            "block_id": "b1",
+                            "type": "paragraph",
+                            "wav": "cache/x.wav",
+                            "voice_id": "clone1",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    bk1, bk2 = cfg.output_dir / "bk1", cfg.output_dir / "bk2"
+    bk1.mkdir(parents=True)
+    bk2.mkdir(parents=True)
+    (bk1 / "manifest.json").write_text(multi, encoding="utf-8")  # active ref -> dropped
+    (bk1 / "manifest.multi.json").write_text(multi, encoding="utf-8")  # archive ref -> dropped
+    (bk1 / "manifest.single.json").write_text(single_other, encoding="utf-8")  # kept
+    (bk2 / "manifest.json").write_text(by_segment, encoding="utf-8")  # per-segment ref -> dropped
+
+    # the consent 409 names the blast radius BEFORE anything is deleted
+    blocked = _clone(client, data=b"RIFF-new-take")
+    assert blocked.status_code == 409
+    assert _error(blocked)["detail"]["stale_books"] == ["bk1", "bk2"]
+    assert "2 rendered book(s) flip to un-rendered: bk1, bk2" in _error(blocked)["message"]
+    assert (bk1 / "manifest.json").exists()  # dry-run: nothing dropped yet
+
+    assert _clone(client, data=b"RIFF-new-take", replace="true").status_code == 201
+    assert not (bk1 / "manifest.json").exists()
+    assert not (bk1 / "manifest.multi.json").exists()
+    assert (bk1 / "manifest.single.json").exists()  # other voice's render survives
+    assert not (bk2 / "manifest.json").exists()

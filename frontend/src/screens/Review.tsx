@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
@@ -23,7 +23,7 @@ import { chapterOfBlock } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
-import { castingDiffers, castingFromServer, type CastingState } from "../lib/casting";
+import { castingDiffers, castingFromServer, castingVoicesDiffer, type CastingState } from "../lib/casting";
 import { buildEmotionMap, EMOTION_LABELS, emotionKey, intensityDots } from "../lib/emotion";
 
 /** TalkSelect keys are strings; this sentinel stands in for "no voice / narration". */
@@ -40,6 +40,11 @@ const isReviewable = (s: SegmentRow, threshold: number) =>
 function useFrontier(bookId: string | null): [number, (n: number) => void] {
   const key = `seiyuu.frontier.${bookId}`;
   const [value, setValue] = useState(() => Number(localStorage.getItem(key)) || 1);
+  // The initializer runs once per mount; on a book switch re-read the NEW book's frontier
+  // (otherwise book A's frontier unmasks book B's late-debut characters — spoiler leak).
+  useEffect(() => {
+    setValue(Number(localStorage.getItem(key)) || 1);
+  }, [key]);
   return [
     value,
     (n: number) => {
@@ -452,6 +457,12 @@ export function Review() {
     () => (assignment.data && casting ? castingDiffers(assignment.data, casting) : false),
     [assignment.data, casting],
   );
+  // A voice-changing save on a rendered book makes the audio stale. Tracked (not derived from
+  // saveCast.isSuccess) so a stage-only draft->final save never claims the audio is stale, and
+  // set-true-only so a later stage-only save can't clear a still-pending voice change. Cleared on
+  // book switch (the ?book= param), since staleness is per-book.
+  const [staleAfterSave, setStaleAfterSave] = useState(false);
+  useEffect(() => setStaleAfterSave(false), [bookId]);
 
   // tag filter for the voice pickers: AND semantics, narrows every picker in the roster.
   // The assigned voice always stays visible (VoicePicker falls back to the full pool).
@@ -481,6 +492,11 @@ export function Review() {
   // Front matter (title page, copyright) is often chapter 1 and never attributed —
   // skip forward once instead of opening the screen on a 404.
   const autoSkipped = useRef(false);
+  // Chapter position and the one-shot front-matter skip are per-book state.
+  useEffect(() => {
+    setChapter(1);
+    autoSkipped.current = false;
+  }, [bookId]);
   useEffect(() => {
     if (
       !autoSkipped.current &&
@@ -505,6 +521,30 @@ export function Review() {
     const debut = chapterOfBlock(c.first_appearance);
     return debut !== null && debut > frontier;
   };
+  const cast = useMemo(() => overview.data?.characters ?? [], [overview.data]);
+  // Set-ified isMasked for the segment loop: the per-row `cast.some(...)` was
+  // O(segments × cast) on every render, and this screen re-renders on each live-jobs tick.
+  // (Hooks, so they live ABOVE the isPending/no-book early returns.)
+  const maskedIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!spoilerSafe) return ids;
+    for (const c of cast) {
+      if (revealed.has(c.id)) continue;
+      const debut = chapterOfBlock(c.first_appearance);
+      if (debut !== null && debut > frontier) ids.add(c.id);
+    }
+    return ids;
+  }, [cast, spoilerSafe, revealed, frontier]);
+  // Stable per-key handlers so the memoized SegmentPair rows skip re-rendering when
+  // nothing about THEM changed (fresh closures per row would defeat the memo).
+  const handleChip = useCallback((key: string) => {
+    setEmoAt(null);
+    setPopoverAt((cur) => (cur === key ? null : key));
+  }, []);
+  const handleEmotion = useCallback((key: string) => {
+    setPopoverAt(null);
+    setEmoAt((cur) => (cur === key ? null : key));
+  }, []);
 
   const jumpToLowConf = () => {
     const first = lowConfInChapter[0];
@@ -515,6 +555,7 @@ export function Review() {
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
+  if (books.isError) return <section className="screen"><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
     return (
       <section className="screen">
@@ -524,7 +565,6 @@ export function Review() {
     );
   }
 
-  const cast = overview.data?.characters ?? [];
   const warnings = segments.data?.edit_warnings ?? [];
   const flaggedHere = overview.data?.flagged.filter((f) => f.chapter_index === chapter) ?? [];
 
@@ -664,14 +704,22 @@ export function Review() {
                     <button
                       className="key px-3 py-[3px]"
                       disabled={!castingDirty || saveCast.isPending}
-                      onClick={() =>
-                        saveCast.mutate({
-                          stage: casting.stage,
-                          narrator_voice_id: casting.narrator,
-                          assignments: casting.map,
-                          thought_voice_id: casting.thought,
-                        })
-                      }
+                      onClick={() => {
+                        // capture BEFORE the save overwrites the server copy: did the voices
+                        // actually change (vs a stage-only edit)? Only that makes audio stale.
+                        const voicesChanged = assignment.data
+                          ? castingVoicesDiffer(assignment.data, casting)
+                          : true;
+                        saveCast.mutate(
+                          {
+                            stage: casting.stage,
+                            narrator_voice_id: casting.narrator,
+                            assignments: casting.map,
+                            thought_voice_id: casting.thought,
+                          },
+                          { onSuccess: () => voicesChanged && setStaleAfterSave(true) },
+                        );
+                      }}
                     >
                       {saveCast.isPending ? "saving…" : castingDirty ? "save casting" : "saved ✓"}
                     </button>
@@ -746,7 +794,19 @@ export function Review() {
                   <p>{(draftCast.error ?? saveCast.error)?.message}</p>
                 </div>
               )}
+              {staleAfterSave && !castingDirty && book.data?.status.rendered && (
+                <div className="caststrip flex-wrap gap-2 text-[11px]">
+                  <span className="tag">audio is stale</span>
+                  <span className="mono text-ink-2">
+                    voices changed — the rendered audio still uses the old ones.
+                  </span>
+                  <Link className="link" to={`/render?book=${encodeURIComponent(bookId)}`}>
+                    re-render in Render &amp; Jobs →
+                  </Link>
+                </div>
+              )}
               {overview.isPending && <div className="loadline p-3.5">reading the registry…</div>}
+              {overview.isError && <div className="errline p-3.5">{overview.error.message}</div>}
               <table>
                 <tbody>
                   <tr>
@@ -848,30 +908,25 @@ export function Review() {
                   {segments.data.segments.map((s) => {
                     const key = `${s.block_id}:${s.segment_index}`;
                     const low = isReviewable(s, threshold);
-                    const dimmed = spoilerSafe && s.speaker !== null && cast.some((c) => c.id === s.speaker && isMasked(c));
+                    const dimmed = s.speaker !== null && maskedIds.has(s.speaker);
                     const emotion = emotionMap.get(emotionKey(s.block_id, s.segment_index)) ?? null;
                     return (
                       <SegmentPair
                         key={key}
+                        segKey={key}
                         row={s}
                         low={low}
                         maskedName={dimmed}
                         emotion={emotion}
                         open={popoverAt === key}
-                        onChip={() => {
-                          setEmoAt(null);
-                          setPopoverAt(popoverAt === key ? null : key);
-                        }}
+                        onChip={handleChip}
                         popover={
                           popoverAt === key ? (
                             <ReassignPopover row={s} cast={cast} bookId={bookId} onClose={() => setPopoverAt(null)} />
                           ) : null
                         }
                         emoOpen={emoAt === key}
-                        onEmotion={() => {
-                          setPopoverAt(null);
-                          setEmoAt(emoAt === key ? null : key);
-                        }}
+                        onEmotion={handleEmotion}
                         emotionPopover={
                           emoAt === key ? (
                             <EmotionPopover row={s} current={emotion} bookId={bookId} onClose={() => setEmoAt(null)} />
@@ -898,7 +953,8 @@ export function Review() {
   );
 }
 
-function SegmentPair({
+const SegmentPair = memo(function SegmentPair({
+  segKey,
   row,
   low,
   maskedName,
@@ -910,15 +966,16 @@ function SegmentPair({
   onEmotion,
   emotionPopover,
 }: {
+  segKey: string;
   row: SegmentRow;
   low: boolean;
   maskedName: boolean;
   emotion: EmotionVerdict | null;
   open: boolean;
-  onChip: () => void;
+  onChip: (key: string) => void;
   popover: React.ReactNode;
   emoOpen: boolean;
-  onEmotion: () => void;
+  onEmotion: (key: string) => void;
   emotionPopover: React.ReactNode;
 }) {
   const dialogueish = row.type !== "narration";
@@ -939,13 +996,13 @@ function SegmentPair({
         {popover}
       </p>
       <div className="margin relative">
-        <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={onChip} role="button" tabIndex={0}>
+        <span className={`chip ${row.speaker === null ? "narr" : ""}`} onClick={() => onChip(segKey)} role="button" tabIndex={0}>
           {row.speaker === null ? chipLabel : chipLabel.toUpperCase()}
         </span>
         {emotion ? (
           <span
             className={`emochip ${emotion.label} ${emoOpen ? "on" : ""}`}
-            onClick={onEmotion}
+            onClick={() => onEmotion(segKey)}
             role="button"
             tabIndex={0}
             title="click to change or clear this line's emotion — voiced at render only when emotion rendering is enabled"
@@ -956,7 +1013,7 @@ function SegmentPair({
           dialogueish && (
             <button
               className="emoadd"
-              onClick={onEmotion}
+              onClick={() => onEmotion(segKey)}
               title="tag this line with an emotion (voiced at render when emotion rendering is on)"
             >
               + emotion
@@ -971,4 +1028,4 @@ function SegmentPair({
       </div>
     </>
   );
-}
+});

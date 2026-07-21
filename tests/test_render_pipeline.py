@@ -63,6 +63,30 @@ def test_changed_seed_misses_cache(tmp_path) -> None:
     assert len(second.calls) == 5
 
 
+def test_force_rerender_bypasses_cache(tmp_path) -> None:
+    # force re-synthesizes even a byte-identical cache HIT (the whole point of a re-render):
+    # same voice/seed/text that would normally be 5 hits become 5 fresh syntheses.
+    render_book(make_book(), FakeEngine(), "test_voice", tmp_path / "book")
+    second = FakeEngine()
+    result = render_book(make_book(), second, "test_voice", tmp_path / "book", force=True)
+    assert len(second.calls) == 5
+    assert result.synthesized == 5
+    assert result.cache_hits == 0
+
+
+def test_force_rerender_scoped_to_in_scope_chapters_only(tmp_path) -> None:
+    # force + a chapter subset re-synthesizes ONLY that chapter; the untouched chapters are
+    # carried over from the existing same-mode manifest, not re-rendered.
+    render_book(make_book(), FakeEngine(), "test_voice", tmp_path / "book")
+    second = FakeEngine()
+    result = render_book(
+        make_book(), second, "test_voice", tmp_path / "book", chapters=(2,), force=True
+    )
+    assert len(second.calls) == 2  # only chapter 2's speakable blocks
+    assert result.synthesized == 2
+    assert [c.index for c in result.manifest.chapters] == [1, 2]  # ch1 merged from the archive
+
+
 def test_chapter_subset(tmp_path) -> None:
     engine = FakeEngine()
     result = render_book(make_book(), engine, "test_voice", tmp_path / "book", chapters=(2,))

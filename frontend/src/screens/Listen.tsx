@@ -5,6 +5,7 @@ import { useBook, useBooks, useRenderSummary, useSegments, useSegmentWords } fro
 import type { SegmentWordsClip } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
 import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
+import { StaleAudioBanner } from "../components/StaleAudio";
 import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
@@ -68,6 +69,13 @@ export function Listen() {
   const renderedChapters = useMemo(() => new Set(summary.data?.chapters.map((c) => c.index) ?? []), [summary.data]);
 
   const [chapter, setChapterRaw] = useState<number | null>(null);
+  // Chapter is per-book; without this a shelf switch resumes at the OLD book's number.
+  useEffect(() => setChapterRaw(null), [bookId]);
+  // Latch the deep-link default ONCE. Deriving it live means a ch-1 render landing
+  // mid-listen changes chapters[0] and yanks playback to chapter 1.
+  useEffect(() => {
+    if (chapter === null && summary.data?.chapters[0]) setChapterRaw(summary.data.chapters[0].index);
+  }, [summary.data, chapter]);
   const effectiveChapter = chapter ?? summary.data?.chapters[0]?.index ?? 1;
   const segments = useSegments(bookId, effectiveChapter, rendered);
 
@@ -111,7 +119,7 @@ export function Listen() {
       }),
     [playableRows],
   );
-  const words = useSegmentWords(bookId, wordClips);
+  const words = useSegmentWords(bookId, effectiveChapter, wordClips);
 
   // built clip structure (span elements + per-row token counts) so whisper timings can be
   // applied onto the EXISTING spans without a player.load() that would interrupt playback
@@ -254,6 +262,7 @@ export function Listen() {
 
   /* ---------------- shelf (no book chosen) ---------------- */
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
+  if (books.isError) return <section className="screen"><h1>Listen</h1><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
     return (
       <section className="screen">
@@ -345,6 +354,7 @@ export function Listen() {
           )}
         </div>
       )}
+      <StaleAudioBanner status={book.data?.status} />
       {segments.isPending && <div className="loadline">setting the page…</div>}
       {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
       {segments.data && playableRows.length === 0 && (

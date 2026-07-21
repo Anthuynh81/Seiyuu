@@ -48,6 +48,7 @@ from seiyuu.api.schemas import (
 from seiyuu.engines import SynthesisError, get_engine_class, list_engine_ids
 from seiyuu.gpu import GpuBusyError, get_gpu_manager
 from seiyuu.normalize import normalize_text, profile_for
+from seiyuu.render.models import RenderManifest
 from seiyuu.repository import Job, JobKind, JobState
 from seiyuu.services import ServiceError, delete_voice, voice_references
 from seiyuu.voices import (
@@ -100,21 +101,28 @@ def _voice_out(library: VoiceLibrary, meta: VoiceMeta) -> VoiceOut:
     )
 
 
+# Job kinds that read the cache or reference audio mid-run: render synthesizes into it,
+# assemble streams cache wavs into chapter mixes, master re-encodes while the manifest is
+# the live truth. A purge or reference swap under ANY of them corrupts in-flight reads
+# (mirrors _MANIFEST_JOB_KINDS in services/render_mode.py).
+_CACHE_CONSUMER_KINDS = (JobKind.RENDER, JobKind.ASSEMBLE, JobKind.MASTER)
+
+
 def _guard_live_render(store, action: str) -> None:
-    """Replace-clone and voice deletion mutate state a RUNNING render depends on
-    (cached segments the manifest will reference; the consent-attested reference.wav a
-    single-voice job reads mid-run — which never appears in assignments.json, so the
-    referential guard cannot see it). Refuse globally while any render job is live,
-    mirroring the render_active guard on edits/assignment writes."""
+    """Replace-clone and voice deletion mutate state a RUNNING job depends on
+    (cached segments the manifest references and assemble streams; the consent-attested
+    reference.wav a single-voice job reads mid-run — which never appears in
+    assignments.json, so the referential guard cannot see it). Refuse globally while any
+    render/assemble/master job is live, mirroring the render_active guard on edits."""
     live = store.list_jobs(states=[JobState.QUEUED, JobState.RUNNING])
-    render = next((j for j in live if j.kind is JobKind.RENDER), None)
-    if render is not None:
+    conflict = next((j for j in live if j.kind in _CACHE_CONSUMER_KINDS), None)
+    if conflict is not None:
         raise ApiError(
             409,
             "render_active",
-            f"a render job is {render.state.value}; {action} would corrupt its cached "
-            "segments or pull its voice out from under it — wait or cancel it first",
-            detail=JobOut.from_job(render).model_dump(mode="json"),
+            f"a {conflict.kind.value} job is {conflict.state.value}; {action} would corrupt "
+            "the cached segments or reference audio it is reading — wait or cancel it first",
+            detail=JobOut.from_job(conflict).model_dump(mode="json"),
         )
 
 
@@ -203,6 +211,47 @@ def create_voice(
     return _voice_out(library, meta)
 
 
+def _manifest_uses_voice(manifest: RenderManifest, voice_id: str) -> bool:
+    if manifest.voice_id == voice_id or voice_id in manifest.voices_used:
+        return True
+    return any(seg.voice_id == voice_id for ch in manifest.chapters for seg in ch.segments)
+
+
+def _referencing_manifests(output_dir: Path, voice_id: str) -> dict[str, list[Path]]:
+    """book_id -> manifest paths (active pointer + mode archives) referencing ``voice_id``.
+    Read-only: the reclone_blocked 409 names these books BEFORE anything is deleted, so
+    the user consents to the actual blast radius; the post-purge invalidation then drops
+    exactly this set."""
+    hits: dict[str, list[Path]] = {}
+    if not output_dir.is_dir():
+        return hits
+    for book_dir in output_dir.iterdir():
+        for mpath in book_dir.glob("manifest*.json"):
+            try:
+                manifest = RenderManifest.model_validate_json(mpath.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # torn manifest: not provably this voice's — leave for review
+            if _manifest_uses_voice(manifest, voice_id):
+                hits.setdefault(book_dir.name, []).append(mpath)
+    return hits
+
+
+def _invalidate_voice_manifests(output_dir: Path, voice_id: str) -> list[str]:
+    """Purge-on-reclone follow-through: with the voice's cache wavs gone, any manifest
+    that references it claims a render that can no longer play or assemble (rendered=true
+    but segment audio 404s; assemble dies on 'missing segment audio'). Drop those
+    manifests — the active pointer AND the mode archives — so the books flip to
+    un-rendered; the next render re-synthesizes only this voice's segments (other voices'
+    cache entries survive the purge). Assembled mp3s/m4b keep the OLD voice until then —
+    deleting finished (possibly paid) audio is not this endpoint's call to make; the UI
+    surfaces the assembled-but-not-rendered signature as a staleness banner instead."""
+    hits = _referencing_manifests(output_dir, voice_id)
+    for paths in hits.values():
+        for mpath in paths:
+            mpath.unlink(missing_ok=True)
+    return sorted(hits)
+
+
 def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
     """Sign-off Q1 (purge-on-reclone): delete every cached segment for this voice across
     all books, via the cache's SegmentKey sidecars. Stale audio from the OLD reference
@@ -288,12 +337,20 @@ def clone_voice(
         with request.app.state.voices_mutex:
             exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
             if exists and not replace:
+                # dry-run scan so the consent step names the actual blast radius
+                stale = sorted(_referencing_manifests(cfg.output_dir, vid))
+                flips = (
+                    f"; {len(stale)} rendered book(s) flip to un-rendered: {', '.join(stale)}"
+                    if stale
+                    else ""
+                )
                 raise ApiError(
                     409,
                     "reclone_blocked",
                     f"voice {vid!r} already exists; re-clone replaces its consent-attested "
-                    "reference audio — re-send with replace=true to confirm (cached "
-                    "segments for this voice are purged and paid ones re-bill)",
+                    f"reference audio — re-send with replace=true to confirm (cached "
+                    f"segments for this voice are purged and paid segments re-bill{flips})",
+                    detail={"stale_books": stale},
                 )
             if exists:
                 # a running render may be reading/writing exactly the cache files the
@@ -302,6 +359,9 @@ def clone_voice(
                 # Q1 DECIDED (purge-on-reclone): stale audio out BEFORE the new
                 # reference is published, so no window serves old-voice segments.
                 _purge_cached_segments(cfg.output_dir, vid)
+                # the purged wavs are what these manifests point at — a book left claiming
+                # rendered=true would 404 on playback and fail assembly
+                _invalidate_voice_manifests(cfg.output_dir, vid)
                 _audition_path(library, vid).unlink(missing_ok=True)
                 # the IVC handle was trained on the OLD reference; keeping it would let
                 # paid synthesis keep speaking the previously-attested speaker

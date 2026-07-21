@@ -88,6 +88,7 @@ def compute_estimate(
     chapters: tuple[int, ...],
     single: ResolvedSingle | None,
     apply_emotion: bool | None = None,
+    force: bool = False,
 ) -> EstimateContext:
     """The fresh estimate for a render exactly as the render loop would bill it.
 
@@ -115,6 +116,8 @@ def compute_estimate(
             # (per-render override, else the cfg default), so the cost gate authorizes exactly the
             # SegmentKeys render will bill.
             apply_emotion=effective_apply_emotion(cfg, apply_emotion),
+            # force must match the render's force so the priced paid set equals what render bills.
+            force=force,
         )  # fmt: skip
         return EstimateContext(
             est=est, assignment_hash=hash_assignment(assignment), edit_warnings=warnings
@@ -131,6 +134,7 @@ def compute_estimate(
         chapters=chapters,
         library=library,
         lexicon=lexicon,
+        force=force,
     )
     return EstimateContext(est=est, assignment_hash=None, edit_warnings=[])
 

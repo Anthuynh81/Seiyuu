@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { VoiceAssignment } from "../api/types";
-import { castingDiffers, castingFromServer } from "./casting";
+import { castingDiffers, castingFromServer, castingVoicesDiffer } from "./casting";
 
 const server: VoiceAssignment = {
   schema_version: 1,
@@ -49,5 +49,25 @@ describe("casting dirty-tracking", () => {
     const local = castingFromServer(server);
     local.map.mrs_bennet = "changed";
     expect(server.assignments.mrs_bennet).toBe("mrs_bennet_auto");
+  });
+});
+
+describe("castingVoicesDiffer (audio-staleness, stage-agnostic)", () => {
+  it("a stage-only draft->final change is NOT a voice change (audio stays valid)", () => {
+    const local = castingFromServer(server);
+    local.stage = "final";
+    expect(castingDiffers(server, local)).toBe(true); // still dirty -> save is armed
+    expect(castingVoicesDiffer(server, local)).toBe(false); // ...but no audio is stale
+  });
+
+  it.each([
+    ["narrator", (c: ReturnType<typeof castingFromServer>) => (c.narrator = "other_voice")],
+    ["thought", (c: ReturnType<typeof castingFromServer>) => (c.thought = "inner_voice")],
+    ["a character's voice", (c: ReturnType<typeof castingFromServer>) => (c.map.mrs_bennet = "af_nicole")],
+    ["adding a character", (c: ReturnType<typeof castingFromServer>) => (c.map.elizabeth = "elizabeth_auto")],
+  ])("a real voice change (%s) IS a voice change", (_what, mutate) => {
+    const local = castingFromServer(server);
+    mutate(local);
+    expect(castingVoicesDiffer(server, local)).toBe(true);
   });
 });

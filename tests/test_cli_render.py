@@ -40,6 +40,33 @@ def test_render_command(ingested_book, monkeypatch) -> None:
     assert len(fake.calls) > 0
 
 
+def test_render_command_force_bypasses_cache(ingested_book, monkeypatch) -> None:
+    books_dir, output_dir, book_id = ingested_book
+    args = [
+        "render", book_id, "--voice", "test_voice",
+        "--books-dir", str(books_dir), "--output-dir", str(output_dir),
+    ]  # fmt: skip
+
+    first = FakeEngine()
+    monkeypatch.setattr(seiyuu.engines, "get_engine", lambda engine_id, **kw: first)
+    assert CliRunner().invoke(main, args).exit_code == 0
+    synthesized = len(first.calls)
+    assert synthesized > 0
+
+    # a plain re-render is all cache HITs — nothing re-synthesized
+    second = FakeEngine()
+    monkeypatch.setattr(seiyuu.engines, "get_engine", lambda engine_id, **kw: second)
+    assert CliRunner().invoke(main, args).exit_code == 0
+    assert len(second.calls) == 0
+
+    # --force re-synthesizes every in-scope segment despite the warm cache
+    third = FakeEngine()
+    monkeypatch.setattr(seiyuu.engines, "get_engine", lambda engine_id, **kw: third)
+    result = CliRunner().invoke(main, args + ["--force"])
+    assert result.exit_code == 0, result.output
+    assert len(third.calls) == synthesized
+
+
 def test_render_command_book_id_prefix(ingested_book, monkeypatch) -> None:
     books_dir, output_dir, book_id = ingested_book
     monkeypatch.setattr(seiyuu.engines, "get_engine", lambda engine_id, **kw: FakeEngine())

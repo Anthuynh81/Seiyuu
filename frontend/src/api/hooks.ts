@@ -1,4 +1,5 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 
 import { api, ApiError, postForm, postJson } from "./client";
 import type {
@@ -11,6 +12,7 @@ import type {
   BookDeletedOut,
   BookDetail,
   BooksOut,
+  ChapterWordsOut,
   CharactersOverview,
   CloudSlotsOut,
   CostEstimateOut,
@@ -53,14 +55,17 @@ export function useLiveJobs() {
     queryKey: ["jobs", "live"],
     queryFn: () => api<JobsOut>("/api/jobs?state=queued&state=running"),
     refetchInterval: 2000,
+    // keep polling in hidden tabs: JobCompletionWatcher and the finish chain both clock
+    // off this poll, and "keep this page open" must not secretly mean "and visible"
+    refetchIntervalInBackground: true,
   });
 }
 
 export function useBooks() {
-  const live = useLiveJobs();
-  const liveCount = live.data?.jobs.length ?? 0;
+  // Stable key: JobCompletionWatcher invalidates on job transitions, and a same-key
+  // refetch keeps old data on screen — no undefined window, no derived-bookId flicker.
   return useQuery({
-    queryKey: ["books", liveCount], // a job finishing (count drops) refetches the shelf
+    queryKey: ["books"],
     queryFn: () => api<BooksOut>("/api/books"),
   });
 }
@@ -106,11 +111,10 @@ export function useDeleteBook() {
 // -- render & jobs ------------------------------------------------------------------------
 
 export function useBook(bookId: string | null) {
-  const live = useLiveJobs();
-  const liveCount = live.data?.jobs.length ?? 0;
+  // Stable key (see useBooks): invalidation-driven freshness instead of key churn.
   return useQuery({
-    queryKey: ["book", bookId, liveCount],
-    queryFn: () => api<BookDetail>(`/api/books/${bookId}`),
+    queryKey: ["book", bookId],
+    queryFn: ({ signal }) => api<BookDetail>(`/api/books/${bookId}`, { signal }),
     enabled: bookId !== null,
   });
 }
@@ -121,6 +125,7 @@ export function useBookJobs(bookId: string | null) {
     queryFn: () => api<JobsOut>(`/api/jobs?book_id=${encodeURIComponent(bookId!)}&limit=25`),
     enabled: bookId !== null,
     refetchInterval: 2500,
+    refetchIntervalInBackground: true, // the assemble->master finish chain advances on this poll
   });
 }
 
@@ -134,13 +139,15 @@ export function useEstimate(
   chapters: number[],
   ready: boolean,
   applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
+  force = false, // re-render: price cached in-scope segments as billable work (parity with render)
 ) {
   const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
+  const frc = force ? "&force=true" : "";
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force],
     queryFn: () =>
       api<CostEstimateOut>(
-        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}`,
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}`,
       ),
     enabled: bookId !== null && ready,
   });
@@ -190,16 +197,19 @@ export function useMintQuote(bookId: string) {
       mode,
       chapters,
       applyEmotion,
+      force,
     }: {
       mode: RenderMode;
       chapters: number[];
       applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
+      force?: boolean; // re-render: quote must be minted force=True to authorize a forced render
     }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
         ...(mode === "single" ? { single: {} } : {}),
         ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
+        ...(force ? { force: true } : {}),
       }),
   });
 }
@@ -296,7 +306,10 @@ export function useCharacters(bookId: string | null, attributed: boolean) {
 export function useSegments(bookId: string | null, chapter: number, attributed: boolean) {
   return useQuery({
     queryKey: ["segments", bookId, chapter],
-    queryFn: () => api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`),
+    // signal: rapid chapter paging aborts the superseded fetch instead of letting the
+    // server finish a whole-chapter payload nobody will read
+    queryFn: ({ signal }) =>
+      api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`, { signal }),
     enabled: bookId !== null && attributed,
   });
 }
@@ -308,7 +321,8 @@ export function useSegments(bookId: string | null, chapter: number, attributed: 
 export function useChapterAttribution(bookId: string | null, chapter: number, attributed: boolean) {
   return useQuery({
     queryKey: ["attribution", bookId, chapter],
-    queryFn: () => api<AttributionOut>(`/api/books/${bookId}/attribution?chapters=${chapter}`),
+    queryFn: ({ signal }) =>
+      api<AttributionOut>(`/api/books/${bookId}/attribution?chapters=${chapter}`, { signal }),
     enabled: bookId !== null && attributed,
   });
 }
@@ -343,38 +357,45 @@ export function resolvedSig(resolved: { key: string; audioKey: string | null }[]
     .join("|");
 }
 
-/** Fetch whisper word-timings for every clip in a chapter at once (react-query `useQueries`,
-    one entry per wav, keyed by audio_key). 404 degrades to null (no timing) rather than
-    throwing, so a scene-break / not-yet-rendered clip simply stays on interpolation. */
-export function useSegmentWords(bookId: string | null, clips: SegmentWordsClip[]): SegmentWordsResult {
-  return useQueries({
-    queries: clips.map((c) => ({
-      queryKey: ["segment-words", bookId, c.key, c.audioKey],
-      queryFn: async (): Promise<SegmentWords | null> => {
-        try {
-          return await api<SegmentWords>(
-            `/api/books/${bookId}/segments/${c.blockId}/words?segment=${c.segment}`,
-          );
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 404) return null; // no timing — interpolate
-          throw e;
-        }
-      },
-      enabled: bookId !== null,
-      staleTime: Infinity, // content-addressed by audio_key; only a re-render (new key) refetches
-    })),
-    combine: (results): SegmentWordsResult => {
-      const byKey = new Map<string, SegmentWords>();
-      const resolved: { key: string; audioKey: string | null }[] = [];
-      results.forEach((r, i) => {
-        if (r.data) {
-          byKey.set(clips[i].key, r.data);
-          resolved.push({ key: clips[i].key, audioKey: clips[i].audioKey });
-        }
-      });
-      return { byKey, sig: resolvedSig(resolved) };
+/** Fetch whisper word-timings for every clip in a chapter in ONE batch request (one
+    manifest parse server-side, instead of an HTTP request — and a manifest parse — per
+    wav). Clips the server omitted (missing wav / failed alignment) or a 404 for the whole
+    chapter (not yet rendered) simply stay on interpolation. The key folds every clip's
+    audio_key, so a re-render (new audio identity) refetches; content-addressed, so
+    staleTime is infinite. */
+export function useSegmentWords(
+  bookId: string | null,
+  chapter: number,
+  clips: SegmentWordsClip[],
+): SegmentWordsResult {
+  const clipsSig = resolvedSig(clips);
+  const q = useQuery({
+    queryKey: ["segment-words", bookId, chapter, clipsSig],
+    queryFn: async ({ signal }): Promise<ChapterWordsOut | null> => {
+      try {
+        return await api<ChapterWordsOut>(`/api/books/${bookId}/chapters/${chapter}/words`, {
+          signal,
+        });
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null; // not rendered — interpolate
+        throw e;
+      }
     },
+    enabled: bookId !== null && clips.length > 0,
+    staleTime: Infinity,
   });
+  return useMemo(() => {
+    const byKey = new Map<string, SegmentWords>();
+    const resolved: { key: string; audioKey: string | null }[] = [];
+    for (const c of clips) {
+      const w = q.data?.words[c.key];
+      if (w) {
+        byKey.set(c.key, w);
+        resolved.push({ key: c.key, audioKey: c.audioKey });
+      }
+    }
+    return { byKey, sig: resolvedSig(resolved) };
+  }, [q.data, clips]);
 }
 
 export function useEditLog(bookId: string | null) {
@@ -463,6 +484,9 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
   qc.invalidateQueries({ queryKey: ["books"] }); // the assigned stage flag flips
   qc.invalidateQueries({ queryKey: ["book", bookId] });
   qc.invalidateQueries({ queryKey: ["estimate", bookId] }); // assignment hash drifts quotes
+  // A cast change makes any existing render stale: refresh the summary so its
+  // rendered_assignment_hash is re-read and the "re-render to hear it" banner surfaces.
+  qc.invalidateQueries({ queryKey: ["render-summary", bookId] });
 }
 
 export interface DraftInput {

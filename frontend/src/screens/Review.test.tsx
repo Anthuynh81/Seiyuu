@@ -14,7 +14,7 @@ import type {
 } from "../api/types";
 import { makeBook } from "../test/fixtures";
 import type { MockApi } from "../test/utils";
-import { mockApi, renderWithProviders } from "../test/utils";
+import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Review } from "./Review";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -554,5 +554,51 @@ describe("Review", () => {
     // clear restores the full pool
     await user.click(screen.getByRole("button", { name: "clear" }));
     expect(screen.queryByText(/of 4 voices/)).not.toBeInTheDocument();
+  });
+
+  it("saving a cast change on a rendered book prompts a re-render with a deep link", async () => {
+    const user = userEvent.setup();
+    const base = detailFor("b1", "Attributed One");
+    const rendered: BookDetail = {
+      ...base,
+      status: { ...base.status, assigned: true, rendered: true },
+    };
+    let current: VoiceAssignment = ASSIGNMENT;
+    const server = mockApi()
+      .get("/api/books", {
+        books: [makeBook({ book_id: "b1", title: "Attributed One", attributed: true, assigned: true, rendered: true })],
+      })
+      .get("/api/books/b1", rendered)
+      .get("/api/books/b1/characters", overviewFor("b1", [alice(), bob()]))
+      .get("/api/books/b1/chapters/1/segments", chapterOneSegments())
+      .get("/api/books/b1/attribution", chapterOneAttribution())
+      .get("/api/books/b1/edits", { version: 1, ops: [] })
+      .get("/api/voices", {
+        voices: [voice("v-narr", "Narrator"), voice("v-alice", "auto:Alice"), voice("v-bob", "auto:Bob")],
+        unreadable: [],
+      });
+    server.on("GET", "/api/books/b1/assignment", () => jsonResponse(current));
+    server.on("PUT", "/api/books/b1/assignment", (_u, init) => {
+      current = { ...current, ...(JSON.parse(String(init?.body)) as Partial<VoiceAssignment>) };
+      return jsonResponse(current);
+    });
+    renderWithProviders(<Review />);
+
+    // reassign Alice's voice (auto:Alice -> Narrator): this dirties the local casting
+    const aliceRow = await screen.findByRole("row", { name: /Alice/ });
+    await user.click(within(aliceRow).getByRole("button", { name: /auto:Alice · kokoro/ }));
+    const listbox = await screen.findByRole("listbox");
+    await user.click(within(listbox).getByRole("option", { name: "Narrator · kokoro" }));
+
+    await user.click(screen.getByRole("button", { name: "save casting" }));
+
+    // the rendered audio is now stale — the screen says so and deep-links to Render & Jobs
+    expect(
+      await screen.findByText(/the rendered audio still uses the old ones/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /re-render in Render & Jobs/ })).toHaveAttribute(
+      "href",
+      "/render?book=b1",
+    );
   });
 });
