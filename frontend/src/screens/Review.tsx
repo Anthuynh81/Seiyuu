@@ -40,6 +40,11 @@ const isReviewable = (s: SegmentRow, threshold: number) =>
 function useFrontier(bookId: string | null): [number, (n: number) => void] {
   const key = `seiyuu.frontier.${bookId}`;
   const [value, setValue] = useState(() => Number(localStorage.getItem(key)) || 1);
+  // The initializer runs once per mount; on a book switch re-read the NEW book's frontier
+  // (otherwise book A's frontier unmasks book B's late-debut characters — spoiler leak).
+  useEffect(() => {
+    setValue(Number(localStorage.getItem(key)) || 1);
+  }, [key]);
   return [
     value,
     (n: number) => {
@@ -487,6 +492,11 @@ export function Review() {
   // Front matter (title page, copyright) is often chapter 1 and never attributed —
   // skip forward once instead of opening the screen on a 404.
   const autoSkipped = useRef(false);
+  // Chapter position and the one-shot front-matter skip are per-book state.
+  useEffect(() => {
+    setChapter(1);
+    autoSkipped.current = false;
+  }, [bookId]);
   useEffect(() => {
     if (
       !autoSkipped.current &&

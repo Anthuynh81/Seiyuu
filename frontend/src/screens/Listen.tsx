@@ -68,6 +68,13 @@ export function Listen() {
   const renderedChapters = useMemo(() => new Set(summary.data?.chapters.map((c) => c.index) ?? []), [summary.data]);
 
   const [chapter, setChapterRaw] = useState<number | null>(null);
+  // Chapter is per-book; without this a shelf switch resumes at the OLD book's number.
+  useEffect(() => setChapterRaw(null), [bookId]);
+  // Latch the deep-link default ONCE. Deriving it live means a ch-1 render landing
+  // mid-listen changes chapters[0] and yanks playback to chapter 1.
+  useEffect(() => {
+    if (chapter === null && summary.data?.chapters[0]) setChapterRaw(summary.data.chapters[0].index);
+  }, [summary.data, chapter]);
   const effectiveChapter = chapter ?? summary.data?.chapters[0]?.index ?? 1;
   const segments = useSegments(bookId, effectiveChapter, rendered);
 

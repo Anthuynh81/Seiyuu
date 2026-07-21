@@ -76,7 +76,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const el = ensureAudio();
       const clip = state.clips[index];
       if (!clip) return;
+      const target = new URL(clip.src, window.location.href).href;
       const apply = () => {
+        // a stale {once} listener from a superseded swap must not seek/play whatever
+        // src loaded next — only act if the element still points at OUR clip
+        if (el.src !== target) return;
         // clamp inside the clip; seeking an unloaded source is silently ignored by
         // browsers, hence the loadedmetadata gate below
         try {
@@ -86,7 +90,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         }
         if (play) playEl(el);
       };
-      const target = new URL(clip.src, window.location.href).href;
       if (el.src !== target) {
         el.src = clip.src;
         el.addEventListener("loadedmetadata", apply, { once: true });

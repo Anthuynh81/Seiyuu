@@ -27,6 +27,12 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
   const audition = useAudition(voice.voice_id);
   const warmup = useWarmup();
   const [playerOpen, setPlayerOpen] = useState(false);
+  // Cache-buster latched once per successful audition. Date.now() inline in the src
+  // would mint a new URL every parent re-render (the 2s job poll), restarting playback.
+  const [take, setTake] = useState(0);
+  useEffect(() => {
+    if (audition.isSuccess) setTake(Date.now());
+  }, [audition.isSuccess]);
   const err = audition.error instanceof ApiError ? audition.error : null;
 
   // gpu_busy_retry is a SOFT refusal: a render is lending the GPU between segments, so the
@@ -143,7 +149,7 @@ function AuditionControl({ voice }: { voice: VoiceOut }) {
         <audio
           controls
           autoPlay={audition.isSuccess}
-          src={`/api/voices/${voice.voice_id}/audition.wav?t=${audition.isSuccess ? Date.now() : 0}`}
+          src={`/api/voices/${voice.voice_id}/audition.wav?t=${take}`}
           className="mt-2 h-[30px] w-full"
         />
       )}
