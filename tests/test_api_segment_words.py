@@ -145,3 +145,31 @@ def test_words_404_for_unrendered_book(client, cfg):
     )
     r = client.get("/api/books/bk/segments/ch001_b0001/words")
     assert r.status_code == 404
+
+
+def test_chapter_words_batch(client, cfg):
+    # One request returns every audio-bearing clip of the chapter, keyed like the player
+    # clips; scene breaks are absent, and a wav missing on disk is omitted (client falls
+    # back to interpolation) instead of failing the whole page.
+    stem = _seed_render(cfg, "bk")
+    aligner: FakeAligner = client.app.state.aligner
+
+    r = client.get("/api/books/bk/chapters/1/words")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["chapter"] == 1
+    assert set(body["words"]) == {"ch001_b0001:0"}
+    assert [w["word"] for w in body["words"]["ch001_b0001:0"]["words"]] == [" Hello", " there"]
+    assert aligner.calls == 1
+
+    # served from the sidecar cache on the second request; per-clip endpoint shares it
+    assert client.get("/api/books/bk/chapters/1/words").status_code == 200
+    assert client.get("/api/books/bk/segments/ch001_b0001/words").status_code == 200
+    assert aligner.calls == 1
+
+    assert client.get("/api/books/bk/chapters/9/words").status_code == 404
+
+    (cfg.output_dir / "bk" / "cache" / f"{stem}.wav").unlink()
+    gone = client.get("/api/books/bk/chapters/1/words")
+    assert gone.status_code == 200
+    assert gone.json()["words"] == {}

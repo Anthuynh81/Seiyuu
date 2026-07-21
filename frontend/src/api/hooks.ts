@@ -1,4 +1,5 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 
 import { api, ApiError, postForm, postJson } from "./client";
 import type {
@@ -11,6 +12,7 @@ import type {
   BookDeletedOut,
   BookDetail,
   BooksOut,
+  ChapterWordsOut,
   CharactersOverview,
   CloudSlotsOut,
   CostEstimateOut,
@@ -347,38 +349,43 @@ export function resolvedSig(resolved: { key: string; audioKey: string | null }[]
     .join("|");
 }
 
-/** Fetch whisper word-timings for every clip in a chapter at once (react-query `useQueries`,
-    one entry per wav, keyed by audio_key). 404 degrades to null (no timing) rather than
-    throwing, so a scene-break / not-yet-rendered clip simply stays on interpolation. */
-export function useSegmentWords(bookId: string | null, clips: SegmentWordsClip[]): SegmentWordsResult {
-  return useQueries({
-    queries: clips.map((c) => ({
-      queryKey: ["segment-words", bookId, c.key, c.audioKey],
-      queryFn: async (): Promise<SegmentWords | null> => {
-        try {
-          return await api<SegmentWords>(
-            `/api/books/${bookId}/segments/${c.blockId}/words?segment=${c.segment}`,
-          );
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 404) return null; // no timing — interpolate
-          throw e;
-        }
-      },
-      enabled: bookId !== null,
-      staleTime: Infinity, // content-addressed by audio_key; only a re-render (new key) refetches
-    })),
-    combine: (results): SegmentWordsResult => {
-      const byKey = new Map<string, SegmentWords>();
-      const resolved: { key: string; audioKey: string | null }[] = [];
-      results.forEach((r, i) => {
-        if (r.data) {
-          byKey.set(clips[i].key, r.data);
-          resolved.push({ key: clips[i].key, audioKey: clips[i].audioKey });
-        }
-      });
-      return { byKey, sig: resolvedSig(resolved) };
+/** Fetch whisper word-timings for every clip in a chapter in ONE batch request (one
+    manifest parse server-side, instead of an HTTP request — and a manifest parse — per
+    wav). Clips the server omitted (missing wav / failed alignment) or a 404 for the whole
+    chapter (not yet rendered) simply stay on interpolation. The key folds every clip's
+    audio_key, so a re-render (new audio identity) refetches; content-addressed, so
+    staleTime is infinite. */
+export function useSegmentWords(
+  bookId: string | null,
+  chapter: number,
+  clips: SegmentWordsClip[],
+): SegmentWordsResult {
+  const clipsSig = resolvedSig(clips);
+  const q = useQuery({
+    queryKey: ["segment-words", bookId, chapter, clipsSig],
+    queryFn: async (): Promise<ChapterWordsOut | null> => {
+      try {
+        return await api<ChapterWordsOut>(`/api/books/${bookId}/chapters/${chapter}/words`);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null; // not rendered — interpolate
+        throw e;
+      }
     },
+    enabled: bookId !== null && clips.length > 0,
+    staleTime: Infinity,
   });
+  return useMemo(() => {
+    const byKey = new Map<string, SegmentWords>();
+    const resolved: { key: string; audioKey: string | null }[] = [];
+    for (const c of clips) {
+      const w = q.data?.words[c.key];
+      if (w) {
+        byKey.set(c.key, w);
+        resolved.push({ key: c.key, audioKey: c.audioKey });
+      }
+    }
+    return { byKey, sig: resolvedSig(resolved) };
+  }, [q.data, clips]);
 }
 
 export function useEditLog(bookId: string | null) {

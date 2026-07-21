@@ -27,33 +27,48 @@ describe("useSegmentWords", () => {
     source: "whisper",
   };
 
-  it("puts only resolved clips in byKey and folds their audioKey into sig; a 404 degrades to absence, not an error", async () => {
+  const clips: SegmentWordsClip[] = [
+    { key: "blk-ok:0", blockId: "blk-ok", segment: 0, audioKey: "aud-123" },
+    { key: "blk-missing:1", blockId: "blk-missing", segment: 1, audioKey: null },
+  ];
+  // the queryKey folds every clip's audio identity (sorted): a re-render re-keys
+  const clipsSig = "blk-missing:1@|blk-ok:0@aud-123";
+
+  it("puts only server-resolved clips in byKey and folds their audioKey into sig; omitted clips stay absent", async () => {
     const server = mockApi();
-    server.get("/api/books/b1/segments/blk-ok/words", wordsFixture);
-    server.error("GET", "/api/books/b1/segments/blk-missing/words", 404, "words_not_found", "no timings yet");
-
-    const clips: SegmentWordsClip[] = [
-      { key: "blk-ok:0", blockId: "blk-ok", segment: 0, audioKey: "aud-123" },
-      { key: "blk-missing:1", blockId: "blk-missing", segment: 1, audioKey: null },
-    ];
-    const { queryClient, Wrapper } = createWrapper();
-    const { result } = renderHook(() => useSegmentWords("b1", clips), { wrapper: Wrapper });
-
-    // both queries must SETTLE AS SUCCESS — the 404 is caught and becomes null data, so a
-    // scene-break clip stays on interpolation instead of erroring the whole read-along
-    await waitFor(() => {
-      expect(queryClient.getQueryState(["segment-words", "b1", "blk-ok:0", "aud-123"])?.status).toBe("success");
-      expect(queryClient.getQueryState(["segment-words", "b1", "blk-missing:1", null])?.status).toBe("success");
+    server.get("/api/books/b1/chapters/3/words", {
+      book_id: "b1",
+      chapter: 3,
+      words: { "blk-ok:0": wordsFixture }, // blk-missing omitted: wav missing / not aligned
     });
 
-    expect(result.current.byKey.size).toBe(1);
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useSegmentWords("b1", 3, clips), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.byKey.size).toBe(1));
     expect(result.current.byKey.get("blk-ok:0")).toEqual(wordsFixture);
     expect(result.current.byKey.has("blk-missing:1")).toBe(false);
     // sig folds the resolved clip's audio identity, so a re-render that swaps the wav
     // (same clip key, new audio_key) flips the signature
     expect(result.current.sig).toBe("blk-ok:0@aud-123");
-    // the fetch targets the per-segment words endpoint with the segment index
-    expect(server.lastCall("GET", "blk-ok")?.url).toBe("/api/books/b1/segments/blk-ok/words?segment=0");
+    // ONE batch fetch for the whole chapter — not a request per clip
+    expect(server.lastCall("GET", "words")?.url).toBe("/api/books/b1/chapters/3/words");
+  });
+
+  it("a chapter-level 404 (not yet rendered) settles as success with no resolved clips", async () => {
+    const server = mockApi();
+    server.error("GET", "/api/books/b1/chapters/3/words", 404, "not_found", "no rendered audio");
+
+    const { queryClient, Wrapper } = createWrapper();
+    const { result } = renderHook(() => useSegmentWords("b1", 3, clips), { wrapper: Wrapper });
+
+    // the 404 is caught and becomes null data — the read-along keeps interpolation
+    // instead of erroring the whole page
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["segment-words", "b1", 3, clipsSig])?.status).toBe("success");
+    });
+    expect(result.current.byKey.size).toBe(0);
+    expect(result.current.sig).toBe("");
   });
 });
 

@@ -21,6 +21,7 @@ from seiyuu.api.money import compute_estimate, gate_code, resolve_single
 from seiyuu.api.routes.common import load_book, status_or_404
 from seiyuu.api.schemas import (
     AssembleParams,
+    ChapterWordsOut,
     CostEstimateOut,
     JobOut,
     MasterParams,
@@ -658,3 +659,37 @@ def segment_words(
         raise ApiError(
             500, "alignment_failed", f"forced alignment failed for {block_id!r}[{segment}]: {exc}"
         ) from exc
+
+
+@router.get("/books/{book_id}/chapters/{chapter}/words", response_model=ChapterWordsOut)
+def chapter_words(
+    book_id: str, chapter: int, cfg: SettingsDep, aligner: AlignerDep
+) -> ChapterWordsOut:
+    """Batch F2 word timings: every audio-bearing segment of one chapter from ONE manifest
+    parse. Opening a chapter in Listen used to fire a /segments/{block}/words request per
+    clip, each re-parsing the full manifest server-side — ~100 parses for a 100-block
+    chapter. Clips whose wav is missing on disk or whose alignment fails are OMITTED (the
+    client keeps its length-interpolated fallback for them, mirroring the per-clip 404
+    path); the per-clip endpoint stays for spot lookups and compatibility."""
+    status = status_or_404(cfg, book_id)
+    manifest = _manifest_or_http(cfg, book_id, status)
+    ch = next((c for c in manifest.chapters if c.index == chapter), None)
+    if ch is None:
+        raise ApiError(404, "not_found", f"chapter {chapter} has no rendered audio")
+    book_output_dir = (cfg.output_dir / book_id).resolve()
+    validator, lock = aligner
+    words: dict[str, SegmentWords] = {}
+    ordinal: dict[str, int] = {}  # per-block segment index, matching /audio's counting
+    for seg in ch.segments:
+        idx = ordinal.get(seg.block_id, 0)
+        ordinal[seg.block_id] = idx + 1
+        if not seg.wav:
+            continue
+        wav = (book_output_dir / seg.wav).resolve()
+        if not wav.is_file() or not wav.is_relative_to(book_output_dir):
+            continue
+        try:
+            words[f"{seg.block_id}:{idx}"] = ensure_words(wav, validator, lock)
+        except ValidationErrorType:
+            continue  # alignment failure degrades that clip to interpolation, not the page
+    return ChapterWordsOut(book_id=book_id, chapter=chapter, words=words)

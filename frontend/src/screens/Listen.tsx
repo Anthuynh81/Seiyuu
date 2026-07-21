@@ -118,7 +118,7 @@ export function Listen() {
       }),
     [playableRows],
   );
-  const words = useSegmentWords(bookId, wordClips);
+  const words = useSegmentWords(bookId, effectiveChapter, wordClips);
 
   // built clip structure (span elements + per-row token counts) so whisper timings can be
   // applied onto the EXISTING spans without a player.load() that would interrupt playback

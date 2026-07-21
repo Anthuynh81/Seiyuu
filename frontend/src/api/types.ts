@@ -353,6 +353,15 @@ export interface SegmentWords {
   source: string;
 }
 
+/** GET /api/books/{id}/chapters/{n}/words — batch read-along timings for one chapter,
+    keyed `${block_id}:${segment}`. Clips the server omitted (missing wav / failed
+    alignment) keep the interpolated fallback. */
+export interface ChapterWordsOut {
+  book_id: string;
+  chapter: number;
+  words: Record<string, SegmentWords>;
+}
+
 export type EditRequest =
   | { op: "rename"; character_id: string; new_name: string }
   | { op: "merge"; loser_id: string; winner_id: string }

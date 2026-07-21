@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from seiyuu.attribute.models import AttributionReport, EmotionVerdict
 from seiyuu.repository import BookStatus, Job
 from seiyuu.services.voices import VoiceReference
+from seiyuu.validate import SegmentWords
 from seiyuu.voices import VoiceAssignment, VoiceMeta
 
 
@@ -524,6 +525,16 @@ class ValidationReportOut(BaseModel):
     validated_segments: int
     validation_failures: int
     results: list[ValidationRow]  # failures only unless ?all=true
+
+
+class ChapterWordsOut(BaseModel):
+    """Batch read-along timings (F2): every audio-bearing segment of ONE chapter, keyed
+    ``{block_id}:{segment}`` (the per-block ordinal /audio and /words count). One manifest
+    parse serves what used to be an HTTP request — and a manifest parse — per clip."""
+
+    book_id: str
+    chapter: int
+    words: dict[str, SegmentWords] = Field(default_factory=dict)
 
 
 # -- voices (scoping doc section 4: Voices) ------------------------------------------------
