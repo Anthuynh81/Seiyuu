@@ -8,6 +8,7 @@ force-included/excluded from the CLI.
 
 import hashlib
 import re
+import zipfile
 from pathlib import Path
 
 from bs4 import BeautifulSoup, CData, NavigableString
@@ -42,6 +43,10 @@ from seiyuu.ingest.css_italics import (
 )
 from seiyuu.ingest.models import BlockType, BookMeta, NormalizedBook
 from seiyuu.repository import atomic_write_text
+
+# Zip-bomb ceiling for parse_epub: declared uncompressed total across all members. Real
+# EPUBs (text + images) sit far below this; past it the file is hostile or corrupt.
+MAX_DECOMPRESSED_BYTES = 1 << 30  # 1 GiB
 
 __all__ = [
     "CHAPTER_TITLE_PATTERN",
@@ -267,6 +272,19 @@ def parse_epub(
     epub_path = Path(epub_path).resolve()
     if not epub_path.is_file():
         raise IngestError(f"EPUB not found: {epub_path}")
+    # Zip-bomb guard: the upload cap bounds only the COMPRESSED file. Check the central
+    # directory's declared uncompressed total BEFORE ebooklib materializes every member in
+    # memory (zipfile enforces declared sizes on read, so understating cannot bypass this).
+    try:
+        with zipfile.ZipFile(epub_path) as zf:
+            declared = sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        raise IngestError(f"not a valid EPUB (zip) file {epub_path}: {exc}") from exc
+    if declared > MAX_DECOMPRESSED_BYTES:
+        raise IngestError(
+            f"EPUB {epub_path.name} declares {declared / 1e9:.2f} GB uncompressed "
+            f"(limit {MAX_DECOMPRESSED_BYTES / 1e9:.0f} GB) — refusing to ingest"
+        )
     try:
         book = epub.read_epub(str(epub_path), options={"ignore_ncx": True})
     except Exception as exc:

@@ -1,11 +1,19 @@
 import json
 from pathlib import Path
 
+import pytest
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from conftest import build_synthetic_epub
-from seiyuu.ingest import BlockType, NormalizedBook, extract_cover_art, parse_epub, write_normalized
+from seiyuu.ingest import (
+    BlockType,
+    IngestError,
+    NormalizedBook,
+    extract_cover_art,
+    parse_epub,
+    write_normalized,
+)
 from seiyuu.ingest.epub import _collapse, _collapse_with_italics
 
 
@@ -175,3 +183,11 @@ def test_inline_comment_excluded_matches_get_text() -> None:
     assert text == "Hello world"
     assert text == _collapse(el.get_text())
     assert spans == []
+
+
+def test_declared_decompression_cap(synthetic_epub: Path, monkeypatch) -> None:
+    # The upload cap bounds only the COMPRESSED file; a zip bomb must be refused from
+    # the central directory's declared sizes, before ebooklib materializes members.
+    monkeypatch.setattr("seiyuu.ingest.epub.MAX_DECOMPRESSED_BYTES", 64)
+    with pytest.raises(IngestError, match="uncompressed"):
+        parse_epub(synthetic_epub)
