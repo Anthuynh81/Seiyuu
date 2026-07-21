@@ -57,10 +57,10 @@ export function useLiveJobs() {
 }
 
 export function useBooks() {
-  const live = useLiveJobs();
-  const liveCount = live.data?.jobs.length ?? 0;
+  // Stable key: JobCompletionWatcher invalidates on job transitions, and a same-key
+  // refetch keeps old data on screen — no undefined window, no derived-bookId flicker.
   return useQuery({
-    queryKey: ["books", liveCount], // a job finishing (count drops) refetches the shelf
+    queryKey: ["books"],
     queryFn: () => api<BooksOut>("/api/books"),
   });
 }
@@ -106,10 +106,9 @@ export function useDeleteBook() {
 // -- render & jobs ------------------------------------------------------------------------
 
 export function useBook(bookId: string | null) {
-  const live = useLiveJobs();
-  const liveCount = live.data?.jobs.length ?? 0;
+  // Stable key (see useBooks): invalidation-driven freshness instead of key churn.
   return useQuery({
-    queryKey: ["book", bookId, liveCount],
+    queryKey: ["book", bookId],
     queryFn: () => api<BookDetail>(`/api/books/${bookId}`),
     enabled: bookId !== null,
   });
