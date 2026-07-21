@@ -218,7 +218,7 @@ function NameRow({ voice }: { voice: VoiceOut }) {
       <h3 className="namerow">
         {voice.name}
         <button
-          className="rowedit ml-1.5"
+          className="rowedit visible ml-1.5"
           title="rename voice"
           aria-label="rename voice"
           onClick={() => {
