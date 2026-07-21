@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { PlayerContext, type LoadOptions, type PlayClip, type PlayerApi } from "./usePlayer";
+import { PlayerContext, PlayerTimeContext, type LoadOptions, type PlayClip, type PlayerApi } from "./usePlayer";
 
 interface PlayerState {
   bookId: string | null;
@@ -8,7 +8,6 @@ interface PlayerState {
   index: number; // current clip
   clips: PlayClip[];
   playing: boolean;
-  clipElapsed: number; // seconds into the current clip
 }
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
@@ -20,8 +19,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     index: 0,
     clips: [],
     playing: false,
-    clipElapsed: 0,
   });
+  // Seconds into the current clip — OUTSIDE PlayerState so the ~4/s timeupdate tick
+  // re-renders only PlayerTimeContext consumers (the transport clock), never every
+  // usePlayer() consumer, and never re-mints the api object below.
+  const [clipElapsed, setClipElapsed] = useState(0);
   // The audio element's listeners are attached once but must read the CURRENT clips; the
   // ref keeps them honest without putting side effects inside setState updaters (StrictMode
   // double-invokes updaters in dev, which would double-fire onEnded and double-play).
@@ -44,18 +46,19 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       // defaultPlaybackRate survives src swaps; playbackRate covers the current clip
       el.defaultPlaybackRate = rateRef.current;
       el.playbackRate = rateRef.current;
-      el.addEventListener("timeupdate", () => setState((s) => ({ ...s, clipElapsed: el.currentTime })));
+      el.addEventListener("timeupdate", () => setClipElapsed(el.currentTime));
       el.addEventListener("ended", () => {
         const s = stateRef.current;
         const next = s.index + 1;
+        setClipElapsed(0);
         if (next >= s.clips.length) {
           onEndedRef.current?.();
-          setState((cur) => ({ ...cur, playing: false, clipElapsed: 0 }));
+          setState((cur) => ({ ...cur, playing: false }));
           return;
         }
         el.src = s.clips[next].src;
         playEl(el);
-        setState((cur) => ({ ...cur, index: next, clipElapsed: 0 }));
+        setState((cur) => ({ ...cur, index: next }));
       });
       audioRef.current = el;
     }
@@ -97,7 +100,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       } else {
         apply();
       }
-      setState((s) => ({ ...s, index, clipElapsed: offset, playing: play }));
+      setState((s) => ({ ...s, index, playing: play }));
+      setClipElapsed(offset);
     };
     return {
       ...state,
@@ -121,7 +125,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           setState((s) => ({ ...s, chapterTitle, clips }));
           return;
         }
-        setState({ bookId, chapterTitle, index: 0, clips, playing: !!opts?.autoplay && clips.length > 0, clipElapsed: 0 });
+        setState({ bookId, chapterTitle, index: 0, clips, playing: !!opts?.autoplay && clips.length > 0 });
+        setClipElapsed(0);
         if (clips.length) {
           el.src = clips[0].src;
           el.currentTime = 0;
@@ -174,5 +179,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, volume, rate]);
 
-  return <PlayerContext.Provider value={api}>{children}</PlayerContext.Provider>;
+  return (
+    <PlayerContext.Provider value={api}>
+      <PlayerTimeContext.Provider value={clipElapsed}>{children}</PlayerTimeContext.Provider>
+    </PlayerContext.Provider>
+  );
 }
