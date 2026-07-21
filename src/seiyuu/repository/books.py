@@ -91,14 +91,19 @@ def get_book_status(
     *,
     books_dir: Path | None = None,
     output_dir: Path | None = None,
+    read_meta: bool = True,
 ) -> BookStatus:
-    """Compute a single book's pipeline status from its markers. ``book_id`` must be exact."""
+    """Compute a single book's pipeline status from its markers. ``book_id`` must be exact.
+
+    ``read_meta=False`` skips the title/authors read — that parses the ENTIRE
+    normalized.json (megabytes on a real book), which existence-gate callers on hot
+    request paths never look at; they get ``title=None, authors=[]``."""
     books_dir, output_dir = _default_roots(books_dir, output_dir)
     bdir = books_dir / book_id
     odir = output_dir / book_id
     normalized = bdir / NORMALIZED_NAME
     ingested = normalized.is_file()
-    title, authors = _read_book_meta(normalized) if ingested else (None, [])
+    title, authors = _read_book_meta(normalized) if (ingested and read_meta) else (None, [])
     assembled = (odir / CHAPTERS_DIR).is_dir() and any((odir / CHAPTERS_DIR).glob("*.mp3"))
     return BookStatus(
         book_id=book_id,

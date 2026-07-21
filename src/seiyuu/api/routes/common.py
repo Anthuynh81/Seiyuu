@@ -21,9 +21,14 @@ def check_book_id(book_id: str) -> None:
         raise ApiError(422, "invalid", f"invalid book id {book_id!r}")
 
 
-def status_or_404(cfg: Settings, book_id: str) -> BookStatus:
+def status_or_404(cfg: Settings, book_id: str, *, read_meta: bool = False) -> BookStatus:
+    """Existence gate on the stage markers. Meta (title/authors) defaults OFF: reading it
+    parses the whole normalized.json per call, and this runs at the front of nearly every
+    book route — only ``book_detail`` (which serializes the status) opts back in."""
     check_book_id(book_id)
-    status = get_book_status(book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir)
+    status = get_book_status(
+        book_id, books_dir=cfg.books_dir, output_dir=cfg.output_dir, read_meta=read_meta
+    )
     if not any(
         [
             status.ingested,
