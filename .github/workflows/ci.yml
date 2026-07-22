@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      # test_assemble/test_master shell out to real ffmpeg; current ubuntu-latest
+      # images no longer preinstall it.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # The locked torch is the cu126 build, but uv.lock (resolved on Windows) lacks
+      # torch's Linux-only nvidia-* runtime deps — the pytorch index publishes
+      # platform-inconsistent wheel metadata — so the cu126 build cannot even import
+      # on the runner. CI has no GPU and the default suite is CPU-only by design, so
+      # install the SAME pinned version in its +cpu variant instead (also ~2.3GB
+      # smaller). All `uv run` steps need --no-sync or they would reinstall cu126.
+      - name: Install dependencies (CPU torch)
+        run: |
+          uv sync --locked --no-install-package torch --no-install-package torchaudio
+          uv pip install torch==2.6.0+cpu torchaudio==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
+      - name: Ruff lint
+        run: uv run --no-sync ruff check
+      - name: Ruff format
+        run: uv run --no-sync ruff format --check
+      - name: Pytest (default suite, parallel)
+        run: uv run --no-sync pytest -q -n auto
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (oxlint)
+        run: npm run lint
+      - name: Typecheck (tsc -b)
+        run: npx tsc -b
+      - name: Vitest
+        run: npx vitest run

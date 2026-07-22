@@ -36,6 +36,7 @@ seiyuu = "seiyuu.cli:main"
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.15",
 ]
 

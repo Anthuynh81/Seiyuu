@@ -1,9 +1,32 @@
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from ebooklib import epub
 
+from seiyuu.gpu import get_gpu_manager
+from seiyuu.settings import get_settings
+
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test gets its own settings data_dir — and therefore its own gpu.lock.
+
+    The get_gpu_manager() singleton arms a cross-PROCESS file lock at
+    data_dir/gpu.lock. Pointed at the real data/ dir, parallel pytest-xdist
+    workers (or a live API server on this machine) contend on that one OS lock
+    and unrelated tests fail with GpuBusyError. Per-test isolation keeps the
+    suite parallel-safe and off the real data/ directory entirely.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    get_gpu_manager.cache_clear()
+    yield
+    get_settings.cache_clear()
+    get_gpu_manager.cache_clear()
+
 
 CH12_HTML = """<html><body>
 <h2>Chapter 1</h2>
