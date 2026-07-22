@@ -41,6 +41,9 @@ def _alice(chunk, registry, attempt):
 @pytest.fixture
 def books_dir(tmp_path):
     book = make_book()
+    # Real quoted dialogue so the chunk reaches the (faked) provider — a quote-free book
+    # would take the narration fast path and never consult it.
+    book.chapters[0].blocks[1].text = '"Hello world."'
     book_dir = tmp_path / "books" / book.book_meta.book_id
     book_dir.mkdir(parents=True)
     (book_dir / "normalized.json").write_text(book.model_dump_json(), encoding="utf-8")

@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     attribution_chunk_tokens: int = 800
     attribution_chunk_overlap_blocks: int = 2
     attribution_max_local_retries: int = 2
+    # Skip the LLM entirely for chunks with no quoted span / thought candidate — the model
+    # provably cannot affect such a chunk's segments (see attribute_book). Off only if you
+    # want CharacterMention enrichment from narration-only scenes.
+    attribution_narration_fast_path: bool = True
     # Speaker calls below this confidence are surfaced for review in the characters report.
     attribution_confidence_threshold: float = 0.7
     # Hybrid escalation: when on, chunks that fail local retries re-run through anthropic.

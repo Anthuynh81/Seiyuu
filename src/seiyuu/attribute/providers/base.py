@@ -193,6 +193,9 @@ class AttributionLLM(ABC):
     # chunk call; only SINGLE_CURLY changes the span split. The class default keeps every
     # direct caller (tests, one-off structured calls) on the proven double-quote path.
     dialogue_convention: DialogueConvention = DialogueConvention.DOUBLE
+    # Class-level default so scripted test providers that bypass __init__ still resolve it
+    # (instances set it in __init__ as before).
+    emit_thoughts: bool = False
 
     def __init__(
         self,
@@ -213,6 +216,43 @@ class AttributionLLM(ABC):
     def unload(self) -> None:  # noqa: B027 — intentional no-op default; cloud providers override nothing
         """Free GPU memory (GpuConsumer protocol). No-op default; cloud providers need nothing."""
 
+    def _spans_for(self, chunk: Chunk) -> dict[str, list[Span]]:
+        """Each owned block's deterministic spans under this provider's convention.
+
+        Thought-off (default): no italic offsets are passed, so the sub-split reproduces
+        the quote-only split exactly and no candidates are generated — byte-identical to
+        v3. Shared by ``attribute_chunk`` and ``narration_only_attribution`` so the two
+        paths can never disagree about what needs the model."""
+        return {
+            b.id: thought_candidate_spans(
+                b.id,
+                b.text,
+                b.italic_spans if self.emit_thoughts else [],
+                convention=self.dialogue_convention,
+            )
+            for b in chunk.owned_blocks
+        }
+
+    def narration_only_attribution(self, chunk: Chunk) -> ChunkAttribution | None:
+        """The deterministic result for a chunk the model could not influence, else None.
+
+        When no owned block has a quoted span (under the active dialogue convention) or a
+        thought candidate, ``_assemble_segments`` emits DIALOGUE only for quoted spans and
+        THOUGHT only for generated candidate ids — so every span degrades to narration
+        regardless of what the model would have returned, and the round trip buys nothing.
+        Synthesizing with an EMPTY model output through the same assembler guarantees
+        byte-equivalence (narration emotions are always None either way). The only loss is
+        CharacterMention enrichment, and the prompt asks only for people who SPEAK in the
+        slice, so a compliant model returns none on such chunks anyway.
+        """
+        spans_by_block = self._spans_for(chunk)
+        if any(
+            span.quoted or span.candidate_id for spans in spans_by_block.values() for span in spans
+        ):
+            return None
+        segments, segment_emotions = self._assemble_segments([], spans_by_block, [])
+        return ChunkAttribution(segments=segments, characters=[], segment_emotions=segment_emotions)
+
     def attribute_chunk(
         self, chunk: Chunk, registry: CharacterRegistry, attempt: int = 0
     ) -> ChunkAttribution:
@@ -222,17 +262,7 @@ class AttributionLLM(ABC):
         is sliced from the source, so reconstruction cannot be violated by the model.
         ``attempt`` is the 0-based retry index; a retry adds a corrective reminder.
         """
-        # Thought-off (default): pass no italic offsets, so the sub-split reproduces the
-        # quote-only split exactly and no candidates are generated — byte-identical to v3.
-        spans_by_block = {
-            b.id: thought_candidate_spans(
-                b.id,
-                b.text,
-                b.italic_spans if self.emit_thoughts else [],
-                convention=self.dialogue_convention,
-            )
-            for b in chunk.owned_blocks
-        }
+        spans_by_block = self._spans_for(chunk)
         template = _prompt_template(self.prompts_dir, base_prompt_version(self.prompt_version))
         candidates = _render_thought_candidates(spans_by_block) if self.emit_thoughts else "(none)"
         # v5/v6 index multi-quote blocks so the model labels quotes BY INDEX (F1); v3/v4 keep

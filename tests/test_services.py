@@ -225,8 +225,17 @@ def _alice_script(chunk, registry, attempt):
     )
 
 
-def test_run_attribution_writes_raw_but_returns_effective(tmp_path):
+def _quoted_book():
+    """make_book() with real quoted dialogue so chunks reach the provider — a quote-free
+    book takes the narration fast path and never consults it."""
     book = make_book()
+    book.chapters[0].blocks[1].text = '"Hello world."'
+    book.chapters[1].blocks[1].text = '"Second chapter."'
+    return book
+
+
+def test_run_attribution_writes_raw_but_returns_effective(tmp_path):
+    book = _quoted_book()
     book_dir = tmp_path / "books" / book.book_meta.book_id
     book_dir.mkdir(parents=True)
     append_edit(book_dir, RenameCharacter(character_id="alice", new_name="Alicia"))
@@ -269,7 +278,7 @@ def test_run_attribution_frees_gpu_on_failure(tmp_path):
     def explode(chunk, registry, attempt):
         raise RuntimeError("provider blew up")
 
-    book = make_book()
+    book = _quoted_book()
     book_dir = tmp_path / "books" / book.book_meta.book_id
     book_dir.mkdir(parents=True)
     gpu = GpuResourceManager()
@@ -291,7 +300,7 @@ def test_partial_reattribution_merges_instead_of_replacing(tmp_path):
             characters=[CharacterMention(name="Bob", gender="male")],
         )
 
-    book = make_book()
+    book = _quoted_book()
     book_dir = tmp_path / "books" / book.book_meta.book_id
     book_dir.mkdir(parents=True)
     cfg = get_settings()
