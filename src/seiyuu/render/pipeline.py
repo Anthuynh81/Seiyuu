@@ -7,6 +7,8 @@ goes through the segment cache.
 
 import hashlib
 import json
+import queue
+import threading
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -27,7 +29,13 @@ from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.cache import SegmentCache, SegmentKey
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
 from seiyuu.repository import atomic_write_text
-from seiyuu.validate import SegmentWords, ValidationResult, Validator, WordTiming
+from seiyuu.validate import (
+    SegmentWords,
+    ValidationResult,
+    Validator,
+    WordTiming,
+    resample_to_whisper,
+)
 from seiyuu.voices import (
     VoiceAssignment,
     VoiceLibrary,
@@ -234,52 +242,260 @@ def _validate_capturing_words(
     return validator.validate(wav_path, text), None
 
 
-def _synthesize_validated(
-    engine: TTSEngine,
-    text: str,
-    voice_arg: str,
-    settings: dict[str, Any],
-    seed: int | None,
-    *,
-    validator: Validator | None,
-    max_retries: int,
-    cache_dir: Path,
-) -> tuple[Any, ValidationResult | None, int, list[WordTiming] | None]:
-    """Synthesize one segment, returning (audio, validation, attempts, words).
+@dataclass
+class _PendingSegment:
+    """One `requires_validation` segment in flight through the synth→whisper overlap.
 
-    Deterministic engines (or when no validator is supplied) synthesize once and skip
-    validation (and produce no words — those engines align lazily on first Listen). LLM-style
-    engines (`requires_validation`) transcribe each attempt and, on a failure, retry with a
-    fresh seed up to `max_retries` more times, keeping the best-scoring attempt. The kept
-    attempt's word timings (F2) ride out of the SAME transcription used for its score, so the
-    seek points target exactly the audio that ships. A persistent failure is returned (not
-    raised) so the caller can flag it for review rather than silently ship — or drop — it.
-    """
-    base = dict(settings)
-    if not engine.requires_validation or validator is None:
-        synth = {**base, **({"seed": seed} if seed is not None else {})}
-        return engine.synthesize(text, voice_arg, synth), None, 1, None
+    Its manifest row is a placeholder (None) at ``rows[slot]`` until the verdict lands.
+    ``where``/``flag_where`` carry the owning loop's own error/progress phrasing so both
+    render loops share the overlap machinery verbatim. A ``revalidate_wav`` job is a
+    cache hit with a missing verdict: score that wav once, never retry, cache nothing
+    but the verdict."""
 
-    tmp = Path(cache_dir) / "_validate.tmp.wav"
+    rows: list  # the chapter's RenderedSegment slots (None until finalized)
+    slot: int
+    block_id: str
+    block_type: BlockType
+    voice_id: str
+    seed: int | None
+    key: SegmentKey
+    text: str
+    engine: TTSEngine
+    engine_voice: str
+    settings: dict[str, Any]
+    where: str  # "book=… chapter=… block=…" in the owning loop's error shape
+    flag_where: str  # the validation-failure say() fragment in the owning loop's shape
+    revalidate_wav: Path | None = None
+    attempts: int = 0
+    audio: Any = None  # the attempt currently being scored
     best_audio: Any = None
     best_result: ValidationResult | None = None
     best_words: list[WordTiming] | None = None
-    attempts = 0
-    try:
-        for i in range(max_retries + 1):
-            attempts = i + 1
-            attempt_seed = seed if (i == 0 or seed is None) else seed + i
-            synth = {**base, **({"seed": attempt_seed} if attempt_seed is not None else {})}
-            audio = engine.synthesize(text, voice_arg, synth)
-            audio.save(tmp)
-            result, words = _validate_capturing_words(validator, tmp, text)
-            if best_result is None or result.score > best_result.score:
-                best_audio, best_result, best_words = audio, result, words
-            if result.ok:
-                break
-    finally:
-        tmp.unlink(missing_ok=True)
-    return best_audio, best_result, attempts, best_words
+
+
+class _ValidationWorker:
+    """The single background whisper thread: CPU-scores segment N while the GPU
+    synthesizes N+1. FIFO; verdicts are consumed on the render thread via collect()."""
+
+    _STOP = object()
+
+    def __init__(self, validator: Validator, cache_dir: Path) -> None:
+        self._validator = validator
+        self._cache_dir = Path(cache_dir)
+        self._todo: queue.Queue[Any] = queue.Queue()
+        self._done: queue.Queue[Any] = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, job: _PendingSegment) -> None:
+        if self._thread is None:  # lazy: a render with no validated engine never starts it
+            self._thread = threading.Thread(target=self._run, name="seiyuu-validation", daemon=True)
+            self._thread.start()
+        self._todo.put(job)
+
+    def collect(self, *, wait: bool) -> tuple | None:
+        """The next finished (job, result, words, exc), or None when none is ready — after
+        ~0.2s when waiting, so the caller can re-check cancel/lend between waits."""
+        try:
+            return self._done.get(block=wait, timeout=0.2 if wait else None)
+        except queue.Empty:
+            return None
+
+    def stop(self) -> None:
+        """Idempotent shutdown. Unscored queue entries are discarded (an aborting render
+        will never read their verdicts); the in-progress transcription finishes first."""
+        if self._thread is None:
+            return
+        try:
+            while True:
+                self._todo.get_nowait()
+        except queue.Empty:
+            pass
+        self._todo.put(self._STOP)
+        self._thread.join(timeout=60.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        while True:
+            job = self._todo.get()
+            if job is self._STOP:
+                return
+            try:
+                result, words = self._score(job)
+                self._done.put((job, result, words, None))
+            except BaseException as exc:
+                self._done.put((job, None, None, exc))
+
+    def _score(self, job: _PendingSegment) -> tuple[ValidationResult, list[WordTiming] | None]:
+        validator = self._validator
+        if job.revalidate_wav is not None:
+            return _validate_capturing_words(validator, job.revalidate_wav, job.text)
+        if getattr(validator, "accepts_arrays", False):
+            # real Validator: hand whisper the waveform, skip the tmp-wav round trip
+            source = resample_to_whisper(job.audio.samples, job.audio.sample_rate)
+            return _validate_capturing_words(validator, source, job.text)
+        tmp = self._cache_dir / f"_validate.{job.key.key_hash}.tmp.wav"
+        try:
+            job.audio.save(tmp)
+            return _validate_capturing_words(validator, tmp, job.text)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+class _ValidationOverlap:
+    """Render-thread coordinator for overlapped validation (shared by both render loops).
+
+    Whisper scoring is the ONLY thing on the worker thread; synthesis (GPU, under
+    acquire), retry dispatch with the next seed, cache writes, and manifest-row
+    finalize all stay on the render thread, so cache and manifest access remain
+    single-threaded. Retries keep the best-scoring attempt exactly like the old serial
+    helper; a persistent failure is flagged for review, never dropped. At most
+    ``_MAX_IN_FLIGHT`` segments are buffered (bounds audio memory), and drain() runs at
+    every chapter boundary so a chapter's rows are complete before it is emitted."""
+
+    _MAX_IN_FLIGHT = 2
+
+    def __init__(
+        self,
+        *,
+        validator: Validator | None,
+        cache: SegmentCache,
+        gpu: Any,
+        book_output_dir: Path,
+        say: Callable[[str], None],
+        check: Callable[[], None],
+        lend: Callable[[], None],
+        max_retries: int,
+    ) -> None:
+        self._validator = validator
+        self._cache = cache
+        self._gpu = gpu
+        self._book_output_dir = Path(book_output_dir)
+        self._say, self._check, self._lend = say, check, lend
+        self._max_retries = max_retries
+        self._worker = (
+            _ValidationWorker(validator, cache.cache_dir) if validator is not None else None
+        )
+        self._pending: dict[str, _PendingSegment] = {}
+        self.synthesized = 0
+        self.validation_failures = 0
+
+    def handles(self, engine: TTSEngine) -> bool:
+        return self._validator is not None and engine.requires_validation
+
+    def wait_for_key(self, key: SegmentKey) -> None:
+        """Park until an identical in-flight segment finalizes — its cached wav then
+        serves the new occurrence as a cache hit, preserving the serial loop's
+        no-duplicate-synthesis behavior for repeated identical blocks."""
+        while key.key_hash in self._pending:
+            self._service_step()
+
+    def submit_fresh(self, job: _PendingSegment) -> None:
+        """First synthesis attempt now (on this thread), verdict off-thread."""
+        while len(self._pending) >= self._MAX_IN_FLIGHT:
+            self._service_step()
+        self._pending[job.key.key_hash] = job
+        self._synth_attempt(job)
+        self.poll()
+
+    def submit_revalidate(self, job: _PendingSegment) -> None:
+        while len(self._pending) >= self._MAX_IN_FLIGHT:
+            self._service_step()
+        self._pending[job.key.key_hash] = job
+        self._worker.submit(job)
+        self.poll()
+
+    def poll(self) -> None:
+        """Consume already-finished verdicts without blocking (called between segments)."""
+        while self._worker is not None:
+            item = self._worker.collect(wait=False)
+            if item is None:
+                return
+            self._handle(item)
+
+    def drain(self) -> None:
+        """Block — servicing retries — until every in-flight segment has its row."""
+        while self._pending:
+            self._service_step()
+
+    def stop(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+
+    def _service_step(self) -> None:
+        # The render thread is idle while whisper works: honor cancel and lend the
+        # resident engine to a waiting audition, then handle at most one verdict.
+        self._check()
+        self._lend()
+        item = self._worker.collect(wait=True)
+        if item is not None:
+            self._handle(item)
+
+    def _handle(self, item: tuple) -> None:
+        job, result, words, exc = item
+        if exc is not None:
+            del self._pending[job.key.key_hash]
+            if isinstance(exc, RenderError):
+                raise exc
+            raise RenderError(f"synthesis failed: {job.where}: {exc}") from exc
+        if job.best_result is None or result.score > job.best_result.score:
+            job.best_audio, job.best_result, job.best_words = job.audio, result, words
+        if job.revalidate_wav is None and not result.ok and job.attempts <= self._max_retries:
+            self._synth_attempt(job)  # retry with the next seed; the engine is still resident
+            return
+        self._finalize(job)
+
+    def _synth_attempt(self, job: _PendingSegment) -> None:
+        i = job.attempts
+        job.attempts = i + 1
+        seed = job.seed if (i == 0 or job.seed is None) else job.seed + i
+        synth = {**job.settings, **({"seed": seed} if seed is not None else {})}
+        try:
+            ctx = (
+                self._gpu.acquire(job.engine, job.engine.engine_id)
+                if job.engine.uses_gpu
+                else nullcontext()
+            )
+            with ctx:
+                job.audio = job.engine.synthesize(job.text, job.engine_voice, synth)
+        except RenderError:
+            raise
+        except Exception as exc:
+            raise RenderError(f"synthesis failed: {job.where}: {exc}") from exc
+        self._worker.submit(job)
+
+    def _finalize(self, job: _PendingSegment) -> None:
+        result = job.best_result
+        if job.revalidate_wav is not None:
+            wav_path = job.revalidate_wav
+            duration = sf.info(str(wav_path)).duration
+            self._cache.put_validation(job.key, result)
+        else:
+            wav_path = self._cache.put(job.key, job.best_audio)
+            self._cache.put_validation(job.key, result)
+            duration = job.best_audio.duration_seconds
+            if job.best_words is not None:  # F2 piggyback: validated engines cache words inline
+                self._cache.put_words(
+                    job.key, SegmentWords(words=job.best_words, audio_duration=duration)
+                )
+            self.synthesized += 1
+        if not result.ok:
+            self.validation_failures += 1
+            self._say(
+                f"  ! validation failed (score {result.score}) {job.flag_where} "
+                f"after {job.attempts} attempt(s) — flagged for review"
+            )
+        job.rows[job.slot] = RenderedSegment(
+            block_id=job.block_id,
+            type=job.block_type,
+            wav=wav_path.relative_to(self._book_output_dir).as_posix(),
+            duration_seconds=round(duration, 3),
+            voice_id=job.voice_id,
+            seed=job.seed,
+            settings_hash=job.key.settings_hash,
+            validation=result,
+            synth_attempts=job.attempts,
+        )
+        del self._pending[job.key.key_hash]
 
 
 def _manifest_merge_base(
@@ -523,6 +739,10 @@ def render_book(
     profile = profile_for(engine.engine_id)
     synthesized = cache_hits = validation_failures = 0
     paid_spent = 0.0
+    overlap = _ValidationOverlap(
+        validator=validator, cache=cache, gpu=gpu, book_output_dir=book_output_dir,
+        say=say, check=check, lend=lend, max_retries=validation_max_retries,
+    )  # fmt: skip
     try:
         for ci, chapter in enumerate(book.chapters, start=1):
             if wanted and ci not in wanted:
@@ -530,10 +750,11 @@ def render_book(
             check()
             lend()
             say(f"chapter {ci}/{len(book.chapters)}: {chapter.title}")
-            segments: list[RenderedSegment] = []
+            segments: list[RenderedSegment | None] = []
             for block in chapter.blocks:
                 check()
                 lend()
+                overlap.poll()  # consume any finished verdicts between segments
                 if block.type is BlockType.SCENE_BREAK:
                     segments.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
@@ -546,72 +767,129 @@ def render_book(
                     seed=effective_seed,
                     normalized_text=text,
                 )
+                overlap.wait_for_key(key)  # an identical segment may still be in flight
                 # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
                 # same key_hash. In-scope only — the chapter-skip above already excludes the rest.
                 wav_path = None if force else cache.get(key)
                 if wav_path is not None:
                     cache_hits += 1
-                    duration = sf.info(str(wav_path)).duration
                     validation = cache.get_validation(key)
-                    attempts = 1
-                    if validation is None and engine.requires_validation and validator is not None:
+                    if validation is None and overlap.handles(engine):
                         # A cache hit with no stored verdict (crash between the wav write and
                         # the verdict write, or a pre-M4 segment) must not ship unvalidated:
-                        # re-validate the cached wav and persist the verdict so it is counted
-                        # and flagged exactly like a fresh render.
-                        validation, _words = _validate_capturing_words(validator, wav_path, text)
-                        cache.put_validation(key, validation)
-                else:
-                    paid_spent = _gate_paid(
-                        engine, text, allow_paid, paid_spent, max_paid_usd,
-                        book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
-                    )  # fmt: skip
-                    try:
-                        ctx = (
-                            gpu.acquire(engine, engine.engine_id)
-                            if engine.uses_gpu
-                            else nullcontext()
-                        )
-                        with ctx:
-                            audio, validation, attempts, words = _synthesize_validated(
-                                engine, text, engine_voice, effective_settings, effective_seed,
-                                validator=validator, max_retries=validation_max_retries,
-                                cache_dir=cache.cache_dir,
+                        # re-score the cached wav off-thread; its row (counted and flagged
+                        # exactly like a fresh render) lands when the verdict does.
+                        segments.append(None)
+                        overlap.submit_revalidate(
+                            _PendingSegment(
+                                rows=segments,
+                                slot=len(segments) - 1,
+                                block_id=block.id,
+                                block_type=block.type,
+                                voice_id=voice_id,
+                                seed=effective_seed,
+                                key=key,
+                                text=text,
+                                engine=engine,
+                                engine_voice=engine_voice,
+                                settings=effective_settings,
+                                revalidate_wav=wav_path,
+                                attempts=1,
+                                where=(
+                                    f"book={book.book_meta.book_id} chapter={ci} "
+                                    f"({chapter.title!r}) block={block.id} "
+                                    f"engine={engine.engine_id} voice={voice_id}"
+                                ),
+                                flag_where=f"block={block.id}",
                             )  # fmt: skip
-                    except RenderError:
-                        raise
-                    except Exception as exc:
-                        raise RenderError(
-                            f"synthesis failed: book={book.book_meta.book_id} "
-                            f"chapter={ci} ({chapter.title!r}) block={block.id} "
-                            f"engine={engine.engine_id} voice={voice_id}: {exc}"
-                        ) from exc
-                    wav_path = cache.put(key, audio)
-                    if validation is not None:
-                        cache.put_validation(key, validation)
-                    duration = audio.duration_seconds
-                    if words is not None:  # F2 piggyback: validated engines cache words inline
-                        cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
-                    synthesized += 1
-                if validation is not None and not validation.ok:
-                    validation_failures += 1
-                    say(
-                        f"  ! validation failed (score {validation.score}) block={block.id} "
-                        f"after {attempts} attempt(s) — flagged for review"
+                        )
+                        continue
+                    duration = sf.info(str(wav_path)).duration
+                    if validation is not None and not validation.ok:
+                        validation_failures += 1
+                        say(
+                            f"  ! validation failed (score {validation.score}) block={block.id} "
+                            f"after 1 attempt(s) — flagged for review"
+                        )
+                    segments.append(
+                        RenderedSegment(
+                            block_id=block.id,
+                            type=block.type,
+                            wav=wav_path.relative_to(book_output_dir).as_posix(),
+                            duration_seconds=round(duration, 3),
+                            voice_id=voice_id,
+                            seed=effective_seed,
+                            settings_hash=key.settings_hash,
+                            validation=validation,
+                            synth_attempts=1,
+                        )
                     )
+                    continue
+                paid_spent = _gate_paid(
+                    engine, text, allow_paid, paid_spent, max_paid_usd,
+                    book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
+                )  # fmt: skip
+                if overlap.handles(engine):
+                    # validated engine: synthesize now, score on the worker — the GPU moves
+                    # on to the next segment while whisper (CPU) scores this one
+                    segments.append(None)
+                    overlap.submit_fresh(
+                        _PendingSegment(
+                            rows=segments,
+                            slot=len(segments) - 1,
+                            block_id=block.id,
+                            block_type=block.type,
+                            voice_id=voice_id,
+                            seed=effective_seed,
+                            key=key,
+                            text=text,
+                            engine=engine,
+                            engine_voice=engine_voice,
+                            settings=effective_settings,
+                            where=(
+                                f"book={book.book_meta.book_id} chapter={ci} "
+                                f"({chapter.title!r}) block={block.id} "
+                                f"engine={engine.engine_id} voice={voice_id}"
+                            ),
+                            flag_where=f"block={block.id}",
+                        )  # fmt: skip
+                    )
+                    continue
+                # deterministic engine (or no validator): synthesize once, no verdict
+                synth = {
+                    **effective_settings,
+                    **({"seed": effective_seed} if effective_seed is not None else {}),
+                }
+                try:
+                    ctx = (
+                        gpu.acquire(engine, engine.engine_id) if engine.uses_gpu else nullcontext()
+                    )
+                    with ctx:
+                        audio = engine.synthesize(text, engine_voice, synth)
+                except RenderError:
+                    raise
+                except Exception as exc:
+                    raise RenderError(
+                        f"synthesis failed: book={book.book_meta.book_id} "
+                        f"chapter={ci} ({chapter.title!r}) block={block.id} "
+                        f"engine={engine.engine_id} voice={voice_id}: {exc}"
+                    ) from exc
+                wav_path = cache.put(key, audio)
+                synthesized += 1
                 segments.append(
                     RenderedSegment(
                         block_id=block.id,
                         type=block.type,
                         wav=wav_path.relative_to(book_output_dir).as_posix(),
-                        duration_seconds=round(duration, 3),
+                        duration_seconds=round(audio.duration_seconds, 3),
                         voice_id=voice_id,
                         seed=effective_seed,
                         settings_hash=key.settings_hash,
-                        validation=validation,
-                        synth_attempts=attempts,
+                        validation=None,
+                        synth_attempts=1,
                     )
                 )
+            overlap.drain()  # every deferred row for this chapter, before it is emitted
             rendered_chapters.append(
                 RenderedChapter(index=ci, title=chapter.title, segments=segments)
             )
@@ -620,11 +898,14 @@ def render_book(
         # immediate None (soft retry), never an about-to-be-freed instance.
         if broker is not None:
             broker.close()
+        overlap.stop()
         if engine.uses_gpu:
             # free only what this render could have loaded: a cloud-only render must not
             # evict another consumer's resident model from the shared manager
             gpu.free_all()
 
+    synthesized += overlap.synthesized
+    validation_failures += overlap.validation_failures
     manifest = RenderManifest(
         book_id=book.book_meta.book_id,
         book_title=book.book_meta.title,
@@ -744,6 +1025,10 @@ def render_book_multivoice(
     synthesized = cache_hits = validation_failures = 0
     paid_spent = 0.0
     used_gpu = False
+    overlap = _ValidationOverlap(
+        validator=validator, cache=cache, gpu=gpu, book_output_dir=book_output_dir,
+        say=say, check=check, lend=lend, max_retries=validation_max_retries,
+    )  # fmt: skip
     try:
         for ci, chapter in enumerate(book.chapters, start=1):
             if (wanted and ci not in wanted) or ci not in attributed:
@@ -757,7 +1042,7 @@ def render_book_multivoice(
             for seg, emotion in zip(att_chapter.segments, emotions, strict=True):
                 by_block.setdefault(seg.block_id, []).append((seg, emotion))
 
-            rendered: list[RenderedSegment] = []
+            rendered: list[RenderedSegment | None] = []
             for block in chapter.blocks:
                 if block.type is BlockType.SCENE_BREAK:
                     rendered.append(RenderedSegment(block_id=block.id, type=block.type))
@@ -765,6 +1050,7 @@ def render_book_multivoice(
                 for seg, emotion in by_block.get(block.id, []):
                     check()
                     lend()
+                    overlap.poll()  # consume any finished verdicts between segments
                     voice_id = resolve_voice(seg, assignment)
                     meta = meta_for(voice_id)  # verifies consent on first sight
                     engine = engine_for(meta.engine)
@@ -789,70 +1075,6 @@ def render_book_multivoice(
                         seed=meta.seed,
                         normalized_text=text,
                     )
-                    # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
-                    # same key_hash. In-scope only — the chapter-skip above excludes the rest.
-                    wav_path = None if force else cache.get(key)
-                    if wav_path is not None:
-                        cache_hits += 1
-                        duration = sf.info(str(wav_path)).duration
-                        validation = cache.get_validation(key)
-                        attempts = 1
-                        if (
-                            validation is None
-                            and engine.requires_validation
-                            and validator is not None
-                        ):
-                            # A cache hit with no stored verdict (crash between the wav write
-                            # and the verdict write, or a pre-M4 segment) must not ship
-                            # unvalidated: re-validate the cached wav and persist the verdict
-                            # so it is counted and flagged exactly like a fresh render.
-                            validation, _words = _validate_capturing_words(
-                                validator, wav_path, text
-                            )
-                            cache.put_validation(key, validation)
-                    else:
-                        paid_spent = _gate_paid(
-                            engine, text, allow_paid, paid_spent, max_paid_usd,
-                            book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
-                        )  # fmt: skip
-                        try:
-                            synth_voice = engine_voice
-                            if meta.engine == "elevenlabs":  # resolve/create the cloud voice
-                                synth_voice = ensure_cloud_voice(
-                                    meta, engine.client, library, max_slots=cloud_max_slots
-                                )
-                            used_gpu = used_gpu or engine.uses_gpu
-                            ctx = (
-                                gpu.acquire(engine, engine.engine_id)
-                                if engine.uses_gpu
-                                else nullcontext()
-                            )
-                            with ctx:
-                                audio, validation, attempts, words = _synthesize_validated(
-                                    engine, text, synth_voice, settings, meta.seed,
-                                    validator=validator, max_retries=validation_max_retries,
-                                    cache_dir=cache.cache_dir,
-                                )  # fmt: skip
-                        except RenderError:
-                            raise
-                        except Exception as exc:
-                            raise RenderError(
-                                f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
-                                f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
-                            ) from exc
-                        wav_path = cache.put(key, audio)
-                        if validation is not None:
-                            cache.put_validation(key, validation)
-                        duration = audio.duration_seconds
-                        if words is not None:  # F2 piggyback: validated engines cache words inline
-                            cache.put_words(key, SegmentWords(words=words, audio_duration=duration))
-                        synthesized += 1
-                    if validation is not None and not validation.ok:
-                        validation_failures += 1
-                        say(
-                            f"  ! validation failed (score {validation.score}) block={block.id} "
-                            f"voice={voice_id} after {attempts} attempt(s) — flagged for review"
-                        )
                     voices_used.setdefault(
                         voice_id,
                         VoiceUse(
@@ -861,19 +1083,140 @@ def render_book_multivoice(
                             kind=meta.kind.value,
                         ),
                     )
+                    overlap.wait_for_key(key)  # an identical segment may still be in flight
+                    # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
+                    # same key_hash. In-scope only — the chapter-skip above excludes the rest.
+                    wav_path = None if force else cache.get(key)
+                    if wav_path is not None:
+                        cache_hits += 1
+                        validation = cache.get_validation(key)
+                        if validation is None and overlap.handles(engine):
+                            # A cache hit with no stored verdict (crash between the wav write
+                            # and the verdict write, or a pre-M4 segment) must not ship
+                            # unvalidated: re-score the cached wav off-thread; its row (counted
+                            # and flagged exactly like a fresh render) lands with the verdict.
+                            rendered.append(None)
+                            overlap.submit_revalidate(
+                                _PendingSegment(
+                                    rows=rendered,
+                                    slot=len(rendered) - 1,
+                                    block_id=block.id,
+                                    block_type=block.type,
+                                    voice_id=voice_id,
+                                    seed=meta.seed,
+                                    key=key,
+                                    text=text,
+                                    engine=engine,
+                                    engine_voice=engine_voice,
+                                    settings=settings,
+                                    revalidate_wav=wav_path,
+                                    attempts=1,
+                                    where=(
+                                        f"book={book.book_meta.book_id} chapter={ci} "
+                                        f"block={block.id} voice={voice_id} engine={meta.engine}"
+                                    ),
+                                    flag_where=f"block={block.id} voice={voice_id}",
+                                )  # fmt: skip
+                            )
+                            continue
+                        duration = sf.info(str(wav_path)).duration
+                        if validation is not None and not validation.ok:
+                            validation_failures += 1
+                            say(
+                                f"  ! validation failed (score {validation.score}) "
+                                f"block={block.id} voice={voice_id} after 1 attempt(s) — "
+                                f"flagged for review"
+                            )
+                        rendered.append(
+                            RenderedSegment(
+                                block_id=block.id,
+                                type=block.type,
+                                wav=wav_path.relative_to(book_output_dir).as_posix(),
+                                duration_seconds=round(duration, 3),
+                                voice_id=voice_id,
+                                seed=meta.seed,
+                                settings_hash=key.settings_hash,
+                                validation=validation,
+                                synth_attempts=1,
+                            )
+                        )
+                        continue
+                    paid_spent = _gate_paid(
+                        engine, text, allow_paid, paid_spent, max_paid_usd,
+                        book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
+                    )  # fmt: skip
+                    try:
+                        synth_voice = engine_voice
+                        if meta.engine == "elevenlabs":  # resolve/create the cloud voice
+                            synth_voice = ensure_cloud_voice(
+                                meta, engine.client, library, max_slots=cloud_max_slots
+                            )
+                    except RenderError:
+                        raise
+                    except Exception as exc:
+                        raise RenderError(
+                            f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
+                            f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
+                        ) from exc
+                    used_gpu = used_gpu or engine.uses_gpu
+                    if overlap.handles(engine):
+                        # validated engine: synthesize now, score on the worker — the GPU
+                        # moves on to the next segment while whisper (CPU) scores this one
+                        rendered.append(None)
+                        overlap.submit_fresh(
+                            _PendingSegment(
+                                rows=rendered,
+                                slot=len(rendered) - 1,
+                                block_id=block.id,
+                                block_type=block.type,
+                                voice_id=voice_id,
+                                seed=meta.seed,
+                                key=key,
+                                text=text,
+                                engine=engine,
+                                engine_voice=synth_voice,
+                                settings=settings,
+                                where=(
+                                    f"book={book.book_meta.book_id} chapter={ci} "
+                                    f"block={block.id} voice={voice_id} engine={meta.engine}"
+                                ),
+                                flag_where=f"block={block.id} voice={voice_id}",
+                            )  # fmt: skip
+                        )
+                        continue
+                    # deterministic or cloud engine: synthesize once, no verdict
+                    synth = {**settings, **({"seed": meta.seed} if meta.seed is not None else {})}
+                    try:
+                        ctx = (
+                            gpu.acquire(engine, engine.engine_id)
+                            if engine.uses_gpu
+                            else nullcontext()
+                        )
+                        with ctx:
+                            audio = engine.synthesize(text, synth_voice, synth)
+                    except RenderError:
+                        raise
+                    except Exception as exc:
+                        raise RenderError(
+                            f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
+                            f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
+                        ) from exc
+                    wav_path = cache.put(key, audio)
+                    synthesized += 1
                     rendered.append(
                         RenderedSegment(
                             block_id=block.id,
                             type=block.type,
                             wav=wav_path.relative_to(book_output_dir).as_posix(),
-                            duration_seconds=round(duration, 3),
+                            duration_seconds=round(audio.duration_seconds, 3),
                             voice_id=voice_id,
                             seed=meta.seed,
                             settings_hash=key.settings_hash,
-                            validation=validation,
-                            synth_attempts=attempts,
+                            validation=None,
+                            synth_attempts=1,
                         )
                     )
+            overlap.drain()  # every deferred row for this chapter, before it is emitted
             rendered_chapters.append(
                 RenderedChapter(index=ci, title=chapter.title, segments=rendered)
             )
@@ -882,11 +1225,14 @@ def render_book_multivoice(
         # immediate None (soft retry), never an about-to-be-freed instance.
         if broker is not None:
             broker.close()
+        overlap.stop()
         # free the GPU for the next stage/process — but only if this render acquired it;
         # a cloud-only render must not evict another consumer's resident model
         if used_gpu:
             gpu.free_all()
 
+    synthesized += overlap.synthesized
+    validation_failures += overlap.validation_failures
     manifest = RenderManifest(
         book_id=book.book_meta.book_id,
         book_title=book.book_meta.title,

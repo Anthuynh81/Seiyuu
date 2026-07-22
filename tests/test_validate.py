@@ -73,3 +73,26 @@ def test_transcription_error_is_loud():
         assert "transcription failed" in str(exc)
     else:
         raise AssertionError("expected ValidationError")
+
+
+def test_resample_to_whisper_hits_16k():
+    import numpy as np
+
+    from seiyuu.validate import resample_to_whisper
+
+    out = resample_to_whisper(np.zeros(24_000, dtype=np.float32), 24_000)
+    assert out.dtype == np.float32 and len(out) == 16_000
+    passthrough = resample_to_whisper(out, 16_000)
+    assert passthrough.dtype == np.float32 and len(passthrough) == 16_000
+
+
+def test_validator_accepts_in_memory_waveform():
+    import numpy as np
+
+    whisper = FakeWhisper("hello there")
+    v = Validator(model=whisper, min_ratio=0.5)
+    waveform = np.zeros(16_000, dtype=np.float32)
+    result = v.validate(waveform, "hello there")
+    assert result.ok
+    source, _kwargs = whisper.calls[0]
+    assert isinstance(source, np.ndarray)  # never str()-ed into a bogus path
