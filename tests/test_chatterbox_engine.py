@@ -128,3 +128,45 @@ def test_unload_drops_model(tmp_path):
 def test_get_engine_resolves_chatterbox(tmp_path):
     eng = get_engine("chatterbox", voices_dir=tmp_path, model=_FakeModel())
     assert isinstance(eng, ChatterboxEngine) and eng.engine_id == "chatterbox"
+
+
+def test_same_voice_skips_conds_reload(tmp_path, monkeypatch):
+    # Thousands of consecutive same-voice segments (and every validation retry) must not
+    # pay the conds disk read + host-to-device copy per segment; the memo resets on a
+    # voice switch and on unload.
+    voices = _voice(tmp_path)
+    _voice(tmp_path, "other_1234")
+    model = _FakeModel()
+    eng = ChatterboxEngine(device="cpu", voices_dir=voices, model=model)
+    eng.conds_path("elena_9f3a").write_text("cached", encoding="utf-8")
+    eng.conds_path("other_1234").write_text("cached", encoding="utf-8")
+    loads = []
+    monkeypatch.setattr(eng, "_load_conds", lambda path: loads.append(path) or "LOADED")
+
+    eng.synthesize("One.", "elena_9f3a", {"seed": 1})
+    eng.synthesize("Two.", "elena_9f3a", {"seed": 1})  # same voice: no reload
+    assert len(loads) == 1
+
+    eng.synthesize("Three.", "other_1234", {"seed": 1})  # voice switch: reload
+    eng.synthesize("Four.", "elena_9f3a", {"seed": 1})  # switch back: reload again
+    assert len(loads) == 3
+
+    eng.unload()
+    eng._model = model  # re-inject the fake (a real unload drops the model)
+    eng.synthesize("Five.", "elena_9f3a", {"seed": 1})  # fresh model: must reload
+    assert len(loads) == 4
+
+
+def test_prepared_conds_memoized_without_reload(tmp_path, monkeypatch):
+    # The prepare branch (first-ever clone) must set the memo too: the next segment
+    # neither re-prepares nor round-trips the just-saved .pt.
+    voices = _voice(tmp_path)
+    model = _FakeModel()
+    eng = ChatterboxEngine(device="cpu", voices_dir=voices, model=model)
+    loads = []
+    monkeypatch.setattr(eng, "_load_conds", lambda path: loads.append(path) or "LOADED")
+
+    eng.synthesize("One.", "elena_9f3a", {"seed": 1})  # prepares + saves the conds
+    model.prepared = None
+    eng.synthesize("Two.", "elena_9f3a", {"seed": 1})
+    assert model.prepared is None and loads == []  # neither re-prepared nor loaded

@@ -391,3 +391,163 @@ def test_segments_cached_on_second_run(tmp_path, monkeypatch):
     first = render_book_multivoice(*args, gpu=GpuResourceManager())
     second = render_book_multivoice(*args, gpu=GpuResourceManager())
     assert first.synthesized > 0 and second.synthesized == 0 and second.cache_hits > 0
+
+
+def test_multivoice_groups_synthesis_by_engine(tmp_path, monkeypatch):
+    # Alternating narrator/dialogue across two engines must synthesize grouped per
+    # engine: ONE unload per engine per render (eviction at the group switch + the
+    # final free_all), not one at every voice alternation — while the manifest keeps
+    # strict reading order.
+    class TrackingEngine(FakeEngine):
+        def __init__(self, engine_id: str) -> None:
+            super().__init__()
+            self.engine_id = engine_id
+            self.unloads = 0
+
+        def unload(self) -> None:
+            self.unloads += 1
+
+    eng_a, eng_b = TrackingEngine("fake_a"), TrackingEngine("fake_b")
+    monkeypatch.setattr(
+        "seiyuu.render.pipeline.get_engine",
+        lambda engine_id, **kw: {"fake_a": eng_a, "fake_b": eng_b}[engine_id],
+    )
+    lib = VoiceLibrary(tmp_path / "voices")
+    lib.save(
+        VoiceMeta(
+            voice_id="narrator_v",
+            name="N",
+            kind=VoiceKind.PRESET,
+            engine="fake_a",
+            preset_id="voice_n",
+        )  # fmt: skip
+    )
+    lib.save(
+        VoiceMeta(
+            voice_id="alice_v",
+            name="A",
+            kind=VoiceKind.PRESET,
+            engine="fake_b",
+            preset_id="voice_a",
+        )  # fmt: skip
+    )
+
+    book = make_book()
+    book = book.model_copy(
+        update={
+            "chapters": [
+                Chapter(
+                    title="Chapter 1",
+                    blocks=[
+                        Block(id="ch001_b0001", type=BlockType.PARAGRAPH, text="Narr one."),
+                        Block(id="ch001_b0002", type=BlockType.PARAGRAPH, text="Line one."),
+                        Block(id="ch001_b0003", type=BlockType.PARAGRAPH, text="Narr two."),
+                        Block(id="ch001_b0004", type=BlockType.PARAGRAPH, text="Line two."),
+                    ],
+                )
+            ]
+        }
+    )
+    report = AttributionReport(
+        book_id="test-book-00000000",
+        provider_id="local",
+        model_id="m",
+        prompt_version="v3",
+        registry=CharacterRegistry(characters=[Character(id="alice", canonical_name="Alice")]),
+        chapters=[
+            AttributedChapter(
+                index=1,
+                title="Chapter 1",
+                segments=[
+                    Segment(block_id="ch001_b0001", type=SegmentType.NARRATION, text="Narr one."),
+                    Segment(
+                        block_id="ch001_b0002",
+                        type=SegmentType.DIALOGUE,
+                        text="Line one.",
+                        speaker="alice",
+                    ),  # fmt: skip
+                    Segment(block_id="ch001_b0003", type=SegmentType.NARRATION, text="Narr two."),
+                    Segment(
+                        block_id="ch001_b0004",
+                        type=SegmentType.DIALOGUE,
+                        text="Line two.",
+                        speaker="alice",
+                    ),  # fmt: skip
+                ],
+            )
+        ],
+    )
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+
+    result = render_book_multivoice(
+        report, book, lib, assignment, tmp_path / "out", gpu=GpuResourceManager()
+    )
+
+    # grouped synthesis order per engine...
+    assert [t for t, _ in eng_a.calls] == ["Narr one.", "Narr two."]
+    assert [t for t, _ in eng_b.calls] == ["Line one.", "Line two."]
+    # ...one eviction of A at the group switch, one unload of B at the final free_all
+    assert eng_a.unloads == 1 and eng_b.unloads == 1
+    # ...and the manifest still reads in strict reading order
+    rows = result.manifest.chapters[0].segments
+    assert [(s.block_id, s.voice_id) for s in rows] == [
+        ("ch001_b0001", "narrator_v"),
+        ("ch001_b0002", "alice_v"),
+        ("ch001_b0003", "narrator_v"),
+        ("ch001_b0004", "alice_v"),
+    ]
+    assert result.synthesized == 4
+
+
+def test_multivoice_uses_engine_provider_when_given(tmp_path, monkeypatch):
+    # Server path: engines come from the injected provider (the process-lifetime
+    # registry), so a model warmed by a warmup job or audition is reused instead of a
+    # fresh instance evicting it and cold-loading the same weights.
+    provided = FakeEngine()
+    asked: list[str] = []
+
+    def provider(engine_id: str):
+        asked.append(engine_id)
+        return provided
+
+    monkeypatch.setattr(
+        "seiyuu.render.pipeline.get_engine",
+        lambda *a, **kw: pytest.fail("constructed a fresh engine despite engine_provider"),
+    )
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    result = render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out",
+        gpu=GpuResourceManager(), engine_provider=provider,
+    )  # fmt: skip
+    assert asked == ["kokoro"]  # consulted once per engine id, then memoized
+    assert result.synthesized > 0 and provided.calls
+
+
+def test_multivoice_release_gpu_false_leaves_engine_resident(tmp_path, monkeypatch):
+    fake = FakeEngine()
+    _patch_engine(monkeypatch, fake)
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    gpu = GpuResourceManager()
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out", gpu=gpu, release_gpu=False
+    )
+    assert gpu.holds(fake)  # lazily resident for the next job/audition
+
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out2", gpu=gpu
+    )  # default releases
+    assert gpu.resident is None
