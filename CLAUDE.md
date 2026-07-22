@@ -106,6 +106,10 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
 ## Testing
 - `uv run pytest` — default suite, CPU-only, fast; pyproject.toml sets
   `addopts = "-m 'not gpu'"`. Must pass before any task is done.
+- `uv run pytest -n auto` — same suite in parallel (pytest-xdist), ~4x faster;
+  parallel-safe because conftest isolates data_dir (and thus gpu.lock) per test.
+- CI (`.github/workflows/ci.yml`) runs the backend gates (ruff + parallel pytest)
+  and frontend gates (oxlint, tsc -b, vitest) on every PR and push to main.
 - `uv run pytest -m gpu` — TTS smoke tests; only when engine code changed, and ask
   before multi-minute GPU jobs.
 - No live LLM or TTS calls in the default suite — recorded fixtures only (record
