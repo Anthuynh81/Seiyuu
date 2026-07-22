@@ -19,6 +19,10 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+      # test_assemble/test_master shell out to real ffmpeg; current ubuntu-latest
+      # images no longer preinstall it.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       # The locked torch is the cu126 build, but uv.lock (resolved on Windows) lacks
       # torch's Linux-only nvidia-* runtime deps — the pytorch index publishes
       # platform-inconsistent wheel metadata — so the cu126 build cannot even import
