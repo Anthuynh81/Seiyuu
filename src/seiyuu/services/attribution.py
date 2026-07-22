@@ -231,6 +231,7 @@ def run_attribution(
                     adjudication_confidence_threshold=cfg.adjudication_confidence_threshold,
                     adjudication_candidate_cap=cfg.adjudication_candidate_cap,
                     adjudication_use_nicknames=cfg.adjudication_use_nicknames,
+                    narration_fast_path=cfg.attribution_narration_fast_path,
                 )
         if chapters:
             raw = _merge_partial_attribution(book_dir, raw)
