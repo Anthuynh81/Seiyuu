@@ -225,6 +225,7 @@ def build_handlers(
                     # this emotion-folded bill.
                     apply_emotion=eff_apply_emotion,
                     force=params.force,  # re-render: bypass cache HITs for in-scope chapters
+                    engine_provider=registry.get,  # shared instances: warm re-acquire
                 )
             else:
                 render_book(

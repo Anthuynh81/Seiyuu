@@ -501,3 +501,32 @@ def test_multivoice_groups_synthesis_by_engine(tmp_path, monkeypatch):
         ("ch001_b0004", "alice_v"),
     ]
     assert result.synthesized == 4
+
+
+def test_multivoice_uses_engine_provider_when_given(tmp_path, monkeypatch):
+    # Server path: engines come from the injected provider (the process-lifetime
+    # registry), so a model warmed by a warmup job or audition is reused instead of a
+    # fresh instance evicting it and cold-loading the same weights.
+    provided = FakeEngine()
+    asked: list[str] = []
+
+    def provider(engine_id: str):
+        asked.append(engine_id)
+        return provided
+
+    monkeypatch.setattr(
+        "seiyuu.render.pipeline.get_engine",
+        lambda *a, **kw: pytest.fail("constructed a fresh engine despite engine_provider"),
+    )
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    result = render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out",
+        gpu=GpuResourceManager(), engine_provider=provider,
+    )  # fmt: skip
+    assert asked == ["kokoro"]  # consulted once per engine id, then memoized
+    assert result.synthesized > 0 and provided.calls

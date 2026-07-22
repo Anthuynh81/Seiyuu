@@ -973,8 +973,15 @@ def render_book_multivoice(
     lexicon: "CompiledLexicon | None" = None,
     apply_emotion: bool = False,
     force: bool = False,
+    engine_provider: Callable[[str], TTSEngine] | None = None,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
+
+    ``engine_provider`` (server only) supplies engine instances by id — the API handler
+    passes the process-lifetime registry's ``get`` so a model warmed by a warmup job or
+    audition is REUSED (the GPU manager compares consumers by identity; a fresh instance
+    always evicts the warm one and cold-loads multi-GB weights). Default None constructs
+    engines directly, keeping the CLI and tests unchanged.
 
     Reads the attribution report (segments + resolved speaker ids), the normalized book
     (scene-break pause markers + reading order), the voice library, and the assignment. Each
@@ -1031,8 +1038,11 @@ def render_book_multivoice(
 
     def engine_for(engine_id: str) -> TTSEngine:
         if engine_id not in engines:
-            extra = voices_dir_kwargs(engine_id, library.voices_dir)
-            engines[engine_id] = get_engine(engine_id, **extra)
+            if engine_provider is not None:
+                engines[engine_id] = engine_provider(engine_id)
+            else:
+                extra = voices_dir_kwargs(engine_id, library.voices_dir)
+                engines[engine_id] = get_engine(engine_id, **extra)
         return engines[engine_id]
 
     def meta_for(voice_id: str) -> VoiceMeta:
