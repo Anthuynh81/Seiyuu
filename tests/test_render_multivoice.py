@@ -530,3 +530,24 @@ def test_multivoice_uses_engine_provider_when_given(tmp_path, monkeypatch):
     )  # fmt: skip
     assert asked == ["kokoro"]  # consulted once per engine id, then memoized
     assert result.synthesized > 0 and provided.calls
+
+
+def test_multivoice_release_gpu_false_leaves_engine_resident(tmp_path, monkeypatch):
+    fake = FakeEngine()
+    _patch_engine(monkeypatch, fake)
+    lib = _library(tmp_path)
+    assignment = VoiceAssignment(
+        book_id="test-book-00000000",
+        narrator_voice_id="narrator_v",
+        assignments={"alice": "alice_v"},
+    )
+    gpu = GpuResourceManager()
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out", gpu=gpu, release_gpu=False
+    )
+    assert gpu.holds(fake)  # lazily resident for the next job/audition
+
+    render_book_multivoice(
+        _report(), make_book(), lib, assignment, tmp_path / "out2", gpu=gpu
+    )  # default releases
+    assert gpu.resident is None

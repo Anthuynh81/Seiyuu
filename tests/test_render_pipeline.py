@@ -279,3 +279,17 @@ def test_render_with_real_kokoro(tmp_path) -> None:
     for seg in result.manifest.chapters[0].segments:
         if seg.wav is not None:
             assert seg.duration_seconds > 0.2
+
+
+def test_release_gpu_false_leaves_engine_resident(tmp_path):
+    # Server mode: the render leaves its model lazily resident (the manager's design —
+    # a competitor acquire evicts it), so the next render/audition re-acquires warm.
+    from seiyuu.gpu import GpuResourceManager
+
+    gpu = GpuResourceManager()
+    eng = FakeEngine()
+    render_book(make_book(), eng, "test_voice", tmp_path / "out", gpu=gpu, release_gpu=False)
+    assert gpu.holds(eng)  # still resident for the next job
+
+    render_book(make_book(), eng, "test_voice", tmp_path / "out2", gpu=gpu)  # CLI default
+    assert gpu.resident is None  # default True frees the card as before

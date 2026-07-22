@@ -226,6 +226,7 @@ def build_handlers(
                     apply_emotion=eff_apply_emotion,
                     force=params.force,  # re-render: bypass cache HITs for in-scope chapters
                     engine_provider=registry.get,  # shared instances: warm re-acquire
+                    release_gpu=False,  # stay lazily resident; the manager owns eviction
                 )
             else:
                 render_book(
@@ -246,6 +247,7 @@ def build_handlers(
                     broker=broker,  # lend the resident engine to auditions between segments
                     lexicon=lexicon,
                     force=params.force,  # re-render: bypass cache HITs for in-scope chapters
+                    release_gpu=False,  # stay lazily resident; the manager owns eviction
                 )
 
     # assemble/master deliberately do NOT hold the heavy-work gate: they are pure

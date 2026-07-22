@@ -682,8 +682,15 @@ def render_book(
     broker: "BorrowBroker | None" = None,
     lexicon: "CompiledLexicon | None" = None,
     force: bool = False,
+    release_gpu: bool = True,
 ) -> RenderResult:
     """Render a book (or a 1-based subset of `chapters`) with one voice.
+
+    ``release_gpu=False`` (server only) leaves the model lazily resident at the end —
+    the manager's design: a competitor acquire evicts it, lifespan teardown frees it —
+    so back-to-back renders and follow-up auditions re-acquire warm instead of paying
+    a full reload. The True default frees the card for the CLI, where an out-of-process
+    Ollama attribution stage may need the VRAM next.
 
     A chapter-subset render MERGES into the book's existing SAME-MODE manifest archive
     (same voice identity required — refused up front otherwise) instead of clobbering it;
@@ -923,7 +930,7 @@ def render_book(
         if broker is not None:
             broker.close()
         overlap.stop()
-        if engine.uses_gpu:
+        if engine.uses_gpu and release_gpu:
             # free only what this render could have loaded: a cloud-only render must not
             # evict another consumer's resident model from the shared manager
             gpu.free_all()
@@ -974,6 +981,7 @@ def render_book_multivoice(
     apply_emotion: bool = False,
     force: bool = False,
     engine_provider: Callable[[str], TTSEngine] | None = None,
+    release_gpu: bool = True,
 ) -> RenderResult:
     """Multi-voice render: attribution segments + per-character voices → cached WAVs + manifest.
 
@@ -981,7 +989,9 @@ def render_book_multivoice(
     passes the process-lifetime registry's ``get`` so a model warmed by a warmup job or
     audition is REUSED (the GPU manager compares consumers by identity; a fresh instance
     always evicts the warm one and cold-loads multi-GB weights). Default None constructs
-    engines directly, keeping the CLI and tests unchanged.
+    engines directly, keeping the CLI and tests unchanged. ``release_gpu=False`` (server
+    only, same rationale as ``render_book``) leaves the last engine lazily resident
+    instead of unloading at the end.
 
     Reads the attribution report (segments + resolved speaker ids), the normalized book
     (scene-break pause markers + reading order), the voice library, and the assignment. Each
@@ -1317,7 +1327,7 @@ def render_book_multivoice(
         overlap.stop()
         # free the GPU for the next stage/process — but only if this render acquired it;
         # a cloud-only render must not evict another consumer's resident model
-        if used_gpu:
+        if used_gpu and release_gpu:
             gpu.free_all()
 
     synthesized += overlap.synthesized
