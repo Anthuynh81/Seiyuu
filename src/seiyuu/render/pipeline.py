@@ -273,6 +273,30 @@ class _PendingSegment:
     best_words: list[WordTiming] | None = None
 
 
+@dataclass
+class _PlannedSynthesis:
+    """One uncached multivoice segment awaiting its ENGINE GROUP's synthesis pass.
+
+    The chapter plan partitions uncached segments by engine so each engine synthesizes
+    all its segments under one residency (mixing engines segment-to-segment thrashes
+    the single GPU with catastrophic reloads). The manifest row lands back at ``slot``
+    in reading order — the FROZEN per-segment cache key makes synthesis order
+    irrelevant to caching."""
+
+    slot: int
+    block_id: str
+    block_type: BlockType
+    voice_id: str
+    meta: VoiceMeta
+    engine: TTSEngine
+    text: str
+    settings: dict[str, Any]
+    key: SegmentKey
+    engine_voice: str
+    where: str
+    flag_where: str
+
+
 class _ValidationWorker:
     """The single background whisper thread: CPU-scores segment N while the GPU
     synthesizes N+1. FIFO; verdicts are consumed on the render thread via collect()."""
@@ -954,10 +978,12 @@ def render_book_multivoice(
 
     Reads the attribution report (segments + resolved speaker ids), the normalized book
     (scene-break pause markers + reading order), the voice library, and the assignment. Each
-    segment's voice is resolved, its engine acquired through the GPU manager (one heavy model
-    resident at a time), its text normalized per the engine profile, and synthesized through
-    the FROZEN SegmentKey. Segments are emitted in reading order; the per-segment cache key
-    makes that order-independent for caching.
+    chapter renders in two passes: a plan pass resolves every segment's voice/engine/key in
+    reading order and emits cache-hit rows, then the UNCACHED segments synthesize grouped
+    by engine — one residency per engine per chapter instead of a catastrophic model reload
+    at every voice alternation. Rows land back in reading order; the FROZEN per-segment
+    cache key makes synthesis order irrelevant to caching. Paid segments are still gated
+    per segment before synthesis (the cumulative budget cap is order-insensitive).
 
     A chapter-subset render MERGES into the book's existing SAME-MODE manifest archive
     (same voice assignment required — refused up front otherwise) instead of clobbering it;
@@ -1042,7 +1068,12 @@ def render_book_multivoice(
             for seg, emotion in zip(att_chapter.segments, emotions, strict=True):
                 by_block.setdefault(seg.block_id, []).append((seg, emotion))
 
+            # PASS 1 — plan (reading order, no synthesis): resolve each segment's voice/
+            # engine/key, emit cache-hit rows immediately, and partition the UNCACHED
+            # segments by engine. Missing-verdict cache hits go to the whisper worker now,
+            # so they score while pass 2 synthesizes.
             rendered: list[RenderedSegment | None] = []
+            groups: dict[str, list[_PlannedSynthesis]] = {}  # engine_id → first-appearance order
             for block in chapter.blocks:
                 if block.type is BlockType.SCENE_BREAK:
                     rendered.append(RenderedSegment(block_id=block.id, type=block.type))
@@ -1054,11 +1085,6 @@ def render_book_multivoice(
                     voice_id = resolve_voice(seg, assignment)
                     meta = meta_for(voice_id)  # verifies consent on first sight
                     engine = engine_for(meta.engine)
-                    if broker is not None and engine.uses_gpu:
-                        # this segment's engine is what will be resident; offer it at the
-                        # next yield point (lend() reads these via closure)
-                        broker.publish(meta.engine, engine)
-                        lent_id, lent_engine = meta.engine, engine
                     text = normalize_text(
                         seg.text, profile=profile_for(meta.engine), lexicon=lexicon
                     )
@@ -1083,87 +1109,43 @@ def render_book_multivoice(
                             kind=meta.kind.value,
                         ),
                     )
-                    overlap.wait_for_key(key)  # an identical segment may still be in flight
+                    where = (
+                        f"book={book.book_meta.book_id} chapter={ci} "
+                        f"block={block.id} voice={voice_id} engine={meta.engine}"
+                    )
+                    flag_where = f"block={block.id} voice={voice_id}"
+                    overlap.wait_for_key(key)  # an identical revalidation may be in flight
                     # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
                     # same key_hash. In-scope only — the chapter-skip above excludes the rest.
                     wav_path = None if force else cache.get(key)
-                    if wav_path is not None:
-                        cache_hits += 1
-                        validation = cache.get_validation(key)
-                        if validation is None and overlap.handles(engine):
-                            # A cache hit with no stored verdict (crash between the wav write
-                            # and the verdict write, or a pre-M4 segment) must not ship
-                            # unvalidated: re-score the cached wav off-thread; its row (counted
-                            # and flagged exactly like a fresh render) lands with the verdict.
-                            rendered.append(None)
-                            overlap.submit_revalidate(
-                                _PendingSegment(
-                                    rows=rendered,
-                                    slot=len(rendered) - 1,
-                                    block_id=block.id,
-                                    block_type=block.type,
-                                    voice_id=voice_id,
-                                    seed=meta.seed,
-                                    key=key,
-                                    text=text,
-                                    engine=engine,
-                                    engine_voice=engine_voice,
-                                    settings=settings,
-                                    revalidate_wav=wav_path,
-                                    attempts=1,
-                                    where=(
-                                        f"book={book.book_meta.book_id} chapter={ci} "
-                                        f"block={block.id} voice={voice_id} engine={meta.engine}"
-                                    ),
-                                    flag_where=f"block={block.id} voice={voice_id}",
-                                )  # fmt: skip
-                            )
-                            continue
-                        duration = sf.info(str(wav_path)).duration
-                        if validation is not None and not validation.ok:
-                            validation_failures += 1
-                            say(
-                                f"  ! validation failed (score {validation.score}) "
-                                f"block={block.id} voice={voice_id} after 1 attempt(s) — "
-                                f"flagged for review"
-                            )
-                        rendered.append(
-                            RenderedSegment(
+                    if wav_path is None:
+                        rendered.append(None)
+                        groups.setdefault(meta.engine, []).append(
+                            _PlannedSynthesis(
+                                slot=len(rendered) - 1,
                                 block_id=block.id,
-                                type=block.type,
-                                wav=wav_path.relative_to(book_output_dir).as_posix(),
-                                duration_seconds=round(duration, 3),
+                                block_type=block.type,
                                 voice_id=voice_id,
-                                seed=meta.seed,
-                                settings_hash=key.settings_hash,
-                                validation=validation,
-                                synth_attempts=1,
-                            )
+                                meta=meta,
+                                engine=engine,
+                                text=text,
+                                settings=settings,
+                                key=key,
+                                engine_voice=engine_voice,
+                                where=where,
+                                flag_where=flag_where,
+                            )  # fmt: skip
                         )
                         continue
-                    paid_spent = _gate_paid(
-                        engine, text, allow_paid, paid_spent, max_paid_usd,
-                        book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
-                    )  # fmt: skip
-                    try:
-                        synth_voice = engine_voice
-                        if meta.engine == "elevenlabs":  # resolve/create the cloud voice
-                            synth_voice = ensure_cloud_voice(
-                                meta, engine.client, library, max_slots=cloud_max_slots
-                            )
-                    except RenderError:
-                        raise
-                    except Exception as exc:
-                        raise RenderError(
-                            f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
-                            f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
-                        ) from exc
-                    used_gpu = used_gpu or engine.uses_gpu
-                    if overlap.handles(engine):
-                        # validated engine: synthesize now, score on the worker — the GPU
-                        # moves on to the next segment while whisper (CPU) scores this one
+                    cache_hits += 1
+                    validation = cache.get_validation(key)
+                    if validation is None and overlap.handles(engine):
+                        # A cache hit with no stored verdict (crash between the wav write
+                        # and the verdict write, or a pre-M4 segment) must not ship
+                        # unvalidated: re-score the cached wav off-thread; its row (counted
+                        # and flagged exactly like a fresh render) lands with the verdict.
                         rendered.append(None)
-                        overlap.submit_fresh(
+                        overlap.submit_revalidate(
                             _PendingSegment(
                                 rows=rendered,
                                 slot=len(rendered) - 1,
@@ -1174,49 +1156,146 @@ def render_book_multivoice(
                                 key=key,
                                 text=text,
                                 engine=engine,
-                                engine_voice=synth_voice,
+                                engine_voice=engine_voice,
                                 settings=settings,
-                                where=(
-                                    f"book={book.book_meta.book_id} chapter={ci} "
-                                    f"block={block.id} voice={voice_id} engine={meta.engine}"
-                                ),
-                                flag_where=f"block={block.id} voice={voice_id}",
+                                revalidate_wav=wav_path,
+                                attempts=1,
+                                where=where,
+                                flag_where=flag_where,
                             )  # fmt: skip
                         )
                         continue
-                    # deterministic or cloud engine: synthesize once, no verdict
-                    synth = {**settings, **({"seed": meta.seed} if meta.seed is not None else {})}
-                    try:
-                        ctx = (
-                            gpu.acquire(engine, engine.engine_id)
-                            if engine.uses_gpu
-                            else nullcontext()
+                    duration = sf.info(str(wav_path)).duration
+                    if validation is not None and not validation.ok:
+                        validation_failures += 1
+                        say(
+                            f"  ! validation failed (score {validation.score}) "
+                            f"block={block.id} voice={voice_id} after 1 attempt(s) — "
+                            f"flagged for review"
                         )
-                        with ctx:
-                            audio = engine.synthesize(text, synth_voice, synth)
-                    except RenderError:
-                        raise
-                    except Exception as exc:
-                        raise RenderError(
-                            f"synthesis failed: book={book.book_meta.book_id} chapter={ci} "
-                            f"block={block.id} voice={voice_id} engine={meta.engine}: {exc}"
-                        ) from exc
-                    wav_path = cache.put(key, audio)
-                    synthesized += 1
                     rendered.append(
                         RenderedSegment(
                             block_id=block.id,
                             type=block.type,
                             wav=wav_path.relative_to(book_output_dir).as_posix(),
-                            duration_seconds=round(audio.duration_seconds, 3),
+                            duration_seconds=round(duration, 3),
                             voice_id=voice_id,
                             seed=meta.seed,
                             settings_hash=key.settings_hash,
-                            validation=None,
+                            validation=validation,
                             synth_attempts=1,
                         )
                     )
-            overlap.drain()  # every deferred row for this chapter, before it is emitted
+
+            # PASS 2 — synthesize per engine group under ONE residency: all of an engine's
+            # segments run back-to-back, so the manager unloads/reloads at most once per
+            # engine per chapter instead of at every voice alternation (SPEC's deferred
+            # voice-grouped synthesis). Draining at each group boundary keeps validation
+            # retries on the still-resident engine.
+            for engine_id, planned in groups.items():
+                for p in planned:
+                    check()
+                    lend()
+                    overlap.poll()
+                    if broker is not None and p.engine.uses_gpu:
+                        # this group's engine is what will be resident; offer it at the
+                        # next yield point (lend() reads these via closure)
+                        broker.publish(engine_id, p.engine)
+                        lent_id, lent_engine = engine_id, p.engine
+                    overlap.wait_for_key(p.key)  # an identical twin may be in flight
+                    wav_path = None if force else cache.get(p.key)
+                    if wav_path is not None:
+                        # rendered by an identical earlier segment this run: reuse it
+                        cache_hits += 1
+                        validation = cache.get_validation(p.key)
+                        duration = sf.info(str(wav_path)).duration
+                        if validation is not None and not validation.ok:
+                            validation_failures += 1
+                            say(
+                                f"  ! validation failed (score {validation.score}) "
+                                f"{p.flag_where} after 1 attempt(s) — flagged for review"
+                            )
+                        rendered[p.slot] = RenderedSegment(
+                            block_id=p.block_id,
+                            type=p.block_type,
+                            wav=wav_path.relative_to(book_output_dir).as_posix(),
+                            duration_seconds=round(duration, 3),
+                            voice_id=p.voice_id,
+                            seed=p.meta.seed,
+                            settings_hash=p.key.settings_hash,
+                            validation=validation,
+                            synth_attempts=1,
+                        )
+                        continue
+                    paid_spent = _gate_paid(
+                        p.engine, p.text, allow_paid, paid_spent, max_paid_usd,
+                        book_id=book.book_meta.book_id, block_id=p.block_id, voice=p.voice_id,
+                    )  # fmt: skip
+                    try:
+                        synth_voice = p.engine_voice
+                        if engine_id == "elevenlabs":  # resolve/create the cloud voice
+                            synth_voice = ensure_cloud_voice(
+                                p.meta, p.engine.client, library, max_slots=cloud_max_slots
+                            )
+                    except RenderError:
+                        raise
+                    except Exception as exc:
+                        raise RenderError(f"synthesis failed: {p.where}: {exc}") from exc
+                    used_gpu = used_gpu or p.engine.uses_gpu
+                    if overlap.handles(p.engine):
+                        # validated engine: synthesize now, score on the worker — the GPU
+                        # moves on to the next segment while whisper (CPU) scores this one
+                        overlap.submit_fresh(
+                            _PendingSegment(
+                                rows=rendered,
+                                slot=p.slot,
+                                block_id=p.block_id,
+                                block_type=p.block_type,
+                                voice_id=p.voice_id,
+                                seed=p.meta.seed,
+                                key=p.key,
+                                text=p.text,
+                                engine=p.engine,
+                                engine_voice=synth_voice,
+                                settings=p.settings,
+                                where=p.where,
+                                flag_where=p.flag_where,
+                            )  # fmt: skip
+                        )
+                        continue
+                    # deterministic or cloud engine: synthesize once, no verdict
+                    synth = {
+                        **p.settings,
+                        **({"seed": p.meta.seed} if p.meta.seed is not None else {}),
+                    }
+                    try:
+                        ctx = (
+                            gpu.acquire(p.engine, p.engine.engine_id)
+                            if p.engine.uses_gpu
+                            else nullcontext()
+                        )
+                        with ctx:
+                            audio = p.engine.synthesize(p.text, synth_voice, synth)
+                    except RenderError:
+                        raise
+                    except Exception as exc:
+                        raise RenderError(f"synthesis failed: {p.where}: {exc}") from exc
+                    wav_path = cache.put(p.key, audio)
+                    synthesized += 1
+                    rendered[p.slot] = RenderedSegment(
+                        block_id=p.block_id,
+                        type=p.block_type,
+                        wav=wav_path.relative_to(book_output_dir).as_posix(),
+                        duration_seconds=round(audio.duration_seconds, 3),
+                        voice_id=p.voice_id,
+                        seed=p.meta.seed,
+                        settings_hash=p.key.settings_hash,
+                        validation=None,
+                        synth_attempts=1,
+                    )
+                overlap.drain()  # same-engine retries finish while the engine is resident
+
+            overlap.drain()  # any pass-1 revalidations left, before the chapter is emitted
             rendered_chapters.append(
                 RenderedChapter(index=ci, title=chapter.title, segments=rendered)
             )
