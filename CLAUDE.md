@@ -113,6 +113,37 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
 - The reconstruction invariant has its own adversarial fixture suite (paraphrase,
   dropped sentence, reordered dialogue).
 - `uv run ruff check` and `uv run ruff format --check` must pass before done.
+- Iterate on the narrow test file for the module you're touching (map below); run the
+  full suite once before calling a task done.
+- `tests/fixtures/` holds multi-MB epub/pdf binaries — NEVER read them into context;
+  `pnp_summary.json` is the readable summary.
+
+## Module Map (start here instead of exploratory greps)
+Backend `src/seiyuu/`:
+- `cli/` — click commands by stage: `ingest` (ingest/convert/delete), `attribute`,
+  `casting` (assign + series), `render` (+ render-mode), `assemble` (+ master),
+  `voices`, `lexicon`; shared helpers in `common.py`; group `main` in `__init__.py`.
+- `api/routes/` — one router per surface: books, render (estimate/quote/render/
+  words/audio), jobs, review (characters/segments/edits), voices, series, lexicon,
+  engines, system; shared guards in `common.py`. ALL response models live in
+  `api/schemas.py`; the paid-cost gate in `api/money.py`.
+- Stages: `ingest/` (epub.py, pdf.py + shared core) · `attribute/` (pipeline, spans,
+  aliases, providers/) · `normalize/` (profiles, lexicon; normalize_text is memoized)
+  · `render/` (pipeline, cache=SegmentKey, models=RenderManifest, gate, align) ·
+  `assemble/pipeline.py` · `engines/` · `voices/` · `services/` · `repository/`
+  (book status markers, jobs SQLite, atomic writes, covers) · `jobs/runner.py` · `gpu/`.
+Frontend `frontend/src/`:
+- `api/hooks.ts` — every query/mutation. `["books"]`/`["book"]` keys are deliberately
+  STABLE; freshness comes only from JobCompletionWatcher in App.tsx — never re-key
+  them on job state (key churn once wiped unsaved edits).
+- `screens/X.tsx` is the screen component; its helpers live in `screens/<x>/`
+  (`render/`, `review/`, `voices/`). `app/` = player (PlayerTimeContext carries the
+  elapsed tick), TransportBar, NavRail. `lib/` = pure helpers (casting, emotion,
+  money, scope, words). `components/` = shared primitives.
+Test map: API routes → `tests/test_api_m6b*.py` (`test_api_m6b6.py` pins the exact
+route list — new endpoints must be added there); read-along words →
+`test_api_segment_words.py`; CLI → `test_cli*.py`; each stage → `test_<stage>*.py`;
+frontend → co-located `*.test.tsx`.
 
 ## Commands
 - `uv run python -m seiyuu.cli convert <file.epub>` — full pipeline
