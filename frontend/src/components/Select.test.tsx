@@ -72,6 +72,8 @@ describe("TalkSelect", () => {
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith("kokoro");
     await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
-    expect(screen.getByRole("button")).toHaveFocus();
+    // react-aria restores focus to the trigger asynchronously after the popover unmounts;
+    // asserting it synchronously raced that restore and flaked in CI.
+    await waitFor(() => expect(screen.getByRole("button")).toHaveFocus());
   });
 });
