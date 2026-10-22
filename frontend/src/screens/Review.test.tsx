@@ -219,16 +219,72 @@ describe("Review", () => {
     expect(screen.getByRole("button", { name: "ALICE" })).toBeInTheDocument();
   });
 
-  it("shows the stage_prerequisite refusal for an unattributed book and fetches no review data", async () => {
+  it("an unattributed book explains itself with a Find-the-speakers step and fetches no review data", async () => {
     const server = mockApi()
       .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Raw Ingest" })] })
       .get("/api/books/b1", detailFor("b1", "Raw Ingest", false))
       .get("/api/voices", { voices: [], unreadable: [] });
     renderWithProviders(<Review />, { route: "/review?book=b1" });
 
-    expect(await screen.findByText(/this book has no attribution yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b1#find-speakers",
+    );
+    expect(screen.queryByText("stage_prerequisite")).not.toBeInTheDocument();
     expect(server.lastCall("GET", "/characters")).toBeUndefined();
     expect(server.lastCall("GET", "/segments")).toBeUndefined();
+  });
+
+  it("a book recorded in one voice but never sent through speaker-finding still gets Find the speakers", async () => {
+    const detail = detailFor("b1", "One Voice", false);
+    detail.status = { ...detail.status, rendered: true, assembled: true, mastered: true };
+    mockApi()
+      .get("/api/books", {
+        books: [makeBook({ book_id: "b1", title: "One Voice", rendered: true, assembled: true, mastered: true })],
+      })
+      .get("/api/books/b1", detail)
+      .get("/api/voices", { voices: [], unreadable: [] });
+    renderWithProviders(<Review />, { route: "/review?book=b1" });
+
+    expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b1#find-speakers",
+    );
+    expect(screen.queryByRole("link", { name: "Listen" })).not.toBeInTheDocument();
+  });
+
+  it("the no-attributed-book empty state offers Find the speakers even for a book recorded in one voice", async () => {
+    mockApi().get("/api/books", {
+      books: [makeBook({ book_id: "b3", title: "Solo", rendered: true })],
+    });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b3#find-speakers",
+    );
+    expect(screen.queryByRole("link", { name: "Build the .m4b" })).not.toBeInTheDocument();
+  });
+
+  it("with no attributed book at all, the empty state points at the first book that needs speakers", async () => {
+    mockApi().get("/api/books", {
+      books: [
+        makeBook({ book_id: "b0", title: "Gone", ingested: false }),
+        makeBook({ book_id: "b2", title: "Waiting" }),
+      ],
+    });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b2#find-speakers",
+    );
+  });
+
+  it("with no books at all, the empty state's next step is adding one", async () => {
+    mockApi().get("/api/books", { books: [] });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Add a book" })).toHaveAttribute("href", "/#add");
   });
 
   it("masks characters that debut beyond the reading frontier until revealed", async () => {
@@ -428,7 +484,7 @@ describe("Review", () => {
     expect(await screen.findByText(/reassign · ch001_b0002 \[0\]/)).toBeInTheDocument();
   });
 
-  it("suggest cast previews via POST /assignment/suggest and apply drafts with strategy=smart", async () => {
+  it("first cast: one Suggest a cast button (no hash auto-cast) previews, and apply drafts with strategy=smart", async () => {
     const user = userEvent.setup();
     const server = setupReview();
     server.post("/api/books/b1/assignment/suggest", {
@@ -439,9 +495,19 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "suggest cast" }));
+    const suggest = await screen.findByRole("button", { name: "Suggest a cast" });
+    // the collision-blind hash caster is gone from the UI (it stays in the CLI)
+    expect(screen.queryByRole("button", { name: "auto-cast" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "re-draft" })).not.toBeInTheDocument();
+    await user.click(suggest);
     expect(await screen.findByText(/2 new/)).toBeInTheDocument();
-    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toEqual({ strategy: "smart" });
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toEqual({
+      strategy: "smart",
+      stage: "draft",
+    });
+    // the preview is a table of characters with their proposed voices by name
+    const table = screen.getByRole("table", { name: "proposed voices" });
+    expect(within(table).getByRole("button", { name: /voice for Alice/ })).toHaveTextContent("auto:Alice");
 
     // applying writes the draft; the assignment refetch now returns a casting
     server.get("/api/books/b1/assignment", ASSIGNMENT);
@@ -455,9 +521,213 @@ describe("Review", () => {
     expect(await screen.findByText(/created 2 voice\(s\)/)).toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
+      stage: "draft",
+      accent: "a",
+      overrides: {},
       recast: false,
       use_llm: false,
     });
+    // applied: the preview closes
+    expect(screen.queryByRole("table", { name: "proposed voices" })).not.toBeInTheDocument();
+  });
+
+  it("changing a row in the preview re-requests it with an override, and apply sends that override", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: { ...ASSIGNMENT, assignments: { alice: "alice_auto", bob: "bob_auto" } },
+      would_create_voice_ids: ["alice_auto", "bob_auto"],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    const table = await screen.findByRole("table", { name: "proposed voices" });
+    expect(within(table).getByRole("button", { name: /voice for Bob/ })).toHaveTextContent("new voice for Bob");
+
+    // pick Bob's voice by hand: the server recomputes the preview with it as an override
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: { ...ASSIGNMENT, assignments: { alice: "alice_auto", bob: "v-narr" } },
+      would_create_voice_ids: ["alice_auto"],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    await user.click(within(table).getByRole("button", { name: /voice for Bob/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
+    await waitFor(() =>
+      expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toEqual({
+        strategy: "smart",
+        stage: "draft",
+        accent: "a",
+        overrides: { bob: "v-narr" },
+      }),
+    );
+    const bobRow = await screen.findByRole("row", { name: /Bob.*your pick/ });
+    expect(within(bobRow).getByRole("button", { name: /voice for Bob/ })).toHaveTextContent("Narrator");
+
+    server.get("/api/books/b1/assignment", ASSIGNMENT);
+    server.post("/api/books/b1/assignment/draft", {
+      assignment: ASSIGNMENT,
+      created_voice_ids: ["alice_auto"],
+      edit_warnings: [],
+    });
+    await user.click(screen.getByRole("button", { name: "apply cast" }));
+    await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
+      strategy: "smart",
+      stage: "draft",
+      accent: "a",
+      overrides: { bob: "v-narr" },
+      recast: false,
+      use_llm: false,
+    });
+  });
+
+  it("a failed preview is shown in plain words and nothing is retried", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.error("POST", "/api/books/b1/assignment/suggest", 422, "invalid", "not enough distinct voices for this cast");
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    expect(await screen.findByText("couldn't suggest a cast")).toBeInTheDocument();
+    expect(screen.getByText(/not enough distinct voices/)).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.url.includes("/assignment/suggest"))).toHaveLength(1);
+  });
+
+  it("an older preview reply that lands after a newer one never replaces the table", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    let releaseSlow: () => void = () => {};
+    const slow = new Promise<void>((resolve) => (releaseSlow = resolve));
+    const reply = (assignments: Record<string, string>) =>
+      jsonResponse({
+        assignment: { ...ASSIGNMENT, assignments },
+        would_create_voice_ids: [],
+        would_recast_voice_ids: [],
+        edit_warnings: [],
+      });
+    server.on("POST", "/api/books/b1/assignment/suggest", async (_url, init) => {
+      const overrides = (JSON.parse(String(init?.body)).overrides ?? {}) as Record<string, string>;
+      if (overrides.alice) return reply({ alice: overrides.alice, bob: overrides.bob ?? "v-bob" });
+      if (overrides.bob) {
+        await slow; // the Bob change is answered late — after the Alice change that followed it
+        return reply({ alice: "v-alice", bob: overrides.bob });
+      }
+      return reply({ alice: "v-alice", bob: "v-bob" });
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    const table = await screen.findByRole("table", { name: "proposed voices" });
+    await user.click(within(table).getByRole("button", { name: /voice for Bob/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
+    await user.click(within(table).getByRole("button", { name: /voice for Alice/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "auto:Bob · kokoro" }));
+    await waitFor(() =>
+      expect(within(table).getByRole("button", { name: /voice for Alice/ })).toHaveTextContent("auto:Bob"),
+    );
+
+    releaseSlow();
+    await waitFor(() => expect(screen.getByRole("status")).toBeEmptyDOMElement());
+    // the stale Bob-only reply (Alice back on her own voice) must not win
+    expect(within(table).getByRole("button", { name: /voice for Alice/ })).toHaveTextContent("auto:Bob");
+    expect(within(table).getByRole("button", { name: /voice for Bob/ })).toHaveTextContent("Narrator");
+  });
+
+  it("switching books while a suggestion is on its way drops it — no preview opens on the other book", async () => {
+    const user = userEvent.setup();
+    const server = mockApi().get("/api/books", {
+      books: [
+        makeBook({ book_id: "b1", title: "Book One", attributed: true }),
+        makeBook({ book_id: "b2", title: "Book Two", attributed: true }),
+      ],
+    });
+    registerBook(server, "b1", "Book One");
+    registerBook(server, "b2", "Book Two");
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    server.on("POST", "/api/books/b1/assignment/suggest", async () => {
+      await gate;
+      return jsonResponse({
+        assignment: ASSIGNMENT,
+        would_create_voice_ids: ["v-alice", "v-bob"],
+        would_recast_voice_ids: [],
+        edit_warnings: [],
+      });
+    });
+    renderWithProviders(<Review />, { route: "/review?book=b1" });
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await waitFor(() => expect(server.lastCall("POST", "/api/books/b1/assignment/suggest")).toBeDefined());
+    await user.click(screen.getByRole("button", { name: /Book One/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Book Two" }));
+    await waitFor(() => expect(server.lastCall("GET", "/api/books/b2/characters")).toBeDefined());
+
+    release();
+    // let the late reply settle, then check it opened nothing on Book Two
+    await waitFor(() => expect(screen.getByRole("button", { name: "Suggest a cast" })).toBeEnabled());
+    await gate;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole("table", { name: "proposed voices" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "suggested cast" })).not.toBeInTheDocument();
+  });
+
+  it("a refused row change is undone in plain words, not retried, and apply sends the last good choices", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: ASSIGNMENT,
+      would_create_voice_ids: ["v-alice", "v-bob"],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    const table = await screen.findByRole("table", { name: "proposed voices" });
+    server.error("POST", "/api/books/b1/assignment/suggest", 422, "invalid", "that voice can't be used here");
+    await user.click(within(table).getByRole("button", { name: /voice for Bob/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
+
+    const status = screen.getByRole("status");
+    await waitFor(() => expect(status).toHaveTextContent(/couldn't use that change, so it was undone/));
+    expect(status).toHaveTextContent(/that voice can't be used here/);
+    expect(status).not.toHaveTextContent("invalid");
+    // the panel reports it; the first-request failure box stays away
+    expect(screen.queryByText("couldn't suggest a cast")).not.toBeInTheDocument();
+    expect(server.calls.filter((c) => c.url.includes("/assignment/suggest"))).toHaveLength(2);
+
+    server.get("/api/books/b1/assignment", ASSIGNMENT);
+    server.post("/api/books/b1/assignment/draft", {
+      assignment: ASSIGNMENT,
+      created_voice_ids: [],
+      edit_warnings: [],
+    });
+    await user.click(screen.getByRole("button", { name: "apply cast" }));
+    await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toMatchObject({ overrides: {} });
+  });
+
+  it("Suggest a cast can't throw away an open preview's changes", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: ASSIGNMENT,
+      would_create_voice_ids: ["v-alice", "v-bob"],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    renderWithProviders(<Review />);
+
+    const suggest = await screen.findByRole("button", { name: "Suggest a cast" });
+    await user.click(suggest);
+    await screen.findByRole("table", { name: "proposed voices" });
+    expect(suggest).toBeDisabled();
+    // dismissing the preview frees it again
+    await user.click(screen.getByRole("button", { name: "dismiss" }));
+    expect(suggest).toBeEnabled();
   });
 
   it("applying with AI trait hints sends use_llm=true; a 402 gates on explicit approval, then retries with confirm_paid", async () => {
@@ -478,14 +748,19 @@ describe("Review", () => {
     );
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "suggest cast" }));
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
     await user.click(await screen.findByRole("checkbox", { name: /use AI trait hints/ }));
     await user.click(screen.getByRole("button", { name: "apply cast" }));
 
-    expect(await screen.findByText("payment_confirmation_required")).toBeInTheDocument();
+    // plain words, not the server code
+    expect(await screen.findByText("the AI caster is paid — approve it below to continue")).toBeInTheDocument();
+    expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
     expect(screen.getByText(/anthropic cast is a paid call/)).toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
+      stage: "draft",
+      accent: "a",
+      overrides: {},
       recast: false,
       use_llm: true,
     });
@@ -510,6 +785,9 @@ describe("Review", () => {
     expect(await screen.findByText(/created 2 voice\(s\)/)).toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
+      stage: "draft",
+      accent: "a",
+      overrides: {},
       recast: false,
       use_llm: true,
       confirm_paid: true,
@@ -638,14 +916,48 @@ const draftPosts = (server: MockApi) =>
   server.calls.filter((c) => c.method === "POST" && c.url.includes("/assignment/draft"));
 
 describe("Review cast reset", () => {
-  it("re-draft posts the default body — the server keeps picks and narrator", async () => {
+  it("re-draft is folded into Suggest a cast; the stage chips live under Advanced", async () => {
     const user = userEvent.setup();
     const server = setupCast(MIXED);
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "re-draft" }));
+    // the saved cast has loaded once reset is offered
+    await screen.findByRole("button", { name: "reset cast…" });
+    expect(screen.getByRole("button", { name: "Suggest a cast" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "re-draft" })).not.toBeInTheDocument();
+    // draft/final are kept (they matter for paid final casts) but tucked into a disclosure
+    const advanced = screen.getByText(/advanced · cast stage: draft/);
+    expect(screen.getByRole("button", { name: "final" })).not.toBeVisible();
+    await user.click(advanced);
+    await user.click(screen.getByRole("button", { name: "final" }));
+    expect(screen.getByRole("button", { name: "save casting" })).toBeEnabled();
+    expect(draftPosts(server)).toHaveLength(0);
+  });
+
+  it("a final cast stays final through the preview and the apply", async () => {
+    const user = userEvent.setup();
+    const server = setupCast({ ...MIXED, stage: "final" });
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: { ...MIXED, stage: "final" },
+      would_create_voice_ids: [],
+      would_recast_voice_ids: ["alice_auto"],
+      edit_warnings: [],
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await screen.findByRole("table", { name: "proposed voices" });
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toMatchObject({ stage: "final" });
+    // nothing differs from the saved cast until re-cast is ticked (with its re-recording warning)
+    expect(screen.getByRole("button", { name: "nothing to apply" })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: /re-cast the 1 existing \(re-renders their audio\)/ }));
+    await user.click(screen.getByRole("button", { name: "apply cast" }));
     await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
-    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({});
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toMatchObject({
+      strategy: "smart",
+      stage: "final",
+      recast: true,
+    });
   });
 
   it("reset cast… lists the manual picks and a hand-chosen narrator; cancel posts nothing", async () => {
@@ -666,7 +978,7 @@ describe("Review cast reset", () => {
     expect(draftPosts(server)).toHaveLength(0);
   });
 
-  it("confirming the reset posts keep_existing:false and closes the dialog", async () => {
+  it("confirming the reset posts keep_existing:false with the smart caster and closes the dialog", async () => {
     const user = userEvent.setup();
     const server = setupCast(MIXED);
     renderWithProviders(<Review />);
@@ -678,7 +990,12 @@ describe("Review cast reset", () => {
     await user.click(confirm);
 
     await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
-    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({ keep_existing: false });
+    // never the collision-blind hash caster (the server default) — it is CLI-only now
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
+      strategy: "smart",
+      stage: "draft",
+      keep_existing: false,
+    });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
@@ -720,9 +1037,10 @@ describe("Review cast reset", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "suggest cast" }));
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
     expect(await screen.findByText("Your 1 pick is kept")).toBeInTheDocument();
     // the existing create/recast summary is unchanged
-    expect(screen.getByText(/0 new · 1 already cast/)).toBeInTheDocument();
+    // "already cast" counts the saved cast (Alice and Bob), not the voices that exist
+    expect(screen.getByText(/0 new · 2 already cast/)).toBeInTheDocument();
   });
 });

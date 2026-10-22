@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
@@ -15,9 +15,13 @@ import {
   useValidation,
 } from "../api/hooks";
 import type { RenderMode } from "../api/types";
+import { JobErrorText } from "../components/JobErrorText";
+import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { StaleAudioBanner } from "../components/StaleAudio";
+import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
 import { classifyRenderFailure } from "../lib/money";
+import { ADD_A_BOOK, RENDER_ANCHOR } from "../lib/nextStep";
 import { scopeChapters, type Scope } from "../lib/scope";
 import { ActiveModeControl } from "./render/ActiveModeControl";
 import { ConfirmFullDialog } from "./render/ConfirmFullDialog";
@@ -93,6 +97,8 @@ export function RenderJobs() {
       ...(confirmPaid ? { confirm_paid: true } : {}),
     });
   const attrErr = attribute.error instanceof ApiError ? attribute.error : null;
+  // the synchronous refusals (Ollama pre-flight 503s, render_active, ...) read in plain words
+  const attrExplained = attrErr ? explainJobError({ code: attrErr.code, message: attrErr.message }) : null;
   const render = useStartJob(bookId ?? "", "render");
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
@@ -145,6 +151,19 @@ export function RenderJobs() {
     setAutoFinish(false);
   }, [bookId]);
   const chainBusy = chain !== null || assemble.isPending || master.isPending;
+
+  // A next-step button lands here with #find-speakers / #record / #build: scroll that box into
+  // view once the book has loaded (location.key re-fires it when the same link is clicked again).
+  const location = useLocation();
+  const loaded = book.data !== undefined;
+  useEffect(() => {
+    const id = location.hash.slice(1);
+    if (!id || !loaded) return;
+    const box = document.getElementById(id);
+    box?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // move keyboard focus too, so the next Tab goes into the box the user was sent to
+    box?.focus({ preventScroll: true });
+  }, [location.hash, location.key, loaded]);
 
   const [ticket, setTicket] = useState<TicketState>({ kind: "none" });
   // Toggling force re-prices the render (cached segments become billable/free work), so any
@@ -217,7 +236,8 @@ export function RenderJobs() {
     return (
       <section className="screen">
         <h1>Render &amp; Jobs</h1>
-        <p className="sub">No books yet — ingest an EPUB from the Library first.</p>
+        <p className="sub">No books yet. Add one in the Library first.</p>
+        <NextStep step={ADD_A_BOOK} />
       </section>
     );
   }
@@ -238,11 +258,15 @@ export function RenderJobs() {
         Free renders start with one click; paid work always shows its exact price first.
       </p>
       {book.isError && <div className="errline">{book.error.message}</div>}
-      <StageRail status={status} activeJob={book.data?.active_job ?? null} />
+      <StageRail
+        status={status}
+        activeJob={book.data?.active_job ?? null}
+        failed={unresolvedFailure(jobs.data?.jobs, bookId)}
+      />
       <StaleAudioBanner status={status} />
       <div className="rjgrid">
         <div>
-          <div className="modewrap">
+          <div className="modewrap" id={RENDER_ANCHOR.record} tabIndex={-1}>
             <span className="tag">mode</span>
             <button className={`chap ${mode === "multivoice" ? "on" : ""}`} disabled={!status?.assigned}
               title={status?.assigned ? "" : "assign voices first (Character Review → cast)"}
@@ -334,21 +358,21 @@ export function RenderJobs() {
           )}
           {status?.ingested && !status.attributed && (
             book.data?.active_job?.kind === "attribute" ? (
-              <div className="drainstrip">
-                <span className="state"><i className="led run" />attribution running</span>
+              <div className="drainstrip" id={RENDER_ANCHOR.findSpeakers} tabIndex={-1}>
+                <span className="state"><i className="led run" />finding the speakers</span>
                 <span className="mono text-[11.5px] text-ink-2">
                   follow it in the transport bar — Character Review and the Listen read-along unlock when it lands
                 </span>
               </div>
             ) : (
-              <div className="refusal mb-3.5">
-                <span className="tag">not attributed</span>
+              <div className="refusal mb-3.5" id={RENDER_ANCHOR.findSpeakers} tabIndex={-1}>
+                <span className="tag">speakers not found yet</span>
                 <p>multivoice, Character Review, and the read-along need speaker attribution — single voice doesn't.</p>
                 <p className="mt-2">
                   <button className="key" disabled={attribute.isPending} onClick={() => startAttribute()}>
                     {attribute.isPending
                       ? "starting…"
-                      : `▶ attribute ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
+                      : `▶ find the speakers in ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
                   </button>
                 </p>
                 <p className="mono mt-1.5 text-[11px] text-ink-2">
@@ -385,7 +409,12 @@ export function RenderJobs() {
                     />
                   </p>
                 )}
-                {attrErr && (
+                {attrErr && attrExplained?.known && (
+                  <div className="mt-1.5">
+                    <JobErrorText explained={attrExplained} />
+                  </div>
+                )}
+                {attrErr && !attrExplained?.known && (
                   <p className="mono mt-1.5 text-[11px] text-clip">
                     {attrErr.message}
                     {attrErr.code === "payment_confirmation_required" && (
@@ -445,7 +474,7 @@ export function RenderJobs() {
             {jobs.data?.jobs.map((j) => <JobRow key={j.job_id} job={j} />)}
           </div>
 
-          <div className="panel dl">
+          <div className="panel dl" id={RENDER_ANCHOR.build} tabIndex={-1}>
             <div className="panel-h">
               <b>Outputs</b>
               <button className="key quiet ml-auto" disabled={!status?.rendered || chainBusy}

@@ -139,6 +139,25 @@ describe("Listen", () => {
     expect(screen.queryByRole("button", { name: /not rendered/ })).not.toBeInTheDocument();
   });
 
+  it("an empty shelf nudges with a real Add-a-book link", async () => {
+    mockApi().get("/api/books", { books: [] });
+    renderListen("/listen");
+    expect(await screen.findByRole("link", { name: "Add a book" })).toHaveAttribute("href", "/#add");
+  });
+
+  it("a deep link to a book with no audio yet shows its next step instead of a loading line", async () => {
+    const fresh = makeBook({ book_id: "b-fresh", title: "Fresh One", attributed: true, assigned: true });
+    mockApi()
+      .get("/api/books", { books: [fresh] })
+      .get("/api/books/b-fresh", { ...detail, status: fresh });
+    renderListen("/listen?book=b-fresh");
+    expect(await screen.findByRole("link", { name: "Record the audiobook" })).toHaveAttribute(
+      "href",
+      "/render?book=b-fresh#record",
+    );
+    expect(screen.queryByText("setting the page…")).not.toBeInTheDocument();
+  });
+
   it("?book= deep-links into the reader: chapter text, speaker margins, and render provenance", async () => {
     serveBook();
     renderListen();
@@ -244,7 +263,12 @@ describe("Listen", () => {
     });
     renderListen();
 
-    expect(await screen.findByText(/this chapter has no audio yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/This chapter has no audio yet/)).toBeInTheDocument();
+    // the nudge is a real link to the recording controls, not prose naming a screen
+    expect(screen.getByRole("link", { name: "Record this chapter" })).toHaveAttribute(
+      "href",
+      "/render?book=b1#record",
+    );
     // no clips were handed over: the transport stays on the job console
     expect(screen.getByText(/console idle/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "play/pause" })).not.toBeInTheDocument();

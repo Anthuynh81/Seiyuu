@@ -10,8 +10,10 @@ import {
   useSuggestRespellings,
 } from "../api/hooks";
 import type { LexiconEntry, SuggestedTerm } from "../api/types";
+import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
+import { ADD_A_BOOK } from "../lib/nextStep";
 
 /* A per-book pronunciation dictionary: term -> respelling (spoken on every engine), with an
    optional IPA that only the Kokoro engine uses. Editing re-synthesizes only the segments whose
@@ -138,7 +140,8 @@ export function Lexicon() {
     return (
       <section className="screen">
         <h1>Pronunciation</h1>
-        <p className="sub">No ingested books yet — add one from the Library first.</p>
+        <p className="sub">No ingested books yet. Add one in the Library first.</p>
+        <NextStep step={ADD_A_BOOK} />
       </section>
     );
   }

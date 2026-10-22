@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { JobOut } from "../../api/types";
+import { explainJobError } from "../../lib/jobErrors";
 
 /* -------------------------------------------------- jobs + validation */
 
@@ -30,7 +31,27 @@ export function JobRow({ job }: { job: JobOut }) {
       {job.state === "running" && job.progress_text && (
         <div className="mono mt-1.5 text-[11px] text-ink-2">{job.progress_text}</div>
       )}
-      {detail && <div className="jdetail"><div className="errblock">{detail}</div></div>}
+      {detail && (
+        // clicks inside (selecting the fix command to copy it) must not collapse the row
+        <div className="jdetail" onClick={(e) => e.stopPropagation()}>
+          <JobFix error={detail} />
+          <div className="errblock">{detail}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The plain-words reading of a known failure, above the raw message (which stays visible
+    here: this is the history view). Unknown failures add nothing. */
+function JobFix({ error }: { error: string }) {
+  const explained = explainJobError(error);
+  if (!explained.known) return null;
+  return (
+    <div className="mt-2">
+      <p className="joberr-sum">{explained.summary}</p>
+      {explained.fix && <p className="joberr-fix">{explained.fix}</p>}
+      {explained.command && <code className="chk-cmd">{explained.command}</code>}
     </div>
   );
 }

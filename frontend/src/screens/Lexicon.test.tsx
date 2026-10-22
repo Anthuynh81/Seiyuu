@@ -57,6 +57,7 @@ describe("Lexicon", () => {
     });
     renderWithProviders(<Lexicon />);
     expect(await screen.findByText(/No ingested books yet/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add a book" })).toHaveAttribute("href", "/#add");
     expect(server.lastCall("GET", "/lexicon")).toBeUndefined();
   });
 

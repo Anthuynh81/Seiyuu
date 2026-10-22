@@ -1,13 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { type QueryClient, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 
-import { api, ApiError, postForm, postJson } from "./client";
+import { api, ApiError, postForm, postFormWithStatus, postJson } from "./client";
 import type {
   ArchivedRenderMode,
   AssignmentDraftResponse,
   AssignmentWrite,
   AttributionOut,
   AuditionOut,
+  CastAccent,
   CastStrategy,
   BookDeletedOut,
   BookDetail,
@@ -19,8 +20,10 @@ import type {
   CoverOut,
   EditLog,
   EditRequest,
+  EnginesOut,
   EngineVoicesOut,
   IngestResponse,
+  IngestResult,
   JobOut,
   JobsOut,
   LexiconEntry,
@@ -40,6 +43,7 @@ import type {
   SeriesListOut,
   SuggestCastResponse,
   SettingsOut,
+  SystemProbeOut,
   SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
@@ -71,6 +75,60 @@ export function useBooks() {
   });
 }
 
+/** The last few jobs across every subject, finished or not: what the finish notices read.
+    No polling of its own — JobCompletionWatcher fetches it when a live job leaves the poll
+    (and any ["jobs"] invalidation after a mutation refreshes it too). */
+export const recentJobsQuery = {
+  queryKey: ["jobs", "recent"] as const,
+  queryFn: () => api<JobsOut>("/api/jobs?limit=10"),
+};
+
+export function useRecentJobs() {
+  return useQuery(recentJobsQuery);
+}
+
+/** Jobs this session SAW leave the live poll, each fetched by id (GET /api/jobs/{id}). The
+    recent window alone can miss them: the worker runs oldest-first, so a finishing job is
+    usually the oldest live one and can sit below the 10 newest when work is queued behind it.
+    Written only by JobCompletionWatcher (fetchDepartedJobs); the queryFn just re-reads the
+    cache, so a broad ["jobs"] invalidation can't blank it. */
+export const departedJobsKey = ["jobs", "departed"] as const;
+const DEPARTED_KEEP = 50;
+
+export function useDepartedJobs() {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: departedJobsKey,
+    queryFn: () => qc.getQueryData<JobOut[]>(departedJobsKey) ?? [],
+    staleTime: Infinity,
+  });
+}
+
+export async function fetchDepartedJobs(qc: QueryClient, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const rows = await Promise.all(
+    // a 404 means the job went with its deleted book: nothing to tell
+    ids.map((id) => api<JobOut>(`/api/jobs/${encodeURIComponent(id)}`).catch(() => null)),
+  );
+  const got = rows.filter((j): j is JobOut => j !== null && j.is_terminal);
+  if (got.length === 0) return;
+  const fresh = new Set(got.map((j) => j.job_id));
+  qc.setQueryData<JobOut[]>(departedJobsKey, (prev) =>
+    [...(prev ?? []).filter((j) => !fresh.has(j.job_id)), ...got].slice(-DEPARTED_KEEP),
+  );
+}
+
+/** A wider job window for the Library shelf: each card's latest unresolved failure. A
+    failure inside this window always has every NEWER job inside it too, so "superseded by a
+    newer job of the same kind" is decided on complete data. Refreshed by
+    JobCompletionWatcher when a job finishes; no polling. */
+export function useShelfJobs() {
+  return useQuery({
+    queryKey: ["jobs", "shelf"],
+    queryFn: () => api<JobsOut>("/api/jobs?limit=200"),
+  });
+}
+
 export function useCancelJob() {
   const qc = useQueryClient();
   return useMutation({
@@ -82,10 +140,12 @@ export function useCancelJob() {
 export function useIngest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: async (file: File): Promise<IngestResult> => {
       const form = new FormData();
       form.append("file", file);
-      return postForm<IngestResponse>("/api/books", form);
+      const { data, status } = await postFormWithStatus<IngestResponse>("/api/books", form);
+      // the route answers 200 (not 201) when these exact bytes were already ingested
+      return { ...data, already_in_library: status === 200 };
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["books"] }),
   });
@@ -294,6 +354,28 @@ export function useSystem() {
   });
 }
 
+/** Live health: ?probe=true reaches out to Ollama (reachable + model pulled) and checks
+    ffmpeg. NEW key ["system","probe"] — never folded into ["system"]'s config facts. Polls
+    gently (30 s, visible tab only) and on focus, so starting a service and switching back
+    to the browser updates the pill. */
+export function useSystemProbe() {
+  return useQuery({
+    queryKey: ["system", "probe"],
+    queryFn: () => api<SystemProbeOut>("/api/system?probe=true"),
+    refetchOnWindowFocus: true,
+    refetchInterval: 30_000,
+  });
+}
+
+/** The engine catalog with each local engine's weights-cached probe. A warm-up job changes
+    weights_cached/resident; JobCompletionWatcher invalidates ["engines"] when a job ends. */
+export function useEngines() {
+  return useQuery({
+    queryKey: ["engines"],
+    queryFn: () => api<EnginesOut>("/api/engines"),
+  });
+}
+
 /** Redacted server config. Settings freeze at server start, so one fetch per session is
     plenty. Only mounted by screens that need it (the cast-reset dialog). */
 export function useSettings() {
@@ -306,11 +388,36 @@ export function useSettings() {
 
 // -- character review ----------------------------------------------------------------------
 
+/** One fetcher for the ["characters", id] key, so every reader of it caches the same shape. */
+function fetchCharacters(bookId: string): Promise<CharactersOverview> {
+  return api<CharactersOverview>(`/api/books/${bookId}/characters?sample_lines=1`);
+}
+
 export function useCharacters(bookId: string | null, attributed: boolean) {
   return useQuery({
     queryKey: ["characters", bookId],
-    queryFn: () => api<CharactersOverview>(`/api/books/${bookId}/characters?sample_lines=1`),
+    queryFn: () => fetchCharacters(bookId as string),
     enabled: bookId !== null && attributed,
+  });
+}
+
+/** Character names for several books at once (book id -> character id -> name), read through
+    the same ["characters", id] key Character Review uses. A book whose characters can't be read
+    simply has no entry; callers fall back to a generic label. */
+export function useCharacterNames(bookIds: string[]): Map<string, Map<string, string>> {
+  return useQueries({
+    queries: bookIds.map((id) => ({
+      queryKey: ["characters", id],
+      queryFn: () => fetchCharacters(id),
+      retry: false,
+    })),
+    combine: (results) => {
+      const out = new Map<string, Map<string, string>>();
+      results.forEach((r) => {
+        if (r.data) out.set(r.data.book_id, new Map(r.data.characters.map((c) => [c.id, c.name])));
+      });
+      return out;
+    },
   });
 }
 
@@ -500,12 +607,24 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
   qc.invalidateQueries({ queryKey: ["render-summary", bookId] });
 }
 
-export interface DraftInput {
+/** The inputs a smart-cast PREVIEW is computed from — and that its apply must repeat, so the
+    applied cast is the one the user saw. Omitted narrator = the server keeps the saved one
+    (keep_existing) or uses the default; `accent` steers the voices the caster makes; `overrides`
+    are character_id -> voice_id picks from the preview table (they win over the caster and over
+    saved picks). `stage` is sent so a preview/apply never silently demotes a "final" cast. */
+export interface SuggestInput {
+  narrator_voice_id?: string;
+  accent?: CastAccent;
+  overrides?: Record<string, string>;
+  stage?: "draft" | "final";
+}
+
+export interface DraftInput extends SuggestInput {
   strategy?: CastStrategy; // "hash" (legacy) | "smart" (collision-free book cast)
   recast?: boolean; // smart only: overwrite existing auto voices (re-renders them)
-  // F5: character_id -> voice_id inherited from a series; wins over the auto-cast pick. The
-  // smart caster reserves these so a new character is never cast onto a series-pinned voice.
-  overrides?: Record<string, string>;
+  // (overrides, from SuggestInput) F5: character_id -> voice_id inherited from a series or picked
+  // in the preview; wins over the auto-cast pick. The smart caster reserves these so a new
+  // character is never cast onto a pinned voice.
   // F4 (v1.1): smart only. Run the opt-in Layer-2 LLM caster for per-character voice-trait
   // preferences that bias the tie-breaker. cast_book still enforces distinctness/determinism, so
   // this can only change WHICH distinct voice a character takes. A 402 means the resolved cast
@@ -533,8 +652,8 @@ export function useDraftAssignment(bookId: string) {
     calling useDraftAssignment with strategy:"smart". */
 export function useSuggestCast(bookId: string) {
   return useMutation({
-    mutationFn: () =>
-      postJson<SuggestCastResponse>(`/api/books/${bookId}/assignment/suggest`, { strategy: "smart" }),
+    mutationFn: (input: SuggestInput = {}) =>
+      postJson<SuggestCastResponse>(`/api/books/${bookId}/assignment/suggest`, { strategy: "smart", ...input }),
   });
 }
 
@@ -697,6 +816,30 @@ export function useRenameVoice() {
   });
 }
 
+/** Every book role still cast with a voice — what the delete confirmation shows. Its own key
+    (never ["books"]/["book"]), always refetched when a dialog opens: it must be current. */
+export function useVoiceReferences(voiceId: string | null) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["voice-references", voiceId],
+    queryFn: () => api<VoiceReferencesOut>(`/api/voices/${voiceId}/references`),
+    enabled: voiceId !== null,
+    staleTime: 0,
+    refetchOnMount: "always",
+    retry: false,
+  });
+  // a 404 means the voice is already gone (deleted elsewhere): refresh the library so its stale
+  // card disappears, matching the dialog's "already deleted" message
+  const gone = q.error instanceof ApiError && q.error.code === "not_found";
+  useEffect(() => {
+    if (gone) void qc.invalidateQueries({ queryKey: ["voices"] });
+  }, [gone, qc]);
+  return q;
+}
+
+/** Irreversible: the UI only calls this from the confirmation dialog. The references re-check
+    right before DELETE is belt-and-braces (casting may change while the dialog is open); the
+    server refuses a referenced voice too. */
 export function useDeleteVoice() {
   const qc = useQueryClient();
   return useMutation({
@@ -709,6 +852,15 @@ export function useDeleteVoice() {
       return api<{ deleted: string }>(`/api/voices/${voiceId}`, { method: "DELETE" });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+    onError: (err, voiceId) => {
+      // the dialog's list is out of date (voice_referenced) or the voice is already gone
+      if (err instanceof ApiError && err.code === "voice_referenced") {
+        return qc.invalidateQueries({ queryKey: ["voice-references", voiceId] });
+      }
+      if (err instanceof ApiError && err.code === "not_found") {
+        return qc.invalidateQueries({ queryKey: ["voices"] });
+      }
+    },
   });
 }
 
@@ -716,6 +868,15 @@ export function useWarmup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (engineId: string) => api<JobOut>(`/api/engines/${engineId}/warmup`, { method: "POST" }),
+    // RETURN the invalidation: the mutation stays pending until the live-jobs refetch has
+    // landed, so a caller never sees "not pending, and no live job yet" (which would re-offer
+    // the button for a round-trip and invite a duplicate_job click)
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    // duplicate_job: one is already live (another tab, the CLI) — refetch so it shows as such
+    onError: (err) => {
+      if (err instanceof ApiError && err.code === "duplicate_job") {
+        return qc.invalidateQueries({ queryKey: ["jobs", "live"] });
+      }
+    },
   });
 }

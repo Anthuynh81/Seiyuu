@@ -147,6 +147,11 @@
 .nav a.on { color: var(--ink); border-left-color: var(--tungsten); background: var(--console-hi); }
 .nav .lamp { width: 6px; height: 6px; margin-left: auto; background: var(--rolling); animation: pulse 1.4s ease-in-out infinite; }
 .nav .foot { margin-top: auto; padding: 14px 20px; border-top: 1px solid var(--hairline); font-family: var(--mono); font-size: 10px; color: var(--ink-3); line-height: 1.7; }
+/* health pill: the footer's live status, a silkscreen key that opens the System drawer */
+.hpill { display: flex; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; padding: 5px 8px; border: 1px solid var(--hairline); font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); text-align: left; }
+.hpill:hover { color: var(--ink); border-color: var(--hairline-strong); background: var(--console-hi); }
+.hpill.setup { color: var(--caution); border-color: var(--caution-edge); }
+.hpill.offline { color: var(--clip); border-color: var(--clip); }
 .main { overflow-y: auto; padding: 24px 28px 40px; }
 .screen { max-width: 1200px; }
 
@@ -305,6 +310,17 @@ details.fine summary:hover { color: var(--tungsten); }
 .roster .mask { letter-spacing: 1px; color: var(--ink-3); }
 .roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
 .caststrip { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); }
+.caststrip details.fine { margin-top: 0; }
+/* suggest-a-cast preview: a raised block over the roster; status + trait chips are hairline
+   labels (square, mono), colored only by the signal tokens */
+.castprev { background: var(--console-hi); border-bottom: 1px solid var(--hairline-strong); }
+.roster .castprev tr:hover td { background: none; }
+.castst { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.04em; border: 1px solid var(--hairline); padding: 0 5px; white-space: nowrap; color: var(--ink-2); }
+.castst.new { color: var(--rolling); border-color: var(--rolling); }
+.castst.change { color: var(--caution); border-color: var(--caution-edge); }
+.castst.kept { color: var(--ok); border-color: var(--ok); }
+.castst.same { color: var(--ink-3); }
+.castchip { font-family: var(--mono); font-size: 9.5px; font-weight: 400; color: var(--ink-3); border: 1px solid var(--hairline); padding: 0 4px; }
 .vcell { min-width: 130px; }
 .vpick { width: 100%; max-width: 150px; background: var(--booth-0); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--mono); font-size: 10.5px; padding: 3px 4px; }
 .vpick:hover { border-color: var(--tungsten-dim); }
@@ -462,9 +478,83 @@ details.fine summary:hover { color: var(--tungsten); }
 .dialog .db { padding: 16px; }
 .dialog .df { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--hairline); }
 
+/* drawer: the same modal grammar docked to the right edge, full height */
+.overlay.drawer-ov { justify-content: flex-end; align-items: stretch; }
+.drawer { background: var(--raised); border-left: 1px solid var(--hairline-strong); width: 460px; max-width: 92vw; height: 100%; overflow-y: auto; }
+.drawer .dbody { outline: none; display: flex; flex-direction: column; min-height: 100%; }
+.drawer .dh { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--hairline); }
+.drawer .dh .dt { font-size: 15px; font-weight: 600; margin: 0; }
+.drawer .db { padding: 16px; flex: 1; }
+.drawer .df { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--hairline); }
+.drawer-sub { margin: 0 0 12px; color: var(--ink-2); font-size: 12.5px; }
+.drawer-ver { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+/* setup checklist: one hairline row per requirement — LED, what, status, then the fix */
+.chklist { list-style: none; margin: 0; padding: 0; border: 1px solid var(--hairline); background: var(--console); }
+.panel .chklist { border: none; }
+.chk { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
+.chk:last-child { border-bottom: none; }
+.chk > .led { margin-top: 5px; }
+.chk-body { flex: 1; min-width: 0; }
+.chk-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.chk-label { font-weight: 500; color: var(--ink); }
+.chk-opt { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--hairline); padding: 0 5px; }
+.chk-status { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.chk[data-state="missing"] .chk-status { color: var(--ink); }
+.chk-fix { margin: 4px 0 0; color: var(--ink-2); font-size: 12px; }
+.chk-cmd { display: block; margin-top: 5px; padding: 4px 8px; background: var(--booth-0); border: 1px solid var(--hairline); font-family: var(--mono); font-size: 11.5px; color: var(--tungsten); user-select: all; overflow-x: auto; white-space: nowrap; }
+.chk-err { margin: 5px 0 0; font-family: var(--mono); font-size: 11px; color: var(--clip); }
+.chk-act { flex: none; align-self: center; }
+
 /* loading / error surfaces */
 .loadline { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); padding: 18px 0; }
 .errline { font-family: var(--mono); font-size: 11.5px; color: var(--clip); padding: 12px 14px; border: 1px solid var(--hairline); background: var(--booth-0); }
+
+/* a failure in plain words (toast, card banner, job history): sentence, fix, details */
+.joberr-sum { margin: 0; color: var(--ink); font-size: 12.5px; }
+.joberr-fix { margin: 3px 0 0; color: var(--ink-2); font-size: 12px; }
+.joberr-det { margin-top: 6px; }
+.joberr-det .errblock { margin-top: 4px; }
+
+/* finish notices: a stack above the transport bar; the region itself never takes clicks */
+.toasts { position: fixed; right: 20px; bottom: 60px; z-index: 40; display: flex; flex-direction: column; gap: 8px; width: 380px; max-width: calc(100vw - 32px); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; gap: 10px; align-items: flex-start; background: var(--raised); border: 1px solid var(--hairline-strong); border-left: 2px solid var(--ok); padding: 10px 12px; }
+.toast.fail { border-left-color: var(--clip); }
+.toast.stop { border-left-color: var(--ink-3); }
+.toast .led { margin-top: 5px; }
+.toast-body { flex: 1; min-width: 0; }
+.toast-head { margin: 0; font-weight: 600; font-size: 13px; }
+.toast-acts { display: flex; gap: 10px; margin-top: 6px; }
+.toast-x { flex: none; font-family: var(--mono); font-size: 11px; color: var(--ink-3); border: 1px solid var(--hairline); padding: 1px 7px; }
+.toast-x:hover { color: var(--ink); border-color: var(--hairline-strong); }
+
+/* library card: the last run failed and nothing newer has replaced it */
+.failbanner { margin-top: 10px; border: 1px solid var(--hairline); border-left: 2px solid var(--clip); background: var(--booth-0); padding: 8px 10px; }
+.failbanner-top { display: flex; align-items: center; gap: 8px; }
+.failbanner-top b { font-size: 12.5px; font-weight: 600; }
+.failbanner-top .key { margin-left: auto; padding: 2px 10px; font-size: 11px; }
+.failbanner .joberr { margin-top: 4px; }
+
+/* next step: the one primary action (a real link styled as a key) and its plain reason */
+.nextstep { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.nextstep-key { display: inline-block; text-decoration: none; }
+.nextstep-why { font-size: 12px; color: var(--ink-2); max-width: 52ch; }
+.bookcard .nextrow { margin-top: 12px; }
+.refusal .nextstep, .sub + .nextstep { margin-top: 8px; }
+.scoperow .nextstep { margin-left: 6px; }
+.scoperow .nextstep .key { padding: 3px 12px; font-size: 11.5px; }
+.scoperow .nextstep-why { font-size: 11px; color: var(--ink-3); }
+
+/* upload result: what was added, and what was left out */
+.uploadcell { display: flex; flex-direction: column; gap: 10px; }
+.ingestres { border: 1px solid var(--hairline); border-left: 2px solid var(--ok); background: var(--console); padding: 10px 12px; }
+.ingestres.dup { border-left-color: var(--rolling); }
+.ingestres-head { margin: 0; font-size: 13px; font-weight: 600; }
+.ingestres-meta { margin: 2px 0 10px; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.ingestres details.fine { margin-top: 10px; }
+.ingestres h4 { margin: 8px 0 0; font-size: 11.5px; font-weight: 600; color: var(--ink); }
+.ingestres ul { margin: 4px 0 0; padding-left: 18px; }
+.ingestres li { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
 
 /* ---- primitives (react-aria base, Talkback skin) ---- */
 

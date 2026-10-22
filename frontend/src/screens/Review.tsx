@@ -15,13 +15,16 @@ import {
   useSuggestCast,
   useUndoEdit,
   useVoices,
+  type SuggestInput,
 } from "../api/hooks";
-import type { CharacterSummary } from "../api/types";
+import type { CharacterSummary, SuggestCastResponse } from "../api/types";
 import { chapterOfBlock } from "../api/types";
+import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
 import { castingDiffers, castingFromServer, castingVoicesDiffer, type CastingState } from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
+import { nextStep } from "../lib/nextStep";
 import { CharacterEditor } from "./review/CharacterEditor";
 import { isReviewable, useFrontier } from "./review/helpers";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
@@ -79,6 +82,39 @@ export function Review() {
   // the "reset cast…" confirm (a keep_existing:false draft) — the only path that drops hand picks
   const [resetOpen, setResetOpen] = useState(false);
   useEffect(() => setResetOpen(false), [bookId]);
+  // "Suggest a cast": the last preview the server returned. Held here (not read off the
+  // mutation) so the table stays up while a row/narrator/accent change re-requests it; the
+  // per-call onSuccess only fires for the LATEST request, so an out-of-order reply never wins.
+  const [castPreview, setCastPreview] = useState<SuggestCastResponse | null>(null);
+  const resetSuggest = suggestCast.reset;
+  useEffect(() => {
+    setCastPreview(null);
+    resetSuggest(); // a late reply for the previous book must not open its preview here
+  }, [bookId, resetSuggest]);
+  // a preview/apply repeats the saved stage, so it never quietly demotes a "final" cast
+  const savedStage = assignment.data?.stage ?? "draft";
+  // `done` (the panel's row/narrator/accent changes) hears the outcome so a refused change can
+  // be rolled back; like onSuccess it only fires for the latest request.
+  const requestPreview = (input: SuggestInput, done?: (error: Error | null) => void) =>
+    suggestCast.mutate(
+      { ...input, stage: savedStage },
+      {
+        onSuccess: (d) => {
+          setCastPreview(d);
+          done?.(null);
+        },
+        onError: (e) => done?.(e),
+      },
+    );
+  const openSuggest = () => {
+    setCastPreview(null); // a fresh suggestion: the panel remounts with no leftover changes
+    draftCast.reset();
+    requestPreview({});
+  };
+  const closeSuggest = () => {
+    setCastPreview(null);
+    suggestCast.reset();
+  };
 
   // tag filter for the voice pickers: AND semantics, narrows every picker in the roster.
   // The assigned voice always stays visible (VoicePicker falls back to the full pool).
@@ -173,10 +209,18 @@ export function Review() {
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
   if (books.isError) return <section className="screen"><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
+    // no book has its speakers found yet: point at the first one that could
+    const candidate = books.data?.books.find((b) => b.ingested && !b.attributed) ?? books.data?.books[0];
     return (
       <section className="screen">
         <h1>Character Review</h1>
-        <p className="sub">No attributed books yet — run attribution from Render &amp; Jobs first.</p>
+        <p className="sub">
+          {candidate
+            ? "No book has its speakers found yet. Once Seiyuu has worked out who says each line, you can check it here."
+            : "No books yet. Add one in the Library first."}
+        </p>
+        {/* this screen is about speakers: offer that step even for a book recorded in one voice */}
+        <NextStep step={nextStep({ status: candidate, activeJob: candidate?.active_job, want: "attribute" })} />
       </section>
     );
   }
@@ -204,7 +248,13 @@ export function Review() {
       </p>
 
       {!attributed && book.data && (
-        <div className="refusal"><span className="tag">stage_prerequisite</span><p>this book has no attribution yet — start one from Render &amp; Jobs</p></div>
+        <div className="refusal">
+          <span className="tag">speakers not found yet</span>
+          <p>Seiyuu hasn't worked out who says each line in this book yet, so there is nothing to review.</p>
+          <NextStep
+            step={nextStep({ status: book.data.status, activeJob: book.data.active_job, want: "attribute" })}
+          />
+        </div>
       )}
 
       {attributed && (
@@ -266,58 +316,37 @@ export function Review() {
                 — later characters stay hidden
               </div>
               <div className="caststrip">
-                {!casting ? (
+                {/* One "Suggest a cast" in both states, at the same position, so it keeps its
+                    identity when the saved cast loads under the pointer. It also replaces the old
+                    re-draft: with re-cast off, applying a suggestion fills newly found characters
+                    and keeps every existing voice and hand pick. */}
+                {!casting && (
+                  <span className="text-xs text-ink-2">
+                    no cast yet — Seiyuu suggests a voice for every character, and you can change any of them before
+                    applying
+                  </span>
+                )}
+                <Tip
+                  content={
+                    castPreview
+                      ? "a suggestion is open below — change it there, or dismiss it to start over"
+                      : casting
+                        ? "preview a cast: newly found characters get their own voices, existing voices and your picks stay — nothing changes until you apply"
+                        : "preview a cast: every character a distinct voice — nothing changes until you apply"
+                  }
+                >
+                  <button
+                    className={casting ? "key quiet px-[9px] py-[3px]" : "key ml-auto px-3 py-[3px]"}
+                    // while a preview is open its own controls change it; a fresh suggestion here
+                    // would silently throw away the user's row, narrator and accent changes
+                    disabled={suggestCast.isPending || castPreview !== null}
+                    onClick={openSuggest}
+                  >
+                    {suggestCast.isPending && !castPreview ? "thinking…" : "Suggest a cast"}
+                  </button>
+                </Tip>
+                {casting && (
                   <>
-                    <span className="text-xs text-ink-2">
-                      no casting yet — auto-cast gives every character a distinct voice blend
-                    </span>
-                    <Tip content="preview a smart cast: every character a distinct voice, no collisions">
-                      <button
-                        className="key quiet ml-auto px-[9px] py-[3px]"
-                        disabled={suggestCast.isPending}
-                        onClick={() => suggestCast.mutate()}
-                      >
-                        {suggestCast.isPending ? "thinking…" : "suggest cast"}
-                      </button>
-                    </Tip>
-                    <button
-                      className="key px-3 py-[3px]"
-                      disabled={draftCast.isPending}
-                      onClick={() => draftCast.mutate({})}
-                    >
-                      {draftCast.isPending ? "casting…" : "auto-cast"}
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    {(["draft", "final"] as const).map((s) => (
-                      <button
-                        key={s}
-                        className={`chap px-[9px] py-[2px] ${casting.stage === s ? "on" : ""}`}
-                        onClick={() => setCasting({ ...casting, stage: s })}
-                      >
-                        {s}
-                      </button>
-                    ))}
-                    <Tip content="preview a smart cast: every character a distinct voice, no collisions">
-                      <button
-                        className="key quiet ml-auto px-[9px] py-[3px]"
-                        disabled={suggestCast.isPending}
-                        onClick={() => suggestCast.mutate()}
-                      >
-                        {suggestCast.isPending ? "thinking…" : "suggest cast"}
-                      </button>
-                    </Tip>
-                    {/* server default keep_existing=true: re-draft never clobbers a hand pick */}
-                    <Tip content="re-run the deterministic draft — fills newly-discovered characters, keeps your picks and narrator">
-                      <button
-                        className="key quiet px-[9px] py-[3px]"
-                        disabled={draftCast.isPending}
-                        onClick={() => draftCast.mutate({})}
-                      >
-                        re-draft
-                      </button>
-                    </Tip>
                     <Tip content="start over: re-cast everyone with auto voices, discarding your picks (asks first)">
                       <button
                         className="key quiet px-[7px] py-[3px] text-[10.5px] text-ink-3"
@@ -328,7 +357,7 @@ export function Review() {
                       </button>
                     </Tip>
                     <button
-                      className="key px-3 py-[3px]"
+                      className="key ml-auto px-3 py-[3px]"
                       disabled={!castingDirty || saveCast.isPending}
                       onClick={() => {
                         // capture BEFORE the save overwrites the server copy: did the voices
@@ -352,6 +381,28 @@ export function Review() {
                   </>
                 )}
               </div>
+              {casting && (
+                <div className="caststrip">
+                  <details className="fine">
+                    <summary>advanced · cast stage: {casting.stage}</summary>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {(["draft", "final"] as const).map((s) => (
+                        <button
+                          key={s}
+                          className={`chap px-[9px] py-[2px] ${casting.stage === s ? "on" : ""}`}
+                          onClick={() => setCasting({ ...casting, stage: s })}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                      <span className="mono text-[10.5px] text-ink-3">
+                        mark the cast final once you have signed it off (for example before paid cloud voices).
+                        The stage alone re-records nothing; save to keep it.
+                      </span>
+                    </div>
+                  </details>
+                </div>
+              )}
               {casting && allTags.length > 0 && (
                 <div className="caststrip flex-wrap gap-1.5">
                   <Tip content="narrow every voice picker to voices carrying ALL the selected tags — tag voices in Voice Studio">
@@ -378,30 +429,38 @@ export function Review() {
                   )}
                 </div>
               )}
-              {suggestCast.data && (
+              {castPreview && (
                 <SuggestCastPanel
-                  preview={suggestCast.data}
+                  preview={castPreview}
+                  saved={assignment.data ?? null}
+                  characters={cast}
+                  isMasked={(id) => maskedIds.has(id)}
+                  voices={allVoices}
+                  refreshing={suggestCast.isPending}
+                  unsavedEdits={castingDirty}
                   applying={draftCast.isPending}
                   applyError={draftCast.error instanceof ApiError ? draftCast.error : null}
-                  onApply={({ recast, useLlm, confirmPaid }) =>
+                  onPreview={requestPreview}
+                  onApply={({ input, recast, useLlm, confirmPaid }) =>
                     draftCast.mutate(
                       {
                         strategy: "smart",
+                        stage: savedStage,
+                        ...input,
                         recast,
                         use_llm: useLlm,
                         ...(confirmPaid ? { confirm_paid: true } : {}),
                       },
-                      { onSuccess: () => suggestCast.reset() },
+                      { onSuccess: closeSuggest },
                     )
                   }
-                  onDismiss={() => suggestCast.reset()}
+                  onDismiss={closeSuggest}
                 />
               )}
-              {suggestCast.error && (
+              {/* only the FIRST request's failure lands here; an open panel reports its own */}
+              {suggestCast.error && !castPreview && (
                 <div className="refusal mx-3 my-2">
-                  <span className="tag">
-                    {suggestCast.error instanceof ApiError ? suggestCast.error.code : "error"}
-                  </span>
+                  <span className="tag">couldn't suggest a cast</span>
                   <p>{suggestCast.error.message}</p>
                 </div>
               )}
@@ -413,9 +472,11 @@ export function Review() {
               {(draftCast.error || saveCast.error) && (
                 <div className="refusal mx-3 my-2">
                   <span className="tag">
-                    {(draftCast.error ?? saveCast.error) instanceof ApiError
-                      ? ((draftCast.error ?? saveCast.error) as ApiError).code
-                      : "error"}
+                    {draftCast.error instanceof ApiError && draftCast.error.code === "payment_confirmation_required"
+                      ? "the AI caster is paid — approve it below to continue"
+                      : draftCast.error
+                        ? "couldn't apply the cast"
+                        : "couldn't save casting"}
                   </span>
                   <p>{(draftCast.error ?? saveCast.error)?.message}</p>
                 </div>
@@ -588,7 +649,8 @@ export function Review() {
           resetting={draftCast.isPending}
           onConfirm={() => {
             setResetOpen(false);
-            draftCast.mutate({ keep_existing: false });
+            // the reset starts over with the collision-free caster (the hash one is CLI-only now)
+            draftCast.mutate({ strategy: "smart", stage: savedStage, keep_existing: false });
           }}
           onClose={() => setResetOpen(false)}
         />

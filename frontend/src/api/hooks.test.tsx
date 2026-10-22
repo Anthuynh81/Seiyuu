@@ -3,10 +3,20 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { makeEngine, makeJob, makeSystemProbe } from "../test/fixtures";
 import { makeQueryClient, mockApi } from "../test/utils";
 import { ApiError } from "./client";
 import type { SegmentWordsClip } from "./hooks";
-import { useDeleteVoice, useSaveLexicon, useSegmentWords, useSwitchRenderMode } from "./hooks";
+import {
+  useDeleteVoice,
+  useEngines,
+  useSaveLexicon,
+  useSuggestCast,
+  useSegmentWords,
+  useSwitchRenderMode,
+  useSystemProbe,
+  useWarmup,
+} from "./hooks";
 import type { LexiconEntry, LexiconSaved, SegmentWords } from "./types";
 
 function createWrapper() {
@@ -162,5 +172,97 @@ describe("useSaveLexicon", () => {
     expect(server.jsonBodyOf("PUT", "/api/books/b1/lexicon")).toEqual({ entries });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["lexicon", "b1"] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["estimate", "b1"] });
+  });
+});
+
+describe("health hooks", () => {
+  it("useSystemProbe GETs ?probe=true under the NEW key [system, probe] — never the config key", async () => {
+    const server = mockApi().get("/api/system?probe=true", makeSystemProbe());
+    const { queryClient, Wrapper } = createWrapper();
+    const { result } = renderHook(useSystemProbe, { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(server.lastCall("GET", "/api/system")?.url).toBe("/api/system?probe=true");
+    expect(queryClient.getQueryData(["system", "probe"])).toEqual(makeSystemProbe());
+    expect(queryClient.getQueryData(["system"])).toBeUndefined();
+    const query = queryClient.getQueryCache().find({ queryKey: ["system", "probe"], exact: true });
+    const opts = query?.options as { refetchInterval?: unknown; refetchOnWindowFocus?: unknown } | undefined;
+    expect(opts?.refetchOnWindowFocus).toBe(true);
+    expect(opts?.refetchInterval).toBe(30_000);
+  });
+
+  it("useSystemProbe surfaces backend_down when nothing answers", async () => {
+    vi.stubGlobal("fetch", () => Promise.reject(new TypeError("Failed to fetch")));
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(useSystemProbe, { wrapper: Wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect((result.current.error as ApiError).code).toBe("backend_down");
+  });
+
+  it("useEngines GETs /api/engines under [engines]", async () => {
+    const payload = { engines: [makeEngine()] };
+    mockApi().get("/api/engines", payload);
+    const { queryClient, Wrapper } = createWrapper();
+    const { result } = renderHook(useEngines, { wrapper: Wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(queryClient.getQueryData(["engines"])).toEqual(payload);
+  });
+
+  it("useWarmup POSTs the existing warm-up route and refreshes jobs, never [books]/[book]", async () => {
+    const server = mockApi().post(
+      "/api/engines/chatterbox/warmup",
+      makeJob({ kind: "warmup", book_id: "engine:chatterbox", state: "queued" }),
+    );
+    const { queryClient, Wrapper } = createWrapper();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(useWarmup, { wrapper: Wrapper });
+    await act(async () => {
+      await result.current.mutateAsync("chatterbox");
+    });
+    expect(server.lastCall("POST", "/warmup")?.url).toBe("/api/engines/chatterbox/warmup");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["books"] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["book"] });
+  });
+});
+
+describe("useSuggestCast", () => {
+  it("POSTs strategy=smart plus the narrator, accent, overrides and stage — and writes no cache", async () => {
+    const server = mockApi();
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: {
+        schema_version: 1,
+        book_id: "b1",
+        stage: "final",
+        narrator_voice_id: "v-narr",
+        assignments: { alice: "af_nicole" },
+        thought_voice_id: null,
+        created_at: "2026-07-11T00:00:00Z",
+      },
+      would_create_voice_ids: [],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    const { queryClient, Wrapper } = createWrapper();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useSuggestCast("b1"), { wrapper: Wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        narrator_voice_id: "v-narr",
+        accent: "b",
+        overrides: { alice: "af_nicole" },
+        stage: "final",
+      });
+    });
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toEqual({
+      strategy: "smart",
+      narrator_voice_id: "v-narr",
+      accent: "b",
+      overrides: { alice: "af_nicole" },
+      stage: "final",
+    });
+    // a preview writes nothing, so it refreshes nothing — least of all [books]/[book]
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

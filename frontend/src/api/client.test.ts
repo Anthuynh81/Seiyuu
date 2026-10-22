@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { jsonResponse, mockApi } from "../test/utils";
-import { api, ApiError, postForm, postJson } from "./client";
+import {
+  api,
+  ApiError,
+  BACKEND_START_COMMAND,
+  isBackendDown,
+  postForm,
+  postFormWithStatus,
+  postJson,
+} from "./client";
 
 describe("api()", () => {
   it("returns the parsed JSON body on 2xx", async () => {
@@ -25,19 +33,34 @@ describe("api()", () => {
     expect(apiErr.detail).toEqual({ job_id: "j7" });
   });
 
-  it("falls back to code http_error with status + statusText when the error body is not JSON", async () => {
+  it("falls back to code http_error with status + statusText when a non-proxy error body is not JSON", async () => {
     mockApi().on(
       "GET",
       "/api/broken",
-      () => new Response("<html>gateway melted</html>", { status: 502, statusText: "Bad Gateway" }),
+      () => new Response("<html>not here</html>", { status: 404, statusText: "Not Found" }),
     );
     const err = await api("/api/broken").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     const apiErr = err as ApiError;
-    expect(apiErr.status).toBe(502);
+    expect(apiErr.status).toBe(404);
     expect(apiErr.code).toBe("http_error");
-    expect(apiErr.message).toBe("502 Bad Gateway");
+    expect(apiErr.message).toBe("404 Not Found");
     expect(apiErr.detail).toBeNull();
+  });
+
+  it("keeps http_error for a JSON body that is not the envelope, even on a 502", async () => {
+    mockApi().on("GET", "/api/odd", () => new Response(JSON.stringify({ detail: "nope" }), { status: 502, statusText: "Bad Gateway" }));
+    const err = (await api("/api/odd").catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("http_error");
+    expect(err.message).toBe("502 Bad Gateway");
+  });
+
+  it("keeps the backend's own envelope on a 500 — a JSON error is never mistaken for an outage", async () => {
+    mockApi().error("GET", "/api/books", 500, "internal", "something broke inside");
+    const err = (await api("/api/books").catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("internal");
+    expect(err.message).toBe("something broke inside");
+    expect(isBackendDown(err)).toBe(false);
   });
 
   it("resolves undefined on 204 No Content instead of trying to parse a body", async () => {
@@ -83,5 +106,57 @@ describe("postForm", () => {
     const recorded = server.formBodyOf("POST", "/api/voices/clone");
     expect(recorded.get("name")).toBe("Narrator");
     expect((recorded.get("file") as File).name).toBe("ref.wav");
+  });
+});
+
+describe("backend_down", () => {
+  it("a network error (fetch rejects) becomes backend_down with status 0 and the start command", async () => {
+    vi.stubGlobal("fetch", () => Promise.reject(new TypeError("Failed to fetch")));
+    const err = (await api("/api/books").catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(0);
+    expect(err.code).toBe("backend_down");
+    expect(err.message).toContain("Seiyuu backend isn't running");
+    expect(err.message).toContain(BACKEND_START_COMMAND);
+    expect(BACKEND_START_COMMAND).toBe("uv run uvicorn seiyuu.api.main:app");
+    expect(err.detail).toEqual({ cause: "Failed to fetch" });
+    expect(isBackendDown(err)).toBe(true);
+  });
+
+  it.each([
+    [500, "Internal Server Error", ""], // Vite's proxy when uvicorn is down: empty body
+    [502, "Bad Gateway", "<html>gateway melted</html>"],
+    [504, "Gateway Timeout", "upstream timed out"],
+  ])("a proxy %i with an empty or non-JSON body becomes backend_down", async (status, statusText, body) => {
+    mockApi().on("GET", "/api/system", () => new Response(body, { status, statusText }));
+    const err = (await api("/api/system").catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("backend_down");
+    expect(err.status).toBe(status);
+    expect(err.message).toContain(BACKEND_START_COMMAND);
+  });
+
+  it("an aborted request rethrows the abort untouched — a superseded query is not an outage", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal("fetch", () => Promise.reject(new DOMException("aborted", "AbortError")));
+    const err = await api("/api/books", { signal: controller.signal }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(ApiError);
+    expect((err as Error).name).toBe("AbortError");
+  });
+});
+
+describe("postFormWithStatus", () => {
+  it("hands back the HTTP status beside the body (ingest: 201 new, 200 already there)", async () => {
+    mockApi().post("/api/books", { ok: 1 }, 201);
+    await expect(postFormWithStatus("/api/books", new FormData())).resolves.toEqual({ data: { ok: 1 }, status: 201 });
+    mockApi().post("/api/books", { ok: 2 }, 200);
+    await expect(postFormWithStatus("/api/books", new FormData())).resolves.toEqual({ data: { ok: 2 }, status: 200 });
+  });
+
+  it("still throws ApiError on a non-2xx", async () => {
+    mockApi().error("POST", "/api/books", 422, "invalid", "not an epub");
+    const err = await postFormWithStatus("/api/books", new FormData()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("invalid");
   });
 });

@@ -130,6 +130,12 @@ export interface IngestResponse {
   dropped_sections: string[];
 }
 
+/** What useIngest resolves to: the response plus whether the server answered 200 (these exact
+    bytes were already in the library) rather than 201 (newly added). */
+export interface IngestResult extends IngestResponse {
+  already_in_library: boolean;
+}
+
 export interface ChapterSummary {
   index: number;
   title: string;
@@ -394,6 +400,9 @@ export interface AssignmentDraftResponse {
 
 export type CastStrategy = "hash" | "smart";
 
+/** Kokoro accent family for voices the caster makes: "a" American, "b" British English. */
+export type CastAccent = "a" | "b";
+
 export interface SuggestCastResponse {
   assignment: VoiceAssignment;
   would_create_voice_ids: string[];
@@ -529,6 +538,40 @@ export interface SystemStatusOut {
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
 }
 
+export interface OllamaStatus {
+  base_url: string;
+  reachable: boolean | null; // null = not probed (only ?probe=true reaches out)
+  // probe-only: is the configured attribution model pulled? null = not probed / tags unreadable
+  model_installed?: boolean | null;
+}
+
+/** Full GET /api/system?probe=true — the health pill and setup checklist read this. */
+export interface SystemProbeOut extends SystemStatusOut {
+  gpu_resident: string | null;
+  active_job: JobOut | null;
+  queued_jobs: number;
+  audition_in_flight: boolean;
+  ffmpeg_available: boolean;
+  ollama: OllamaStatus;
+  engines: string[];
+  version: string;
+}
+
+/** GET /api/engines — static catalog facts plus two live probes. */
+export interface EngineInfo {
+  engine_id: string;
+  uses_gpu: boolean;
+  requires_validation: boolean;
+  paid: boolean;
+  supports_cloning: boolean;
+  weights_cached: boolean | null; // best-effort cache probe; null for cloud engines / unknowable
+  resident: boolean;
+}
+
+export interface EnginesOut {
+  engines: EngineInfo[];
+}
+
 /** Slim view of GET /api/settings (redacted config) — only what screens consume. */
 export interface SettingsOut {
   kokoro_default_voice: string; // the preset a full cast reset narrates with
@@ -540,14 +583,16 @@ export function chapterOfBlock(blockId: string | null): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/** The six pipeline stages in signal-path order, with the card flag for each. */
+/** The six pipeline stages in signal-path order, with the card flag for each and its plain
+    label (import = ingest, speakers = attribute, voices = assign, record = render, mp3s =
+    assemble, audiobook = master). The flags are the server's; only the words are the UI's. */
 export const STAGES = [
-  ["ingested", "ingest"],
-  ["attributed", "attribute"],
-  ["assigned", "assign"],
-  ["rendered", "render"],
-  ["assembled", "assemble"],
-  ["mastered", "master"],
+  ["ingested", "import"],
+  ["attributed", "speakers"],
+  ["assigned", "voices"],
+  ["rendered", "record"],
+  ["assembled", "mp3s"],
+  ["mastered", "audiobook"],
 ] as const;
 
 /** Which stage a running job kind lights up on the signal path. */

@@ -93,3 +93,47 @@ export function resetLosses(a: VoiceAssignment, resetNarratorId: string | null):
     thought: a.thought_voice_id,
   };
 }
+
+/* -------------------------------------------------- suggest-a-cast preview rows */
+
+/** What applying a suggested cast does to one character, in plain words:
+    - "new": they get a voice in THIS book's cast for the first time — either a fresh voice is
+      made (would_create), or they have no saved voice here and reuse an auto voice that already
+      exists (a series sibling / leftover `<id>_auto`, which the server lists in would_recast).
+    - "will change": they end up on a different voice than the saved cast, or (re-cast ticked)
+      their saved auto voice is rebuilt, which re-records their lines.
+    - "keeps your pick": a hand-chosen voice already saved, untouched.
+    - "your pick": a hand-chosen voice that isn't saved yet (chosen in the preview, first cast).
+    - "unchanged": the voice they already have in this cast stays as it is. */
+export type CastRowStatus = "new" | "will change" | "keeps your pick" | "your pick" | "unchanged";
+
+export function castRowStatus(
+  characterId: string,
+  proposedVoiceId: string,
+  ctx: {
+    /** the SAVED assignment (null = never cast) */
+    saved: VoiceAssignment | null;
+    wouldCreate: readonly string[];
+    wouldRecast: readonly string[];
+    recast: boolean;
+  },
+): CastRowStatus {
+  const before = ctx.saved?.assignments[characterId];
+  if (ctx.wouldCreate.includes(proposedVoiceId)) return "new";
+  // not in the saved cast: whatever voice they get, it is new to this book
+  if (before === undefined) return isManualPick(characterId, proposedVoiceId) ? "your pick" : "new";
+  if (before !== proposedVoiceId) return "will change";
+  if (ctx.recast && ctx.wouldRecast.includes(proposedVoiceId)) return "will change";
+  return isManualPick(characterId, proposedVoiceId) ? "keeps your pick" : "unchanged";
+}
+
+/** Would applying this proposal write exactly what is already saved? Only then is apply a
+    no-op. Re-cast rebuilds voices, and a new voice must still be made, so neither is a no-op. */
+export function proposalMatchesSaved(
+  proposed: VoiceAssignment,
+  saved: VoiceAssignment | null,
+  opts: { wouldCreate: readonly string[]; recast: boolean },
+): boolean {
+  if (!saved || opts.recast || opts.wouldCreate.length > 0) return false;
+  return !castingVoicesDiffer(saved, castingFromServer(proposed));
+}

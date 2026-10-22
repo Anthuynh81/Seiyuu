@@ -1,11 +1,18 @@
-import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
-import { ApiError } from "../api/client";
-import { useBooks, useDeleteBook, useIngest } from "../api/hooks";
-import type { BookCard as BookCardT, JobOut, PaidArtifacts } from "../api/types";
+import { ApiError, isBackendDown } from "../api/client";
+import { useBooks, useDeleteBook, useIngest, useShelfJobs } from "../api/hooks";
+import type { BookCard as BookCardT, IngestResult, JobOut, PaidArtifacts } from "../api/types";
 import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
+import { JobErrorText } from "../components/JobErrorText";
+import { NextStep } from "../components/NextStep";
+import { SetupChecklist } from "../components/SetupChecklist";
+import { failedStepLine, liveJobLine } from "../lib/jobCopy";
+import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
+import { ADD_ANCHOR, nextStep } from "../lib/nextStep";
 
 function SignalPath({ book }: { book: BookCardT }) {
   const activeStage = book.active_job ? KIND_STAGE[book.active_job.kind] : undefined;
@@ -27,12 +34,80 @@ function SignalPath({ book }: { book: BookCardT }) {
 
 function JobLine({ book }: { book: BookCardT }) {
   const job = book.active_job;
-  if (!job) return <div className="jobline text-ink-3">no job active</div>;
+  if (!job) return <div className="jobline text-ink-3">Nothing running</div>;
   return (
     <div className="jobline">
       <i className={`led ${job.state === "running" ? "run" : "q"}`} />
-      {job.kind} {job.job_id} — {job.state}
-      {job.state === "queued" && " · waiting for the worker"}
+      {liveJobLine(job)}
+    </div>
+  );
+}
+
+/** Per-viewer convenience only: which failure banners this browser has dismissed. The
+    failure itself is server truth (the job row); storage that throws or is empty just means
+    the banner shows again. */
+const DISMISS_PREFIX = "seiyuu.dismissedFailure.";
+
+function readDismissed(jobId: string): boolean {
+  try {
+    return localStorage.getItem(DISMISS_PREFIX + jobId) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDismissed(jobId: string): void {
+  try {
+    localStorage.setItem(DISMISS_PREFIX + jobId, "1");
+  } catch {
+    // private window / blocked storage: the dismissal lasts for this page only
+  }
+}
+
+/** The failure the card should show: the book's latest unresolved failed run, unless a retry of
+    the same kind is live right now or this browser dismissed it. The card owns this (not the
+    banner) so the next step can tell whether the banner is still there to carry the fix. */
+function useVisibleFailure(book: BookCardT, failed: JobOut | null) {
+  const [dismissedNow, setDismissedNow] = useState<Set<string>>(() => new Set());
+  const visible =
+    failed !== null &&
+    book.active_job?.kind !== failed.kind &&
+    !dismissedNow.has(failed.job_id) &&
+    !readDismissed(failed.job_id)
+      ? failed
+      : null;
+  const dismiss = (jobId: string) => {
+    writeDismissed(jobId);
+    setDismissedNow((prev) => new Set(prev).add(jobId));
+  };
+  return [visible, dismiss] as const;
+}
+
+/** The book's latest failed run, in plain words, until it is dismissed or a newer job of the
+    same kind replaces it (the user retried). */
+function FailBanner({ failed, onDismiss }: { failed: JobOut; onDismiss: (jobId: string) => void }) {
+  const headline = failedStepLine(failed.kind);
+  return (
+    <div className="failbanner" role="group" aria-label={headline}>
+      <div className="failbanner-top">
+        <i className="led err" aria-hidden />
+        <b>{headline}</b>
+        <button
+          className="key quiet"
+          onClick={(e) => {
+            // the button is about to vanish: hand focus to the card's first action so a
+            // keyboard user keeps their place instead of landing on <body>
+            const next = e.currentTarget
+              .closest(".bookcard")
+              ?.querySelector<HTMLElement>(".nextrow a[href], .acts button:not([disabled])");
+            onDismiss(failed.job_id);
+            next?.focus();
+          }}
+        >
+          Dismiss
+        </button>
+      </div>
+      <JobErrorText explained={explainJobError(failed.error)} />
     </div>
   );
 }
@@ -118,20 +193,29 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
   );
 }
 
-function Card({ book }: { book: BookCardT }) {
+function Card({ book, failed }: { book: BookCardT; failed: JobOut | null }) {
   const nav = useNavigate();
   const go = (screen: string) => nav(`/${screen}?book=${encodeURIComponent(book.book_id)}`);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const blocked = book.active_job !== null;
+  const [visibleFailure, dismissFailure] = useVisibleFailure(book, failed);
+  const step = nextStep({ status: book, activeJob: book.active_job, failed });
+  // the banner already says what to fix for the step it failed: don't say it twice. Once the
+  // banner is dismissed (or the step is something else), the step carries its own reason.
+  const fixInBanner = visibleFailure !== null && step.retryOf === visibleFailure.kind;
   return (
     <div className="bookcard">
       <h3>{book.title ?? book.book_id}</h3>
       <div className="by">{book.authors.join(", ") || "—"}</div>
       <SignalPath book={book} />
       <JobLine book={book} />
+      {visibleFailure && <FailBanner failed={visibleFailure} onDismiss={dismissFailure} />}
+      <div className="nextrow">
+        <NextStep step={step} showReason={!fixInBanner} />
+      </div>
       <div className="acts">
-        {book.rendered && (
-          <button className="key" onClick={() => go("listen")}>
+        {book.rendered && !step.to.startsWith("/listen") && (
+          <button className="key quiet" onClick={() => go("listen")}>
             ▶ listen
           </button>
         )}
@@ -158,7 +242,81 @@ function Card({ book }: { book: BookCardT }) {
   );
 }
 
-function UploadSlot() {
+/** The "What was left out" disclosure: what the importer skipped, each group in plain words. */
+function LeftOut({ result }: { result: IngestResult }) {
+  const skipped = result.skipped_items;
+  const dropped = result.dropped_sections;
+  const total = skipped.length + dropped.length;
+  if (total === 0) return <p className="nextstep-why m-0">Nothing was left out.</p>;
+  return (
+    <details className="fine">
+      <summary>What was left out ({total})</summary>
+      {skipped.length > 0 && (
+        <>
+          <h4>Pages skipped as front or back matter</h4>
+          <ul>
+            {skipped.map((item, i) => (
+              <li key={`${i}:${item}`}>{item}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {dropped.length > 0 && (
+        <>
+          <h4>Sections dropped as too short or with nothing to read aloud</h4>
+          <ul>
+            {dropped.map((section, i) => (
+              <li key={`${i}:${section}`}>{section}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </details>
+  );
+}
+
+function resultHeadline(result: IngestResult): string {
+  const title = result.book.title ?? "your book";
+  return result.already_in_library ? `Already in your library: ${title}` : `Added ${title}`;
+}
+
+/** The honest upload result: which book, whether it was new, what was left out, and the one
+    thing to do next. Lives outside the drop button (a disclosure can't sit inside a button).
+    The next step comes from the LIVE shelf (same inputs as the book's card), falling back to
+    the upload's snapshot only until the refreshed shelf lists the book; once the shelf has
+    listed it and then lost it (deleted from its card), the panel goes away. */
+function IngestResultPanel({
+  result,
+  books,
+  jobs,
+}: {
+  result: IngestResult;
+  books: BookCardT[] | undefined;
+  jobs: JobOut[] | undefined;
+}) {
+  const live = books?.find((b) => b.book_id === result.book.book_id);
+  const [seen, setSeen] = useState(false);
+  if (live && !seen) setSeen(true);
+  if (!live && seen) return null;
+  const step = live
+    ? nextStep({ status: live, activeJob: live.active_job, failed: unresolvedFailure(jobs, live.book_id) })
+    : nextStep({ status: result.book });
+  const dup = result.already_in_library;
+  return (
+    <section className={`ingestres ${dup ? "dup" : ""}`} aria-label="Upload result">
+      <p className="ingestres-head">{resultHeadline(result)}</p>
+      <p className="ingestres-meta">
+        {result.chapters} chapter{result.chapters === 1 ? "" : "s"} · {result.blocks} paragraph
+        {result.blocks === 1 ? "" : "s"}
+        {dup && " · this exact file was added before"}
+      </p>
+      <NextStep step={step} />
+      <LeftOut result={result} />
+    </section>
+  );
+}
+
+function UploadSlot({ books, jobs }: { books: BookCardT[] | undefined; jobs: JobOut[] | undefined }) {
   const ingest = useIngest();
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -167,43 +325,79 @@ function UploadSlot() {
     if (file) ingest.mutate(file);
   };
   const error = ingest.error instanceof ApiError ? ingest.error.message : ingest.error?.message;
+  // one plain line for screen readers, in a region that is always mounted so every change is
+  // announced; the panel with its link and disclosure sits outside it
+  const outcome = ingest.isPending
+    ? "Adding the book…"
+    : ingest.isSuccess
+      ? resultHeadline(ingest.data)
+      : error
+        ? `Couldn't add the book: ${error}`
+        : "";
 
   return (
-    <button
-      className={`drop ${over ? "over" : ""}`}
-      onClick={() => input.current?.click()}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setOver(false);
-        submit(e.dataTransfer.files[0]);
-      }}
-    >
-      <input
-        ref={input}
-        type="file"
-        accept=".epub,.pdf"
-        hidden
-        onChange={(e) => submit(e.target.files?.[0] ?? undefined)}
-      />
-      <span className="tag">{ingest.isPending ? "ingesting…" : "drop epub or pdf / click to browse"}</span>
-      <span>Ingest runs synchronously — the book appears here in seconds.</span>
+    <div className="uploadcell">
+      <button
+        id={ADD_ANCHOR}
+        className={`drop ${over ? "over" : ""}`}
+        onClick={() => input.current?.click()}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setOver(true);
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setOver(false);
+          submit(e.dataTransfer.files[0]);
+        }}
+      >
+        <input
+          ref={input}
+          type="file"
+          accept=".epub,.pdf"
+          hidden
+          onChange={(e) => {
+            submit(e.target.files?.[0] ?? undefined);
+            e.target.value = ""; // picking the same file again must upload again
+          }}
+        />
+        <span className="tag">{ingest.isPending ? "adding the book…" : "drop epub or pdf / click to browse"}</span>
+        <span>The book appears here in seconds.</span>
+        {error && <span className="err">{error}</span>}
+      </button>
+      <p className="sr-only" role="status">
+        {outcome}
+      </p>
       {ingest.isSuccess && (
-        <span className="mono text-[11px] text-ok">
-          {ingest.data.book.book_id} · {ingest.data.chapters} chapters, {ingest.data.blocks} blocks
-        </span>
+        <IngestResultPanel key={ingest.submittedAt} result={ingest.data} books={books} jobs={jobs} />
       )}
-      {error && <span className="err">{error}</span>}
-    </button>
+    </div>
   );
 }
 
 export function Library() {
+  const qc = useQueryClient();
   const books = useBooks();
+  const shelfJobs = useShelfJobs();
+  const empty = books.data?.books.length === 0;
+  // the backend row of the checklist already says "not running" and how to start it
+  const backendDown = isBackendDown(books.error);
+  // the shelf noticed the outage before the probe's 30 s poll did: ask the probe once now, so
+  // the checklist below agrees with this panel instead of showing a stale "Running"
+  useEffect(() => {
+    if (backendDown) void qc.invalidateQueries({ queryKey: ["system", "probe"] });
+  }, [backendDown, qc]);
+  const shelfCached = (books.data?.books.length ?? 0) > 0;
+  // "Add a book" / "Add the book again" land here: bring the upload slot into view and focus
+  // it, also when the link points at the page the user is already on
+  const location = useLocation();
+  useEffect(() => {
+    if (location.hash !== `#${ADD_ANCHOR}`) return;
+    const drop = document.getElementById(ADD_ANCHOR);
+    drop?.scrollIntoView({ behavior: "smooth", block: "center" });
+    drop?.focus({ preventScroll: true });
+  }, [location.hash, location.key]);
   return (
     <section className="screen">
       <h1>Library</h1>
@@ -212,10 +406,27 @@ export function Library() {
         position on the signal path. Progress lives in the transport bar — cards only say what stage owns the book.
       </p>
       {books.isPending && <div className="loadline">reading the shelf…</div>}
-      {books.isError && <div className="errline">{books.error.message}</div>}
+      {books.isError && !backendDown && <div className="errline">{books.error.message}</div>}
+      {(empty || backendDown) && (
+        <div className="panel">
+          <div className="panel-h">
+            <b>{backendDown ? "The Seiyuu backend isn't running" : "Before your first book"}</b>
+          </div>
+          <div className="panel-sub">
+            {backendDown
+              ? shelfCached
+                ? "The shelf below is from before it stopped and can't change until it's back. Start it, then return to this page."
+                : "Start it, then return to this page. Everything below should be green before you start."
+              : "Everything below should be green before you start. Each fix says what to run."}
+          </div>
+          <SetupChecklist />
+        </div>
+      )}
       <div className="grid2">
-        <UploadSlot />
-        {books.data?.books.map((b) => <Card key={b.book_id} book={b} />)}
+        <UploadSlot books={books.data?.books} jobs={shelfJobs.data?.jobs} />
+        {books.data?.books.map((b) => (
+          <Card key={b.book_id} book={b} failed={unresolvedFailure(shelfJobs.data?.jobs, b.book_id)} />
+        ))}
       </div>
     </section>
   );
