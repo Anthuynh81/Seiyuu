@@ -442,7 +442,7 @@ describe("RenderJobs", () => {
     renderWithProviders(<RenderJobs />);
 
     // wait for the system defaults so the enqueue carries provider + model
-    await screen.findByText(/anthropic · claude-sonnet-4/);
+    await screen.findByText(/Claude online · claude-sonnet-4/);
     await user.click(screen.getByRole("button", { name: /find the speakers in the whole book/ }));
 
     // the 402 surfaces the reason and an explicit confirm control — nothing auto-retries
@@ -481,6 +481,39 @@ describe("RenderJobs", () => {
     expect(screen.getByText("ollama serve")).toBeInTheDocument();
     expect(screen.getByText("Details")).toBeInTheDocument();
     expect(screen.getByText(/WinError 10061/).closest("details")).not.toBeNull(); // never the primary text
+  });
+
+  it("once speakers are found the step is a done card with the re-run under Advanced, not a start button", async () => {
+    const user = userEvent.setup();
+    const server = mountRoutes(readyCard()).get("/api/books/demo/cost-estimate", makeEstimate());
+    renderWithProviders(<RenderJobs />, { route: "/render?book=demo" });
+
+    const box = await screen.findByRole("region", { name: "Speakers found" });
+    expect(box).toHaveAttribute("id", "find-speakers");
+    expect(within(box).getByRole("link", { name: "check them in Character Review" })).toHaveAttribute(
+      "href",
+      "/review?book=demo",
+    );
+    expect(within(box).queryByRole("button", { name: /find the speakers in/ })).not.toBeInTheDocument();
+    // the provenance is only fetched once the Advanced disclosure is opened
+    expect(server.lastCall("GET", "/characters")).toBeUndefined();
+    server.get("/api/books/demo/characters", {
+      book_id: "demo",
+      provider_id: "local",
+      model_id: "qwen2.5:7b",
+      prompt_version: "v6",
+      narration_segments: 1,
+      low_confidence_segments: 0,
+      unattributed_quote_segments: 0,
+      confidence_threshold: 0.7,
+      characters: [],
+      flagged: [],
+      notes: [],
+      edit_warnings: [],
+    });
+    await user.click(within(box).getByText("Advanced: re-run speaker finding for chapters…"));
+    expect(await within(box).findByRole("textbox", { name: "chapters to re-read" })).toBeInTheDocument();
+    await waitFor(() => expect(server.lastCall("GET", "/api/books/demo/characters")).toBeDefined());
   });
 
   /* ---- active render mode (instant fallback) ------------------------------------------ */
@@ -885,7 +918,8 @@ describe("RenderJobs", () => {
         // focus moves into it so the next Tab reaches its button
         const box = document.getElementById("find-speakers")!;
         expect(within(box).getByRole("button", { name: /find the speakers in/ })).toBeInTheDocument();
-        expect(within(box).getByText("speakers not found yet")).toBeInTheDocument();
+        expect(within(box).getByText("Full cast: find the speakers")).toBeInTheDocument();
+        expect(within(box).queryByText(/stage_prerequisite|speakers not found yet/)).not.toBeInTheDocument();
         await waitFor(() => expect(document.activeElement).toBe(box));
       } finally {
         spy.mockRestore();

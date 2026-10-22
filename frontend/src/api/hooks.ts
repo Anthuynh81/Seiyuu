@@ -380,12 +380,14 @@ export function useEngines() {
 }
 
 /** Redacted server config. Settings freeze at server start, so one fetch per session is
-    plenty. Only mounted by screens that need it (the cast-reset dialog). */
-export function useSettings() {
+    plenty. Only mounted by screens that need it (the cast-reset dialog; the find-speakers
+    panel when the default reader is Claude, for the local model's name). */
+export function useSettings({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["settings"],
     queryFn: () => api<SettingsOut>("/api/settings"),
     staleTime: Infinity,
+    enabled,
   });
 }
 

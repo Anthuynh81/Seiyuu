@@ -227,10 +227,9 @@ describe("Review", () => {
     renderWithProviders(<Review />, { route: "/review?book=b1" });
 
     expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
-      "href",
-      "/render?book=b1#find-speakers",
-    );
+    // the step is done right here: the find-the-speakers panel, not a link away
+    const panel = screen.getByRole("region", { name: "Full cast: find the speakers" });
+    expect(within(panel).getByRole("button", { name: "▶ find the speakers in the whole book" })).toBeInTheDocument();
     expect(screen.queryByText("stage_prerequisite")).not.toBeInTheDocument();
     expect(server.lastCall("GET", "/characters")).toBeUndefined();
     expect(server.lastCall("GET", "/segments")).toBeUndefined();
@@ -248,10 +247,7 @@ describe("Review", () => {
     renderWithProviders(<Review />, { route: "/review?book=b1" });
 
     expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
-      "href",
-      "/render?book=b1#find-speakers",
-    );
+    expect(screen.getByRole("region", { name: "Full cast: find the speakers" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Listen" })).not.toBeInTheDocument();
   });
 
@@ -260,25 +256,25 @@ describe("Review", () => {
       books: [makeBook({ book_id: "b3", title: "Solo", rendered: true })],
     });
     renderWithProviders(<Review />);
-    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
-      "href",
-      "/render?book=b3#find-speakers",
-    );
+    expect(await screen.findByRole("region", { name: "Full cast: find the speakers" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Build the .m4b" })).not.toBeInTheDocument();
   });
 
   it("with no attributed book at all, the empty state points at the first book that needs speakers", async () => {
-    mockApi().get("/api/books", {
-      books: [
-        makeBook({ book_id: "b0", title: "Gone", ingested: false }),
-        makeBook({ book_id: "b2", title: "Waiting" }),
-      ],
-    });
+    const server = mockApi()
+      .get("/api/books", {
+        books: [
+          makeBook({ book_id: "b0", title: "Gone", ingested: false }),
+          makeBook({ book_id: "b2", title: "Waiting" }),
+        ],
+      })
+      .post("/api/books/b2/attribute", { job_id: "j-a", kind: "attribute", state: "queued" }, 202);
     renderWithProviders(<Review />);
-    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
-      "href",
-      "/render?book=b2#find-speakers",
-    );
+    const panel = await screen.findByRole("region", { name: "Full cast: find the speakers" });
+    expect(screen.getByText("Waiting")).toBeInTheDocument(); // the book it will read, by title
+    await userEvent.setup().click(within(panel).getByRole("button", { name: "▶ find the speakers in the whole book" }));
+    // the panel starts THAT book, not the shelf's first one
+    await waitFor(() => expect(server.lastCall("POST", "/attribute")?.url).toBe("/api/books/b2/attribute"));
   });
 
   it("with no books at all, the empty state's next step is adding one", async () => {

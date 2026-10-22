@@ -578,6 +578,10 @@ export interface EnginesOut {
 /** Slim view of GET /api/settings (redacted config) — only what screens consume. */
 export interface SettingsOut {
   kokoro_default_voice: string; // the preset a full cast reset narrates with
+  attribution_provider: string;
+  // the LOCAL speaker-finding model (the one the system probe's ollama.model_installed checks),
+  // even when the default reader is Claude
+  attribution_model: string;
 }
 
 /** "ch013_b0042" -> 13; null when unparsable. */

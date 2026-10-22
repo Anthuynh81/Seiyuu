@@ -31,6 +31,7 @@ import { isReviewable, useFrontier } from "./review/helpers";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
 import { ResetCastDialog } from "./review/ResetCastDialog";
 import { RosterRow } from "./review/RosterRow";
+import { AttributePanel } from "./render/AttributePanel";
 import { SegmentPair } from "./review/SegmentPair";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
 import { VoicePicker } from "./review/VoicePicker";
@@ -220,12 +221,28 @@ export function Review() {
       <section className="screen">
         <h1>Character Review</h1>
         <p className="sub">
-          {candidate
-            ? "No book has its speakers found yet. Once Seiyuu has worked out who says each line, you can check it here."
-            : "No books yet. Add one in the Library first."}
+          {candidate ? (
+            <>
+              No book has its speakers found yet. Once Seiyuu has worked out who says each line, you can check it
+              here.
+              {candidate.ingested && (
+                <>
+                  {" "}
+                  Next up: <b>{candidate.title ?? "your book"}</b>.
+                </>
+              )}
+            </>
+          ) : (
+            "No books yet. Add one in the Library first."
+          )}
         </p>
-        {/* this screen is about speakers: offer that step even for a book recorded in one voice */}
-        <NextStep step={nextStep({ status: candidate, activeJob: candidate?.active_job, want: "attribute" })} />
+        {/* this screen is about speakers: offer that step even for a book recorded in one voice,
+            and do it right here when the book has text to read */}
+        {candidate?.ingested ? (
+          <AttributePanel key={candidate.book_id} book={candidate} />
+        ) : (
+          <NextStep step={nextStep({ status: candidate, activeJob: candidate?.active_job, want: "attribute" })} />
+        )}
       </section>
     );
   }
@@ -253,13 +270,21 @@ export function Review() {
       </p>
 
       {!attributed && book.data && (
-        <div className="refusal">
-          <span className="tag">speakers not found yet</span>
-          <p>Seiyuu hasn't worked out who says each line in this book yet, so there is nothing to review.</p>
-          <NextStep
-            step={nextStep({ status: book.data.status, activeJob: book.data.active_job, want: "attribute" })}
-          />
-        </div>
+        <>
+          <p className="mb-2 text-ink-2">
+            Seiyuu hasn't worked out who says each line in this book yet, so there is nothing to review.
+          </p>
+          {book.data.status.ingested ? (
+            <AttributePanel
+              key={bookId}
+              book={{ book_id: bookId, attributed: false, active_job: book.data.active_job }}
+            />
+          ) : (
+            <NextStep
+              step={nextStep({ status: book.data.status, activeJob: book.data.active_job, want: "attribute" })}
+            />
+          )}
+        </>
       )}
 
       {attributed && (

@@ -564,6 +564,24 @@ details.fine summary:hover { color: var(--tungsten); }
 .ingestres ul { margin: 4px 0 0; padding-left: 18px; }
 .ingestres li { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
 
+/* find the speakers: one step card (Render), a card's opened step (Library), Review's empty state */
+.attrpanel { margin-bottom: 14px; }
+.attrpanel:focus { outline: none; }
+.bookcard .attrpanel { margin: 10px 0 0; background: var(--booth-0); }
+.sub + .attrpanel { margin-top: 8px; }
+.attr-body { padding: 10px 14px 12px; }
+.attr-why { margin: 0 0 10px; color: var(--ink-2); font-size: 12px; max-width: 60ch; }
+.attr-reader { margin: 8px 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.attr-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.attr-block { margin-top: 8px; border: 1px solid var(--hairline); border-left: 2px solid var(--caution); background: var(--booth-0); padding: 7px 10px; }
+.attr-block p { margin: 0; color: var(--ink); font-size: 12px; }
+.attr-ok { margin: 8px 0 0; font-size: 12px; color: var(--ok); }
+details.fine.attr-adv { margin-top: 0; padding: 8px 14px; }
+.attr-adv .attr-body { padding: 6px 0 4px; }
+.attr-notes { margin: 0 0 8px; padding-left: 16px; color: var(--ink-2); font-size: 12px; max-width: 62ch; }
+.attr-notes li { margin-top: 2px; }
+.attr-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+
 /* ---- primitives (react-aria base, Talkback skin) ---- */
 
 /* select: trigger reads like a console control; the popover is ours, not the OS's */

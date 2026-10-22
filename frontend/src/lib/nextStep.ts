@@ -16,6 +16,9 @@ export interface NextStep {
   /** Set when this step re-runs that failed job kind (the label reads "… again" and the reason
       is the fix), so a screen showing the failure banner can avoid saying the fix twice. */
   retryOf?: JobKind;
+  /** Which step this is (unset for "add a book" and a running job), so a screen can do the
+      step in place instead of following the link (the Library card opens its speaker panel). */
+  stepId?: StepId;
 }
 
 export type BookFlags = Pick<
@@ -139,7 +142,7 @@ export function nextStep({
       : !status.assigned
         ? "assign"
         : "render");
-  const plain = plainStep(step, id);
+  const plain: NextStep = { ...plainStep(step, id), stepId: step };
 
   if (failed && RETRIES[step]?.includes(failed.kind)) {
     const explained = explainJobError(failed.error);

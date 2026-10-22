@@ -3,7 +3,6 @@ import { useLocation, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
-  useAttribute,
   useBook,
   useBookJobs,
   useBooks,
@@ -16,15 +15,15 @@ import {
 } from "../api/hooks";
 import type { RenderMode } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
-import { JobErrorText } from "../components/JobErrorText";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { StaleAudioBanner } from "../components/StaleAudio";
-import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
+import { unresolvedFailure } from "../lib/jobErrors";
 import { classifyRenderFailure } from "../lib/money";
 import { ADD_A_BOOK, RENDER_ANCHOR } from "../lib/nextStep";
 import { scopeChapters, type Scope } from "../lib/scope";
 import { ActiveModeControl } from "./render/ActiveModeControl";
+import { AttributePanel } from "./render/AttributePanel";
 import { ConfirmFullDialog } from "./render/ConfirmFullDialog";
 import { CoverControl } from "./render/CoverControl";
 import { EstimateCard } from "./render/EstimateCard";
@@ -86,24 +85,6 @@ export function RenderJobs() {
     activeJob && ["render", "assemble", "master"].includes(activeJob.kind) ? activeJob : null;
 
   const mint = useMintQuote(bookId ?? "");
-  const attribute = useAttribute(bookId ?? "");
-  const [llm, setLlm] = useState<{ provider: "local" | "anthropic"; model: string } | null>(null);
-  const [llmOpen, setLlmOpen] = useState(false);
-  const attrDefaults = system.data?.attribution;
-  const effLlm =
-    llm ??
-    (attrDefaults
-      ? { provider: attrDefaults.provider as "local" | "anthropic", model: attrDefaults.model }
-      : null);
-  const startAttribute = (confirmPaid = false) =>
-    attribute.mutate({
-      chapters,
-      ...(effLlm ? { provider: effLlm.provider, model: effLlm.model } : {}),
-      ...(confirmPaid ? { confirm_paid: true } : {}),
-    });
-  const attrErr = attribute.error instanceof ApiError ? attribute.error : null;
-  // the synchronous refusals (Ollama pre-flight 503s, render_active, ...) read in plain words
-  const attrExplained = attrErr ? explainJobError({ code: attrErr.code, message: attrErr.message }) : null;
   const render = useStartJob(bookId ?? "", "render");
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
@@ -271,6 +252,16 @@ export function RenderJobs() {
       <StaleAudioBanner status={status} />
       <div className="rjgrid">
         <div>
+          {/* step 1 of the full-cast path: a step card, done or not, before the recording controls */}
+          {status?.ingested && (
+            <AttributePanel
+              key={bookId}
+              id={RENDER_ANCHOR.findSpeakers}
+              book={{ book_id: bookId, attributed: status.attributed, active_job: activeJob }}
+              chapterCount={chapterCount}
+              chapters={chapters}
+            />
+          )}
           <div className="modewrap" id={RENDER_ANCHOR.record} tabIndex={-1}>
             <span className="tag">mode</span>
             <button className={`chap ${mode === "multivoice" ? "on" : ""}`} disabled={!status?.assigned}
@@ -360,80 +351,6 @@ export function RenderJobs() {
                 {emotionChoice === null && ` · system default: ${emotionDefault ? "on" : "off"}`}
               </span>
             </div>
-          )}
-          {status?.ingested && !status.attributed && (
-            book.data?.active_job?.kind === "attribute" ? (
-              <div className="drainstrip" id={RENDER_ANCHOR.findSpeakers} tabIndex={-1}>
-                <span className="state"><i className="led run" />finding the speakers</span>
-                <span className="mono text-[11.5px] text-ink-2">
-                  follow it in the transport bar — Character Review and the Listen read-along unlock when it lands
-                </span>
-              </div>
-            ) : (
-              <div className="refusal mb-3.5" id={RENDER_ANCHOR.findSpeakers} tabIndex={-1}>
-                <span className="tag">speakers not found yet</span>
-                <p>multivoice, Character Review, and the read-along need speaker attribution — single voice doesn't.</p>
-                <p className="mt-2">
-                  <button className="key" disabled={attribute.isPending} onClick={() => startAttribute()}>
-                    {attribute.isPending
-                      ? "starting…"
-                      : `▶ find the speakers in ${chapters.length ? `ch ${chapters[0]}–${chapters[chapters.length - 1]}` : "the whole book"}`}
-                  </button>
-                </p>
-                <p className="mono mt-1.5 text-[11px] text-ink-2">
-                  reader: {effLlm ? `${effLlm.provider} · ${effLlm.model}` : "…"}
-                  {effLlm?.provider === "local" && " (ollama must be running)"}{" "}
-                  <button className="link" onClick={() => setLlmOpen(!llmOpen)}>
-                    {llmOpen ? "done" : "change"}
-                  </button>
-                </p>
-                {llmOpen && effLlm && attrDefaults && (
-                  <p className="mt-1.5 flex items-center gap-2">
-                    <TalkSelect
-                      ariaLabel="attribution provider"
-                      value={effLlm.provider}
-                      onChange={(v) => {
-                        const p = v as "local" | "anthropic";
-                        setLlm({ provider: p, model: p === "local" ? attrDefaults.model : attrDefaults.anthropic_model });
-                      }}
-                      options={[
-                        { value: "local", label: "local (ollama) — free" },
-                        {
-                          value: "anthropic",
-                          label: `anthropic — paid${system.data?.keys.anthropic_configured ? "" : " (no key configured)"}`,
-                          disabled: !system.data?.keys.anthropic_configured,
-                        },
-                      ]}
-                    />
-                    <input
-                      type="text"
-                      value={effLlm.model}
-                      aria-label="model id"
-                      onChange={(e) => setLlm({ provider: effLlm.provider, model: e.target.value })}
-                      className="mono w-[180px] border border-hairline bg-booth-0 px-2 py-[5px] text-[11.5px] text-ink"
-                    />
-                  </p>
-                )}
-                {attrErr && attrExplained?.known && (
-                  <div className="mt-1.5">
-                    <JobErrorText explained={attrExplained} />
-                  </div>
-                )}
-                {attrErr && !attrExplained?.known && (
-                  <p className="mono mt-1.5 text-[11px] text-clip">
-                    {attrErr.message}
-                    {attrErr.code === "payment_confirmation_required" && (
-                      <>
-                        {" — "}
-                        <button className="link" onClick={() => startAttribute(true)}>
-                          confirm the paid run
-                        </button>
-                      </>
-                    )}
-                  </p>
-                )}
-              </div>
-            )
           )}
           {estimate.isPending && ready && <div className="loadline">estimating against the segment cache…</div>}
           {estimate.isError && <div className="errline">{estimate.error.message}</div>}

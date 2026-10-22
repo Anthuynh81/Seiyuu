@@ -155,7 +155,8 @@ describe("App", () => {
 
     // the first poll lands: the transport bar shows the running job
     expect(await screen.findByText("render · demo")).toBeInTheDocument();
-    const families = ["segments", "render-summary", "validation", "estimate", "assignment", "voices"];
+    // "characters": a finished speaker re-run changes the roster and its provenance
+    const families = ["segments", "render-summary", "validation", "estimate", "assignment", "voices", "characters"];
     for (const key of families) {
       expect(invalidate).not.toHaveBeenCalledWith({ queryKey: [key] });
     }

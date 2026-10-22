@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, isBackendDown } from "../api/client";
@@ -13,6 +13,7 @@ import { SetupChecklist } from "../components/SetupChecklist";
 import { failedStepLine, liveJobLine } from "../lib/jobCopy";
 import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
 import { ADD_ANCHOR, nextStep } from "../lib/nextStep";
+import { AttributePanel } from "./render/AttributePanel";
 
 function SignalPath({ book }: { book: BookCardT }) {
   const activeStage = book.active_job ? KIND_STAGE[book.active_job.kind] : undefined;
@@ -99,7 +100,7 @@ function FailBanner({ failed, onDismiss }: { failed: JobOut; onDismiss: (jobId: 
             // keyboard user keeps their place instead of landing on <body>
             const next = e.currentTarget
               .closest(".bookcard")
-              ?.querySelector<HTMLElement>(".nextrow a[href], .acts button:not([disabled])");
+              ?.querySelector<HTMLElement>(".nextrow a[href], .nextrow button:not([disabled]), .acts button:not([disabled])");
             onDismiss(failed.job_id);
             next?.focus();
           }}
@@ -203,6 +204,14 @@ function Card({ book, failed }: { book: BookCardT; failed: JobOut | null }) {
   // the banner already says what to fix for the step it failed: don't say it twice. Once the
   // banner is dismissed (or the step is something else), the step carries its own reason.
   const fixInBanner = visibleFailure !== null && step.retryOf === visibleFailure.kind;
+  // Finding the speakers is done right here: the step's key opens the panel inside the card
+  // (no trip to Render), and the card stays one line tall until it's asked for.
+  const findHere = step.stepId === "attribute" && !step.disabled;
+  const [attrOpen, setAttrOpen] = useState(false);
+  // once started, the step turns into the disabled running-job key: keep the open panel (now
+  // its "finding the speakers" strip, which takes the focus) instead of dropping it mid-use
+  const showPanel = attrOpen && (findHere || book.active_job?.kind === "attribute");
+  const panelId = useId();
   return (
     <div className="bookcard">
       <h3>{book.title ?? book.book_id}</h3>
@@ -211,8 +220,16 @@ function Card({ book, failed }: { book: BookCardT; failed: JobOut | null }) {
       <JobLine book={book} />
       {visibleFailure && <FailBanner failed={visibleFailure} onDismiss={dismissFailure} />}
       <div className="nextrow">
-        <NextStep step={step} showReason={!fixInBanner} />
+        <NextStep
+          step={step}
+          // the open panel explains the step itself: don't say it twice
+          showReason={!fixInBanner && !showPanel}
+          expand={findHere ? { open: attrOpen, onToggle: () => setAttrOpen(!attrOpen), controls: panelId } : undefined}
+        />
       </div>
+      {showPanel && (
+        <AttributePanel id={panelId} book={{ book_id: book.book_id, attributed: book.attributed, active_job: book.active_job }} />
+      )}
       <div className="acts">
         {book.rendered && !step.to.startsWith("/listen") && (
           <button className="key quiet" onClick={() => go("listen")}>
