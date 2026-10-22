@@ -524,6 +524,27 @@ details.fine summary:hover { color: var(--tungsten); }
 .failbanner-top .key { margin-left: auto; padding: 2px 10px; font-size: 11px; }
 .failbanner .joberr { margin-top: 4px; }
 
+/* next step: the one primary action (a real link styled as a key) and its plain reason */
+.nextstep { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.nextstep-key { display: inline-block; text-decoration: none; }
+.nextstep-why { font-size: 12px; color: var(--ink-2); max-width: 52ch; }
+.bookcard .nextrow { margin-top: 12px; }
+.refusal .nextstep, .sub + .nextstep { margin-top: 8px; }
+.scoperow .nextstep { margin-left: 6px; }
+.scoperow .nextstep .key { padding: 3px 12px; font-size: 11.5px; }
+.scoperow .nextstep-why { font-size: 11px; color: var(--ink-3); }
+
+/* upload result: what was added, and what was left out */
+.uploadcell { display: flex; flex-direction: column; gap: 10px; }
+.ingestres { border: 1px solid var(--hairline); border-left: 2px solid var(--ok); background: var(--console); padding: 10px 12px; }
+.ingestres.dup { border-left-color: var(--rolling); }
+.ingestres-head { margin: 0; font-size: 13px; font-weight: 600; }
+.ingestres-meta { margin: 2px 0 10px; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.ingestres details.fine { margin-top: 10px; }
+.ingestres h4 { margin: 8px 0 0; font-size: 11.5px; font-weight: 600; color: var(--ink); }
+.ingestres ul { margin: 4px 0 0; padding-left: 18px; }
+.ingestres li { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
+
 /* ---- primitives (react-aria base, Talkback skin) ---- */
 
 /* select: trigger reads like a console control; the popover is ours, not the OS's */

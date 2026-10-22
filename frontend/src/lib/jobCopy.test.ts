@@ -18,8 +18,8 @@ describe("jobCopy", () => {
   it.each([
     ["attribute", "succeeded", "Found the speakers in T"],
     ["render", "succeeded", "Recorded T"],
-    ["assemble", "succeeded", "Built the audiobook for T"],
-    ["master", "succeeded", "Made the final audiobook file for T"],
+    ["assemble", "succeeded", "Built the chapter MP3s for T"],
+    ["master", "succeeded", "Built the .m4b audiobook for T"],
     ["warmup", "succeeded", "T is downloaded and ready"],
     ["attribute", "failed", "Couldn't find the speakers in T"],
     ["render", "canceled", "Stopped recording T"],

@@ -2,7 +2,8 @@ import type { BookCard, JobKind, JobOut } from "../api/types";
 import { engineName } from "./health";
 
 /** Plain-words copy for jobs: what a job is DOING (cards, while live) and what it DID (the
-    finish notice). Pure; the UI never shows a raw job id as the main text. */
+    finish notice). Pure; the UI never shows a raw job id as the main text. One vocabulary
+    everywhere: assemble builds the "chapter MP3s", master builds the ".m4b audiobook". */
 
 /** Warm-up jobs use the documented `engine:<id>` subject in the book column. */
 export function engineSubject(bookId: string): string | null {
@@ -21,8 +22,8 @@ const DOING: Record<JobKind, string> = {
   ingest: "Adding the book",
   attribute: "Finding the speakers",
   render: "Recording",
-  assemble: "Building the audiobook",
-  master: "Making the final audiobook file",
+  assemble: "Building the chapter MP3s",
+  master: "Building the .m4b audiobook",
   warmup: "Getting the voice engine ready",
 };
 
@@ -36,8 +37,8 @@ const DONE: Record<JobKind, (name: string) => string> = {
   ingest: (t) => `Added ${t} to your library`,
   attribute: (t) => `Found the speakers in ${t}`,
   render: (t) => `Recorded ${t}`,
-  assemble: (t) => `Built the audiobook for ${t}`,
-  master: (t) => `Made the final audiobook file for ${t}`,
+  assemble: (t) => `Built the chapter MP3s for ${t}`,
+  master: (t) => `Built the .m4b audiobook for ${t}`,
   warmup: (e) => `${e} is downloaded and ready`,
 };
 
@@ -45,8 +46,8 @@ const FAILED: Record<JobKind, (name: string) => string> = {
   ingest: (t) => `Couldn't add ${t}`,
   attribute: (t) => `Couldn't find the speakers in ${t}`,
   render: (t) => `Recording ${t} stopped with a problem`,
-  assemble: (t) => `Couldn't build the audiobook for ${t}`,
-  master: (t) => `Couldn't make the final audiobook file for ${t}`,
+  assemble: (t) => `Couldn't build the chapter MP3s for ${t}`,
+  master: (t) => `Couldn't build the .m4b audiobook for ${t}`,
   warmup: (e) => `Couldn't get ${e} ready`,
 };
 
@@ -54,8 +55,8 @@ const STOPPED: Record<JobKind, (name: string) => string> = {
   ingest: (t) => `Stopped adding ${t}`,
   attribute: (t) => `Stopped finding the speakers in ${t}`,
   render: (t) => `Stopped recording ${t}`,
-  assemble: (t) => `Stopped building the audiobook for ${t}`,
-  master: (t) => `Stopped making the final audiobook file for ${t}`,
+  assemble: (t) => `Stopped building the chapter MP3s for ${t}`,
+  master: (t) => `Stopped building the .m4b audiobook for ${t}`,
   warmup: (e) => `Stopped getting ${e} ready`,
 };
 
@@ -71,8 +72,8 @@ export function failedStepLine(kind: JobKind): string {
     ingest: "Adding this book failed",
     attribute: "Finding the speakers failed",
     render: "The last recording failed",
-    assemble: "Building the audiobook failed",
-    master: "Making the final audiobook file failed",
+    assemble: "Building the chapter MP3s failed",
+    master: "Building the .m4b audiobook failed",
     warmup: "Getting the voice engine ready failed",
   };
   return doing[kind] ?? "The last job failed";

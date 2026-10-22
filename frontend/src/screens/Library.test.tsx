@@ -24,6 +24,143 @@ describe("Library", () => {
     expect(screen.getAllByRole("button", { name: "render & jobs" })).toHaveLength(2);
   });
 
+  describe("next step on each card", () => {
+    it("is one primary link per card, in plain words, to where that step happens", async () => {
+      mockApi().get("/api/books", {
+        books: [
+          makeBook({ book_id: "b1", title: "Rendered One", rendered: true, attributed: true, assigned: true }),
+          makeBook({ book_id: "b2", title: "Fresh Ingest" }),
+          makeBook({ book_id: "b3", title: "Has Speakers", attributed: true }),
+        ],
+      });
+      const { container } = renderWithProviders(<Library />);
+      await screen.findByText("Rendered One");
+
+      const card = (title: string) => screen.getByText(title).closest<HTMLElement>(".bookcard")!;
+      expect(within(card("Fresh Ingest")).getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+        "href",
+        "/render?book=b2#find-speakers",
+      );
+      expect(within(card("Has Speakers")).getByRole("link", { name: "Cast the voices" })).toHaveAttribute(
+        "href",
+        "/review?book=b3",
+      );
+      expect(within(card("Rendered One")).getByRole("link", { name: "Build the .m4b" })).toHaveAttribute(
+        "href",
+        "/render?book=b1#build",
+      );
+      // exactly one primary per card; the old actions stay, but quiet
+      expect(container.querySelectorAll(".bookcard .nextrow .key")).toHaveLength(3);
+      expect(screen.getByRole("button", { name: "▶ listen" })).toHaveClass("quiet");
+    });
+
+    it("a finished book's next step is Listen, and the duplicate listen key goes away", async () => {
+      mockApi().get("/api/books", {
+        books: [
+          makeBook({
+            book_id: "b1",
+            title: "Done",
+            attributed: true,
+            assigned: true,
+            rendered: true,
+            assembled: true,
+            mastered: true,
+          }),
+        ],
+      });
+      renderWithProviders(<Library />);
+      expect(await screen.findByRole("link", { name: "Listen" })).toHaveAttribute("href", "/listen?book=b1");
+      expect(screen.queryByRole("button", { name: "▶ listen" })).not.toBeInTheDocument();
+    });
+
+    it("while a job runs the step is disabled and says what is happening", async () => {
+      mockApi().get("/api/books", {
+        books: [makeBook({ book_id: "b1", active_job: { job_id: "j1", kind: "attribute", state: "running" } })],
+      });
+      renderWithProviders(<Library />);
+      const busy = await screen.findByRole("button", { name: "Finding the speakers…" });
+      expect(busy).toBeDisabled();
+      expect(busy).toHaveAccessibleDescription(/bar at the bottom/);
+      expect(screen.queryByRole("link", { name: "Find the speakers" })).not.toBeInTheDocument();
+    });
+
+    it("after a failure the step is a retry, and the banner alone carries the fix", async () => {
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Failed Once", attributed: true, assigned: true })] })
+        .get("/api/jobs?limit=200", {
+          jobs: [
+            makeJob({
+              book_id: "b1",
+              kind: "render",
+              state: "failed",
+              is_terminal: true,
+              error: "GpuBusyError: another seiyuu process holds the GPU",
+            }),
+          ],
+        });
+      renderWithProviders(<Library />);
+      const retry = await screen.findByRole("link", { name: "Record again" });
+      expect(retry).toHaveAttribute("href", "/render?book=b1#record");
+      // the fix is said once (in the banner), not repeated beside the button
+      expect(screen.getAllByText(/Close it or wait for it to finish/)).toHaveLength(1);
+      expect(retry).not.toHaveAccessibleDescription(/Close it or wait/);
+    });
+
+    it("after the banner is dismissed, the retry carries the fix itself (also after a reload)", async () => {
+      const user = userEvent.setup();
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Failed Once", attributed: true, assigned: true })] })
+        .get("/api/jobs?limit=200", {
+          jobs: [
+            makeJob({
+              job_id: "f-9",
+              book_id: "b1",
+              kind: "render",
+              state: "failed",
+              is_terminal: true,
+              error: "GpuBusyError: another seiyuu process holds the GPU",
+            }),
+          ],
+        });
+      const first = renderWithProviders(<Library />);
+      const banner = await screen.findByRole("group", { name: "The last recording failed" });
+      await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
+      const retry = screen.getByRole("link", { name: "Record again" });
+      expect(retry).toHaveAccessibleDescription(/Close it or wait for it to finish/);
+      expect(screen.getAllByText(/Close it or wait for it to finish/)).toHaveLength(1);
+
+      first.unmount();
+      renderWithProviders(<Library />);
+      expect(await screen.findByRole("link", { name: "Record again" })).toHaveAccessibleDescription(
+        /Close it or wait for it to finish/,
+      );
+    });
+
+    it("a failure for another step leaves the banner and the step's own reason both showing", async () => {
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Unattributed" })] })
+        .get("/api/jobs?limit=200", {
+          jobs: [makeJob({ book_id: "b1", kind: "render", state: "failed", is_terminal: true, error: "boom" })],
+        });
+      renderWithProviders(<Library />);
+      expect(await screen.findByRole("group", { name: "The last recording failed" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAccessibleDescription(
+        /who says each line/,
+      );
+    });
+
+    it("'Add the book again' lands on the upload slot and focuses it", async () => {
+      mockApi().get("/api/books", { books: [makeBook({ book_id: "b1", title: "No Text", ingested: false })] });
+      const user = userEvent.setup();
+      renderWithProviders(<Library />);
+      const again = await screen.findByRole("link", { name: "Add the book again" });
+      expect(again).toHaveAttribute("href", "/#add");
+      await user.click(again);
+      await waitFor(() => expect(document.activeElement).toHaveAttribute("id", "add"));
+      expect(document.activeElement).toHaveTextContent(/drop epub or pdf/);
+    });
+  });
+
   it("surfaces the API error message when the shelf fails to load", async () => {
     mockApi().error("GET", "/api/books", 500, "boom", "the shelf collapsed");
     renderWithProviders(<Library />);
@@ -124,24 +261,136 @@ describe("Library", () => {
     expect(await screen.findByRole("button", { name: "delete" })).toBeDisabled();
   });
 
-  it("picking a file uploads it as multipart form data and reports the ingest result", async () => {
-    const user = userEvent.setup();
-    const server = mockApi().get("/api/books", { books: [] });
-    server.post("/api/books", {
-      book: makeBook({ book_id: "new-book" }),
+  describe("upload result", () => {
+    const ingested = (o: Record<string, unknown> = {}) => ({
+      book: makeBook({ book_id: "new-book", title: "The New Novel" }),
       chapters: 12,
       blocks: 340,
+      skipped_items: [],
+      dropped_sections: [],
+      ...o,
     });
-    const { container } = renderWithProviders(<Library />);
 
-    const file = new File(["fake epub bytes"], "novel.epub", { type: "application/epub+zip" });
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
-    expect(input).not.toBeNull();
-    await user.upload(input!, file);
+    async function upload(container: HTMLElement) {
+      const user = userEvent.setup();
+      const file = new File(["fake epub bytes"], "novel.epub", { type: "application/epub+zip" });
+      const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      await user.upload(input!, file);
+      return user;
+    }
 
-    expect(await screen.findByText(/new-book · 12 chapters, 340 blocks/)).toBeInTheDocument();
-    const form = server.formBodyOf("POST", "/api/books");
-    expect((form.get("file") as File).name).toBe("novel.epub");
+    it("uploads the file as multipart form data; a 201 reads as added, with the next step", async () => {
+      const server = mockApi().get("/api/books", { books: [] });
+      server.post("/api/books", ingested(), 201);
+      const { container } = renderWithProviders(<Library />);
+      await upload(container);
+
+      // the always-mounted live region announces just the one-line outcome
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/^Added The New Novel$/));
+      const result = await screen.findByRole("region", { name: "Upload result" });
+      expect(within(result).getByText("Added The New Novel")).toBeInTheDocument();
+      expect(within(result).getByText(/12 chapters · 340 paragraphs/)).toBeInTheDocument();
+      expect(within(result).queryByText(/Already in your library/)).not.toBeInTheDocument();
+      expect(within(result).getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+        "href",
+        "/render?book=new-book#find-speakers",
+      );
+      expect(within(result).getByText("Nothing was left out.")).toBeInTheDocument();
+      expect(within(result).queryByText(/new-book/)).not.toBeInTheDocument(); // no raw id as text
+      const form = server.formBodyOf("POST", "/api/books");
+      expect((form.get("file") as File).name).toBe("novel.epub");
+    });
+
+    it("a 200 (the same file again) says it is already in the library", async () => {
+      mockApi().get("/api/books", { books: [] }).post("/api/books", ingested(), 200);
+      const { container } = renderWithProviders(<Library />);
+      await upload(container);
+
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Already in your library: The New Novel"),
+      );
+      const result = await screen.findByRole("region", { name: "Upload result" });
+      expect(within(result).getByText("Already in your library: The New Novel")).toBeInTheDocument();
+      expect(within(result).getByText(/this exact file was added before/)).toBeInTheDocument();
+      // a 200 still re-reads the file on the server: never promise that nothing changed
+      expect(within(result).queryByText(/nothing changed/)).not.toBeInTheDocument();
+      expect(within(result).queryByText(/^Added/)).not.toBeInTheDocument();
+    });
+
+    it("the result's next step follows the live shelf: a re-upload of a failed book offers the retry", async () => {
+      const shelfBook = makeBook({ book_id: "new-book", title: "The New Novel", attributed: true, assigned: true });
+      mockApi()
+        .get("/api/books", { books: [shelfBook] })
+        .get("/api/jobs?limit=200", {
+          jobs: [
+            makeJob({
+              book_id: "new-book",
+              kind: "render",
+              state: "failed",
+              is_terminal: true,
+              error: "GpuBusyError: another seiyuu process holds the GPU",
+            }),
+          ],
+        })
+        .post("/api/books", ingested({ book: { ...shelfBook } }), 200);
+      const { container } = renderWithProviders(<Library />);
+      await screen.findByRole("link", { name: "Record again" }); // the card
+      await upload(container);
+      const result = await screen.findByRole("region", { name: "Upload result" });
+      expect(await within(result).findByRole("link", { name: "Record again" })).toHaveAttribute(
+        "href",
+        "/render?book=new-book#record",
+      );
+    });
+
+    it("the result goes away once its book is deleted from the shelf", async () => {
+      const shelfBook = makeBook({ book_id: "new-book", title: "The New Novel" });
+      const server = mockApi()
+        .get("/api/books", { books: [shelfBook] })
+        .post("/api/books", ingested({ book: { ...shelfBook } }), 201);
+      const { container, queryClient } = renderWithProviders(<Library />);
+      await upload(container);
+      expect(await screen.findByRole("region", { name: "Upload result" })).toBeInTheDocument();
+      server.get("/api/books", { books: [] });
+      await queryClient.refetchQueries({ queryKey: ["books"] });
+      await waitFor(() => expect(screen.queryByRole("region", { name: "Upload result" })).not.toBeInTheDocument());
+    });
+
+    it("a failed upload is announced in the live region", async () => {
+      mockApi().get("/api/books", { books: [] }).error("POST", "/api/books", 422, "unsupported", "not an epub or pdf");
+      const { container } = renderWithProviders(<Library />);
+      await upload(container);
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Couldn't add the book: not an epub or pdf/));
+      expect(screen.queryByRole("region", { name: "Upload result" })).not.toBeInTheDocument();
+    });
+
+    it("what the importer skipped sits in a closed 'What was left out' disclosure", async () => {
+      mockApi()
+        .get("/api/books", { books: [] })
+        .post(
+          "/api/books",
+          ingested({
+            skipped_items: ["OEBPS/copyright.xhtml", "OEBPS/toc.xhtml"],
+            dropped_sections: ["Dedication (12 words)"],
+          }),
+          201,
+        );
+      const { container } = renderWithProviders(<Library />);
+      const user = await upload(container);
+
+      const summary = await screen.findByText("What was left out (3)");
+      const details = summary.closest("details")!;
+      expect(details).not.toHaveAttribute("open"); // evidence on demand, not in the way
+      await user.click(summary);
+      expect(details).toHaveAttribute("open");
+      expect(within(details).getByText("OEBPS/copyright.xhtml")).toBeInTheDocument();
+      expect(within(details).getByText("OEBPS/toc.xhtml")).toBeInTheDocument();
+      expect(within(details).getByText("Dedication (12 words)")).toBeInTheDocument();
+      expect(within(details).getByText(/front or back matter/)).toBeInTheDocument();
+      expect(within(details).getByText(/too short/)).toBeInTheDocument();
+      expect(screen.queryByText("Nothing was left out.")).not.toBeInTheDocument();
+    });
   });
 
   describe("job line and failed-run banner", () => {
@@ -181,7 +430,9 @@ describe("Library", () => {
       expect(localStorage.getItem("seiyuu.dismissedFailure.f-123")).toBe("1");
       // keyboard users keep their place: focus moves to the card's first action, not <body>
       expect(document.activeElement).not.toBe(document.body);
-      expect(document.activeElement?.closest(".bookcard .acts")).not.toBeNull();
+      // (its primary next step)
+      expect(document.activeElement).toHaveTextContent("Find the speakers");
+      expect(document.activeElement?.closest(".bookcard .nextrow")).not.toBeNull();
 
       // a fresh mount (page reload) keeps it dismissed
       first.unmount();

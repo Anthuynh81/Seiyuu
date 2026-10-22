@@ -219,16 +219,72 @@ describe("Review", () => {
     expect(screen.getByRole("button", { name: "ALICE" })).toBeInTheDocument();
   });
 
-  it("shows the stage_prerequisite refusal for an unattributed book and fetches no review data", async () => {
+  it("an unattributed book explains itself with a Find-the-speakers step and fetches no review data", async () => {
     const server = mockApi()
       .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Raw Ingest" })] })
       .get("/api/books/b1", detailFor("b1", "Raw Ingest", false))
       .get("/api/voices", { voices: [], unreadable: [] });
     renderWithProviders(<Review />, { route: "/review?book=b1" });
 
-    expect(await screen.findByText(/this book has no attribution yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b1#find-speakers",
+    );
+    expect(screen.queryByText("stage_prerequisite")).not.toBeInTheDocument();
     expect(server.lastCall("GET", "/characters")).toBeUndefined();
     expect(server.lastCall("GET", "/segments")).toBeUndefined();
+  });
+
+  it("a book recorded in one voice but never sent through speaker-finding still gets Find the speakers", async () => {
+    const detail = detailFor("b1", "One Voice", false);
+    detail.status = { ...detail.status, rendered: true, assembled: true, mastered: true };
+    mockApi()
+      .get("/api/books", {
+        books: [makeBook({ book_id: "b1", title: "One Voice", rendered: true, assembled: true, mastered: true })],
+      })
+      .get("/api/books/b1", detail)
+      .get("/api/voices", { voices: [], unreadable: [] });
+    renderWithProviders(<Review />, { route: "/review?book=b1" });
+
+    expect(await screen.findByText(/hasn't worked out who says each line in this book/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b1#find-speakers",
+    );
+    expect(screen.queryByRole("link", { name: "Listen" })).not.toBeInTheDocument();
+  });
+
+  it("the no-attributed-book empty state offers Find the speakers even for a book recorded in one voice", async () => {
+    mockApi().get("/api/books", {
+      books: [makeBook({ book_id: "b3", title: "Solo", rendered: true })],
+    });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b3#find-speakers",
+    );
+    expect(screen.queryByRole("link", { name: "Build the .m4b" })).not.toBeInTheDocument();
+  });
+
+  it("with no attributed book at all, the empty state points at the first book that needs speakers", async () => {
+    mockApi().get("/api/books", {
+      books: [
+        makeBook({ book_id: "b0", title: "Gone", ingested: false }),
+        makeBook({ book_id: "b2", title: "Waiting" }),
+      ],
+    });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Find the speakers" })).toHaveAttribute(
+      "href",
+      "/render?book=b2#find-speakers",
+    );
+  });
+
+  it("with no books at all, the empty state's next step is adding one", async () => {
+    mockApi().get("/api/books", { books: [] });
+    renderWithProviders(<Review />);
+    expect(await screen.findByRole("link", { name: "Add a book" })).toHaveAttribute("href", "/#add");
   });
 
   it("masks characters that debut beyond the reading frontier until revealed", async () => {

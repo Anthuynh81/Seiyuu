@@ -1,7 +1,7 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { api, ApiError, postForm, postJson } from "./client";
+import { api, ApiError, postForm, postFormWithStatus, postJson } from "./client";
 import type {
   ArchivedRenderMode,
   AssignmentDraftResponse,
@@ -22,6 +22,7 @@ import type {
   EnginesOut,
   EngineVoicesOut,
   IngestResponse,
+  IngestResult,
   JobOut,
   JobsOut,
   LexiconEntry,
@@ -138,10 +139,12 @@ export function useCancelJob() {
 export function useIngest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: async (file: File): Promise<IngestResult> => {
       const form = new FormData();
       form.append("file", file);
-      return postForm<IngestResponse>("/api/books", form);
+      const { data, status } = await postFormWithStatus<IngestResponse>("/api/books", form);
+      // the route answers 200 (not 201) when these exact bytes were already ingested
+      return { ...data, already_in_library: status === 200 };
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["books"] }),
   });

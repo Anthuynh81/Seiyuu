@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { jsonResponse, mockApi } from "../test/utils";
-import { api, ApiError, BACKEND_START_COMMAND, isBackendDown, postForm, postJson } from "./client";
+import {
+  api,
+  ApiError,
+  BACKEND_START_COMMAND,
+  isBackendDown,
+  postForm,
+  postFormWithStatus,
+  postJson,
+} from "./client";
 
 describe("api()", () => {
   it("returns the parsed JSON body on 2xx", async () => {
@@ -134,5 +142,21 @@ describe("backend_down", () => {
     const err = await api("/api/books", { signal: controller.signal }).catch((e: unknown) => e);
     expect(err).not.toBeInstanceOf(ApiError);
     expect((err as Error).name).toBe("AbortError");
+  });
+});
+
+describe("postFormWithStatus", () => {
+  it("hands back the HTTP status beside the body (ingest: 201 new, 200 already there)", async () => {
+    mockApi().post("/api/books", { ok: 1 }, 201);
+    await expect(postFormWithStatus("/api/books", new FormData())).resolves.toEqual({ data: { ok: 1 }, status: 201 });
+    mockApi().post("/api/books", { ok: 2 }, 200);
+    await expect(postFormWithStatus("/api/books", new FormData())).resolves.toEqual({ data: { ok: 2 }, status: 200 });
+  });
+
+  it("still throws ApiError on a non-2xx", async () => {
+    mockApi().error("POST", "/api/books", 422, "invalid", "not an epub");
+    const err = await postFormWithStatus("/api/books", new FormData()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("invalid");
   });
 });

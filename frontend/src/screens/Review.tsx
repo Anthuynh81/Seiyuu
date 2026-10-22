@@ -18,10 +18,12 @@ import {
 } from "../api/hooks";
 import type { CharacterSummary } from "../api/types";
 import { chapterOfBlock } from "../api/types";
+import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
 import { castingDiffers, castingFromServer, castingVoicesDiffer, type CastingState } from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
+import { nextStep } from "../lib/nextStep";
 import { CharacterEditor } from "./review/CharacterEditor";
 import { isReviewable, useFrontier } from "./review/helpers";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
@@ -173,10 +175,18 @@ export function Review() {
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
   if (books.isError) return <section className="screen"><div className="errline">{books.error.message}</div></section>;
   if (!bookId) {
+    // no book has its speakers found yet: point at the first one that could
+    const candidate = books.data?.books.find((b) => b.ingested && !b.attributed) ?? books.data?.books[0];
     return (
       <section className="screen">
         <h1>Character Review</h1>
-        <p className="sub">No attributed books yet — run attribution from Render &amp; Jobs first.</p>
+        <p className="sub">
+          {candidate
+            ? "No book has its speakers found yet. Once Seiyuu has worked out who says each line, you can check it here."
+            : "No books yet. Add one in the Library first."}
+        </p>
+        {/* this screen is about speakers: offer that step even for a book recorded in one voice */}
+        <NextStep step={nextStep({ status: candidate, activeJob: candidate?.active_job, want: "attribute" })} />
       </section>
     );
   }
@@ -204,7 +214,13 @@ export function Review() {
       </p>
 
       {!attributed && book.data && (
-        <div className="refusal"><span className="tag">stage_prerequisite</span><p>this book has no attribution yet — start one from Render &amp; Jobs</p></div>
+        <div className="refusal">
+          <span className="tag">speakers not found yet</span>
+          <p>Seiyuu hasn't worked out who says each line in this book yet, so there is nothing to review.</p>
+          <NextStep
+            step={nextStep({ status: book.data.status, activeJob: book.data.active_job, want: "attribute" })}
+          />
+        </div>
       )}
 
       {attributed && (

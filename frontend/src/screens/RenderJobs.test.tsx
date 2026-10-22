@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   BookCard,
@@ -443,7 +443,7 @@ describe("RenderJobs", () => {
 
     // wait for the system defaults so the enqueue carries provider + model
     await screen.findByText(/anthropic · claude-sonnet-4/);
-    await user.click(screen.getByRole("button", { name: /attribute the whole book/ }));
+    await user.click(screen.getByRole("button", { name: /find the speakers in the whole book/ }));
 
     // the 402 surfaces the reason and an explicit confirm control — nothing auto-retries
     expect(await screen.findByText(/anthropic attribution is a paid run/)).toBeInTheDocument();
@@ -476,7 +476,7 @@ describe("RenderJobs", () => {
       );
     renderWithProviders(<RenderJobs />);
 
-    await user.click(await screen.findByRole("button", { name: /attribute the whole book/ }));
+    await user.click(await screen.findByRole("button", { name: /find the speakers in the whole book/ }));
     expect(await screen.findByText(/couldn't reach Ollama/)).toBeInTheDocument();
     expect(screen.getByText("ollama serve")).toBeInTheDocument();
     expect(screen.getByText("Details")).toBeInTheDocument();
@@ -854,5 +854,54 @@ describe("RenderJobs", () => {
     mountRoutes(makeBook({ assembled: true, mastered: true }));
     renderWithProviders(<RenderJobs />);
     expect(await screen.findByText("audio predates a voice change")).toBeInTheDocument();
+  });
+
+  describe("next step", () => {
+    it("with no books the empty state's one action is adding a book", async () => {
+      mockApi().get("/api/books", { books: [] });
+      renderWithProviders(<RenderJobs />);
+      expect(await screen.findByRole("link", { name: "Add a book" })).toHaveAttribute("href", "/#add");
+    });
+
+    it("the rail's button lands on the attribute box on this page and scrolls it into view", async () => {
+      const user = userEvent.setup();
+      mountRoutes(makeBook()).get("/api/books/demo/cost-estimate", makeEstimate({ mode: "single" }));
+      const scrolled: Element[] = [];
+      const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
+        scrolled.push(this);
+      });
+      try {
+        renderWithProviders(<RenderJobs />, { route: "/render?book=demo" });
+        const rail = await screen.findByRole("group", { name: "pipeline" });
+        const next = await within(rail).findByRole("link", { name: "Find the speakers" });
+        expect(next).toHaveAttribute("href", "/render?book=demo#find-speakers");
+        expect(screen.queryByText(/^next:/)).not.toBeInTheDocument();
+
+        await user.click(next);
+        await waitFor(() => expect(scrolled.some((el) => el.id === "find-speakers")).toBe(true));
+        // the box it lands on is the one that starts it, named the same way, and keyboard
+        // focus moves into it so the next Tab reaches its button
+        const box = document.getElementById("find-speakers")!;
+        expect(within(box).getByRole("button", { name: /find the speakers in/ })).toBeInTheDocument();
+        expect(within(box).getByText("speakers not found yet")).toBeInTheDocument();
+        await waitFor(() => expect(document.activeElement).toBe(box));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a rendered book's step is Build the .m4b, anchored on the Outputs panel", async () => {
+      mountRoutes(makeBook({ attributed: true, assigned: true, rendered: true }))
+        .get("/api/books/demo/cost-estimate", makeEstimate())
+        .get("/api/books/demo/render", makeSummary())
+        .get("/api/books/demo/validation", { validated_segments: 0, validation_failures: 0, results: [] });
+      renderWithProviders(<RenderJobs />, { route: "/render?book=demo" });
+      const rail = await screen.findByRole("group", { name: "pipeline" });
+      expect(await within(rail).findByRole("link", { name: "Build the .m4b" })).toHaveAttribute(
+        "href",
+        "/render?book=demo#build",
+      );
+      expect(document.getElementById("build")).toHaveTextContent("Outputs");
+    });
   });
 });

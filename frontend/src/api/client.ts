@@ -75,7 +75,9 @@ function isAbort(err: unknown, init?: RequestInit): boolean {
   return init?.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+/** Like api(), but also hands back the HTTP status for the few callers whose meaning
+    depends on it (ingest: 201 = newly added, 200 = these exact bytes were already here). */
+export async function apiWithStatus<T>(path: string, init?: RequestInit): Promise<{ data: T; status: number }> {
   let res: Response;
   try {
     res = await fetch(path, init);
@@ -85,8 +87,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw backendDown(0, err instanceof Error ? err.message : String(err));
   }
   if (!res.ok) throw await toApiError(res);
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  if (res.status === 204) return { data: undefined as T, status: res.status };
+  return { data: (await res.json()) as T, status: res.status };
+}
+
+export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await apiWithStatus<T>(path, init)).data;
 }
 
 export function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -99,4 +105,8 @@ export function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export function postForm<T>(path: string, form: FormData): Promise<T> {
   return api<T>(path, { method: "POST", body: form });
+}
+
+export function postFormWithStatus<T>(path: string, form: FormData): Promise<{ data: T; status: number }> {
+  return apiWithStatus<T>(path, { method: "POST", body: form });
 }

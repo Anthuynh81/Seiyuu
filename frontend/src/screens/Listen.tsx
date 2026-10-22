@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { useBook, useBooks, useRenderSummary, useSegments, useSegmentWords } from "../api/hooks";
 import type { SegmentWordsClip } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
 import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
+import { NextStep } from "../components/NextStep";
 import { StaleAudioBanner } from "../components/StaleAudio";
+import { ADD_A_BOOK, bookHref, nextStep, RENDER_ANCHOR } from "../lib/nextStep";
 import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
@@ -273,12 +275,22 @@ export function Listen() {
             <CoverTile key={b.book_id} book={b} onPick={() => setParams({ book: b.book_id })} />
           ))}
         </div>
-        {books.data?.books.length === 0 && <div className="loadline">no books yet — ingest one from the Library</div>}
+        {books.data?.books.length === 0 && (
+          <>
+            <div className="loadline">No books yet.</div>
+            <NextStep step={ADD_A_BOOK} />
+          </>
+        )}
       </section>
     );
   }
 
   const chapterTitles = new Map(book.data?.chapters?.map((c) => [c.index, c.title] as const) ?? []);
+  const activeJob = book.data?.active_job ?? null;
+  // a job already working on the book outranks any nudge: show what it is doing, disabled
+  const recordThisChapter = activeJob
+    ? nextStep({ status: book.data?.status, activeJob })
+    : { label: "Record this chapter", to: bookHref("render", bookId, RENDER_ANCHOR.record) };
 
   return (
     <section className="screen">
@@ -349,16 +361,30 @@ export function Listen() {
           </span>
           {summary.data.mode === "single" && book.data?.status.assigned && (
             <span className="mono text-[11px] text-caution">
-              this audio predates your casting — re-render in multivoice to hear it
+              this audio predates your casting —{" "}
+              <Link className="link" to={bookHref("render", bookId, RENDER_ANCHOR.record)}>
+                record again with your cast
+              </Link>
             </span>
           )}
         </div>
       )}
       <StaleAudioBanner status={book.data?.status} />
-      {segments.isPending && <div className="loadline">setting the page…</div>}
+      {segments.isPending && (rendered || !book.data) && <div className="loadline">setting the page…</div>}
       {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
+      {book.data && !rendered && (
+        <div className="refusal">
+          <span className="tag">no audio yet</span>
+          <p>This book hasn't been recorded yet, so there is nothing to listen to.</p>
+          <NextStep step={nextStep({ status: book.data.status, activeJob })} />
+        </div>
+      )}
       {segments.data && playableRows.length === 0 && (
-        <div className="refusal"><span className="tag">not rendered</span><p>this chapter has no audio yet — render it from Render &amp; Jobs (a chapter range works)</p></div>
+        <div className="refusal">
+          <span className="tag">no audio yet</span>
+          <p>This chapter has no audio yet. You can record just this chapter (pick it in the chapter range).</p>
+          <NextStep step={recordThisChapter} />
+        </div>
       )}
       <div className={`page-wrap rt-${prefs.theme} sz-${prefs.size}`} ref={pageRef}>
         {segments.data && (
