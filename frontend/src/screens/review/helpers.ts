@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { SegmentRow } from "../../api/types";
+import { readStored, writeStored } from "../../lib/storage";
 
 /** TalkSelect keys are strings; this sentinel stands in for "no voice / narration". */
 export const NONE = "__none__";
@@ -15,17 +16,17 @@ export const isReviewable = (s: SegmentRow, threshold: number) =>
 
 export function useFrontier(bookId: string | null): [number, (n: number) => void] {
   const key = `seiyuu.frontier.${bookId}`;
-  const [value, setValue] = useState(() => Number(localStorage.getItem(key)) || 1);
+  const [value, setValue] = useState(() => Number(readStored(key)) || 1);
   // The initializer runs once per mount; on a book switch re-read the NEW book's frontier
   // (otherwise book A's frontier unmasks book B's late-debut characters — spoiler leak).
   useEffect(() => {
-    setValue(Number(localStorage.getItem(key)) || 1);
+    setValue(Number(readStored(key)) || 1);
   }, [key]);
   return [
     value,
     (n: number) => {
       setValue(n);
-      localStorage.setItem(key, String(n));
+      writeStored(key, String(n));
     },
   ];
 }

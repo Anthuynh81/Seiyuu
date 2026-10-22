@@ -19,6 +19,7 @@ import {
 } from "../api/hooks";
 import type { CharacterSummary, SuggestCastResponse } from "../api/types";
 import { chapterOfBlock } from "../api/types";
+import { useScreenBook } from "../app/currentBook";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
@@ -37,9 +38,13 @@ import { VoicePicker } from "./review/VoicePicker";
 /* -------------------------------------------------- the screen */
 
 export function Review() {
-  const [params, setParams] = useSearchParams();
+  const [, setParams] = useSearchParams();
   const books = useBooks();
-  const bookId = params.get("book") ?? books.data?.books.find((b) => b.attributed)?.book_id ?? null;
+  // no ?book=: the book this viewer last worked on, else the first one with speakers found
+  const bookId = useScreenBook(
+    books.data?.books.map((b) => b.book_id),
+    books.data?.books.find((b) => b.attributed)?.book_id,
+  );
   const book = useBook(bookId);
   const attributed = !!book.data?.status.attributed;
 

@@ -15,6 +15,7 @@ import {
   useValidation,
 } from "../api/hooks";
 import type { RenderMode } from "../api/types";
+import { useScreenBook } from "../app/currentBook";
 import { JobErrorText } from "../components/JobErrorText";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
@@ -36,9 +37,13 @@ import { ValidationFailure } from "./render/ValidationFailure";
 /* -------------------------------------------------- the screen */
 
 export function RenderJobs() {
-  const [params, setParams] = useSearchParams();
+  const [, setParams] = useSearchParams();
   const books = useBooks();
-  const bookId = params.get("book") ?? books.data?.books[0]?.book_id ?? null;
+  // no ?book= (a typed URL or an old bookmark): the book this viewer last worked on, else the first
+  const bookId = useScreenBook(
+    books.data?.books.map((b) => b.book_id),
+    books.data?.books[0]?.book_id,
+  );
   const book = useBook(bookId);
 
   const status = book.data?.status;

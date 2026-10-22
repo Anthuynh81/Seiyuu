@@ -4,6 +4,7 @@ import { ApiError } from "../../api/client";
 import { useCloneVoice } from "../../api/hooks";
 import { TalkDialog } from "../../components/Dialog";
 import { TalkSelect } from "../../components/Select";
+import { readStored, writeStored } from "../../lib/storage";
 
 export function CloneDialog({ onClose }: { onClose: () => void }) {
   const clone = useCloneVoice();
@@ -12,13 +13,13 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [engine, setEngine] = useState("chatterbox");
   const [attested, setAttested] = useState(false);
-  const [attestedBy, setAttestedBy] = useState(() => localStorage.getItem("seiyuu.attestedBy") ?? "");
+  const [attestedBy, setAttestedBy] = useState(() => readStored("seiyuu.attestedBy") ?? "");
   const err = clone.error instanceof ApiError ? clone.error : null;
   const recloneBlocked = err?.code === "reclone_blocked";
 
   const submit = (replace = false) => {
     if (!file) return;
-    localStorage.setItem("seiyuu.attestedBy", attestedBy);
+    writeStored("seiyuu.attestedBy", attestedBy);
     clone.mutate({ file, name, engine, attestedBy, replace }, { onSuccess: onClose });
   };
 

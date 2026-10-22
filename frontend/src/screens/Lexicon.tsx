@@ -10,6 +10,7 @@ import {
   useSuggestRespellings,
 } from "../api/hooks";
 import type { LexiconEntry, SuggestedTerm } from "../api/types";
+import { useScreenBook } from "../app/currentBook";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
@@ -88,10 +89,11 @@ function EntryRow({
 }
 
 export function Lexicon() {
-  const [params, setParams] = useSearchParams();
+  const [, setParams] = useSearchParams();
   const books = useBooks();
   const ingested = books.data?.books.filter((b) => b.ingested) ?? [];
-  const bookId = params.get("book") ?? ingested[0]?.book_id ?? null;
+  // no ?book=: the book this viewer last worked on (if imported), else the first imported one
+  const bookId = useScreenBook(books.data ? ingested.map((b) => b.book_id) : undefined, ingested[0]?.book_id);
 
   const lexicon = useLexicon(bookId);
   const save = useSaveLexicon(bookId ?? "");

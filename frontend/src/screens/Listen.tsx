@@ -4,10 +4,12 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useBook, useBooks, useRenderSummary, useSegments, useSegmentWords } from "../api/hooks";
 import type { SegmentWordsClip } from "../api/hooks";
 import type { BookCard, SegmentRow } from "../api/types";
+import { useScreenBook } from "../app/currentBook";
 import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
 import { NextStep } from "../components/NextStep";
 import { StaleAudioBanner } from "../components/StaleAudio";
 import { ADD_A_BOOK, bookHref, nextStep, RENDER_ANCHOR } from "../lib/nextStep";
+import { readStored, writeStored } from "../lib/storage";
 import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
 
 /* -------------------------------------------------- reading preferences */
@@ -26,7 +28,7 @@ function usePrefs() {
   const update = (next: Partial<{ theme: ReadingTheme; size: ReadingSize }>) => {
     const merged = { ...prefs, ...next };
     setPrefs(merged);
-    localStorage.setItem("seiyuu.reading", JSON.stringify(merged));
+    writeStored("seiyuu.reading", JSON.stringify(merged));
   };
   return [prefs, update] as const;
 }
@@ -54,7 +56,7 @@ function CoverTile({ book, onPick }: { book: BookCard; onPick: () => void }) {
 /* -------------------------------------------------- the screen */
 
 export function Listen() {
-  const [params, setParams] = useSearchParams();
+  const [, setParams] = useSearchParams();
   const books = useBooks();
   const player = usePlayer();
   // The imperative word-span handlers below outlive the render that created them, and the
@@ -63,7 +65,9 @@ export function Listen() {
   // latest-ref idiom as hlRef.
   const playerRef = useRef(player);
   playerRef.current = player;
-  const bookId = params.get("book");
+  // no ?book= on arrival: open the book this viewer last worked on (no default — the bare
+  // URL is the shelf, and "‹ shelf" must stay there)
+  const bookId = useScreenBook(books.data?.books.map((b) => b.book_id), null, { once: true });
   const book = useBook(bookId);
   const rendered = !!book.data?.status.rendered;
 
@@ -182,8 +186,8 @@ export function Listen() {
     const chapterDone = () => {
       // advance the spoiler frontier, then roll into the next rendered chapter
       const key = `seiyuu.frontier.${bookId}`;
-      const prev = Number(localStorage.getItem(key)) || 1;
-      localStorage.setItem(key, String(Math.max(prev, effectiveChapter)));
+      const prev = Number(readStored(key)) || 1;
+      writeStored(key, String(Math.max(prev, effectiveChapter)));
       const next = effectiveChapter + 1;
       if (renderedChapters.has(next)) {
         autoplayNext.current = true;

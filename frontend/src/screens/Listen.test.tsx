@@ -139,6 +139,19 @@ describe("Listen", () => {
     expect(screen.queryByRole("button", { name: /not rendered/ })).not.toBeInTheDocument();
   });
 
+  it("with no ?book it opens the remembered book once, and '‹ shelf' still goes back to the shelf", async () => {
+    const user = userEvent.setup();
+    serveBook();
+    localStorage.setItem("seiyuu.currentBook", "b1");
+    renderListen("/listen");
+    expect(await screen.findByRole("heading", { name: "Whale Story" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "‹ shelf" }));
+    // not bounced straight back into the remembered book
+    expect(await screen.findByRole("button", { name: /not rendered/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Whale Story" })).not.toBeInTheDocument();
+  });
+
   it("an empty shelf nudges with a real Add-a-book link", async () => {
     mockApi().get("/api/books", { books: [] });
     renderListen("/listen");

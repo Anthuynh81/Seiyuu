@@ -256,6 +256,33 @@ describe("PlayerProvider", () => {
     expect(player.api.audio!.src).toBe(absolute("/audio/c.wav"));
   });
 
+  it("blocked storage (private window, site data denied) mounts with defaults and never throws", () => {
+    const deny = () => {
+      throw new DOMException("The operation is insecure.", "SecurityError");
+    };
+    vi.stubGlobal("localStorage", { getItem: deny, setItem: deny, removeItem: deny, clear: deny });
+    const player = renderPlayer();
+    expect(player.api.volume).toBe(0.8);
+    expect(player.api.rate).toBe(1);
+
+    act(() => player.api.load("b1", "ch", [clip("/audio/a.wav", 10)]));
+    act(() => player.api.setVolume(0.4));
+    act(() => player.api.setRate(1.25));
+    expect(player.api.volume).toBe(0.4); // applied for this page, just not remembered
+    expect(player.api.audio!.volume).toBe(0.4);
+    expect(player.api.rate).toBe(1.25);
+  });
+
+  it("a garbled stored volume or rate falls back to the defaults instead of reaching the audio element", () => {
+    localStorage.setItem("seiyuu.volume", "loud");
+    localStorage.setItem("seiyuu.rate", "-2");
+    const player = renderPlayer();
+    expect(player.api.volume).toBe(0.8);
+    expect(player.api.rate).toBe(1);
+    act(() => player.api.load("b1", "ch", [clip("/audio/a.wav", 10)]));
+    expect(player.api.audio!.volume).toBe(0.8);
+  });
+
   it("clear pauses the audio and flips playing off", () => {
     const player = renderPlayer();
     act(() => player.api.load("b1", "ch", [clip("/audio/a.wav", 10)], { autoplay: true }));

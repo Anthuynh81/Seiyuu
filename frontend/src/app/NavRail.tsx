@@ -1,28 +1,36 @@
 import { NavLink } from "react-router-dom";
 
 import { useLiveJobs } from "../api/hooks";
+import { useCurrentBook, withBook } from "./currentBook";
 import { HealthPill } from "./SystemDrawer";
 import { type ThemePref, useTheme } from "./useTheme";
 
-const items = [
-  { to: "/", label: "Library" },
-  { to: "/listen", label: "Listen" },
-  { to: "/review", label: "Character Review" },
-  { to: "/lexicon", label: "Pronunciation" },
-  { to: "/voices", label: "Voice Studio" },
+/** The rail reads in workflow order: the shelf, then one book's numbered steps, then the
+    tools that serve every book. Routes are unchanged; only labels, order and grouping are. */
+const steps = [
+  { to: "/review", n: 1, label: "Speakers & cast" },
+  { to: "/lexicon", n: 2, label: "Proof & names" },
+  { to: "/render", n: 3, label: "Produce" },
+  { to: "/listen", n: 4, label: "Listen" },
+];
+
+const tools = [
+  { to: "/voices", label: "Voices" },
   { to: "/series", label: "Series" },
-  { to: "/render", label: "Render & Jobs" },
 ];
 
 const themes: { id: ThemePref; label: string; title: string }[] = [
-  { id: "booth", label: "booth", title: "dark — the booth" },
-  { id: "daylight", label: "day", title: "light — the daylight desk" },
-  { id: "system", label: "auto", title: "follow the system" },
+  { id: "booth", label: "dark", title: "Dark theme" },
+  { id: "daylight", label: "light", title: "Light theme" },
+  { id: "system", label: "auto", title: "Follow your computer's setting" },
 ];
+
+const linkClass = ({ isActive }: { isActive: boolean }) => (isActive ? "on" : "");
 
 export function NavRail() {
   const live = useLiveJobs();
   const { pref, setPref } = useTheme();
+  const { bookId, title } = useCurrentBook();
   const running = live.data?.jobs.some((j) => j.state === "running") ?? false;
   return (
     <nav className="nav">
@@ -30,14 +38,37 @@ export function NavRail() {
         <b>Seiyuu</b>
         <span>audiobook console</span>
       </div>
-      {items.map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.to === "/"} className={({ isActive }) => (isActive ? "on" : "")}>
-          {item.label}
-          {item.to === "/render" && running && <i className="lamp" title="a job is running" />}
-        </NavLink>
-      ))}
+      <NavLink to="/" end className={linkClass}>
+        Library
+      </NavLink>
+      <div role="group" aria-labelledby="nav-steps" className="navgroup">
+        <div className="navcap" id="nav-steps">
+          Book steps
+        </div>
+        {title && (
+          <div className="navbook" title={title}>
+            {title}
+          </div>
+        )}
+        {steps.map((s) => (
+          <NavLink key={s.to} to={withBook(s.to, bookId)} className={linkClass}>
+            <span className="stepn">{s.n}</span> {s.label}
+            {s.to === "/render" && running && <i className="lamp" title="a job is running" />}
+          </NavLink>
+        ))}
+      </div>
+      <div role="group" aria-labelledby="nav-tools" className="navgroup tools">
+        <div className="navcap" id="nav-tools">
+          Tools
+        </div>
+        {tools.map((t) => (
+          <NavLink key={t.to} to={t.to} className={linkClass}>
+            {t.label}
+          </NavLink>
+        ))}
+      </div>
       <div className="themesw">
-        <span className="cap">lights</span>
+        <span className="cap">theme</span>
         {themes.map((t) => (
           <button key={t.id} className={pref === t.id ? "on" : ""} title={t.title} onClick={() => setPref(t.id)}>
             {t.label}

@@ -138,7 +138,7 @@
 
 /* shell */
 .shell { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 1fr 48px; height: 100vh; }
-.nav { grid-row: 1 / 3; background: var(--console); border-right: 1px solid var(--hairline); display: flex; flex-direction: column; padding: 16px 0; }
+.nav { grid-row: 1 / 3; background: var(--console); border-right: 1px solid var(--hairline); display: flex; flex-direction: column; padding: 16px 0; overflow-y: auto; }
 .brand { padding: 4px 20px 18px; border-bottom: 1px solid var(--hairline); }
 .brand b { font-size: 16px; font-weight: 650; letter-spacing: 0.02em; }
 .brand span { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.12em; margin-top: 2px; }
@@ -146,6 +146,14 @@
 .nav a:hover { color: var(--ink); background: var(--console-hi); }
 .nav a.on { color: var(--ink); border-left-color: var(--tungsten); background: var(--console-hi); }
 .nav .lamp { width: 6px; height: 6px; margin-left: auto; background: var(--rolling); animation: pulse 1.4s ease-in-out infinite; }
+/* workflow groups: the book's numbered steps read as a sequence; Tools sit quieter below */
+.navgroup { border-top: 1px solid var(--hairline); margin-top: 10px; padding-top: 8px; }
+.navcap { padding: 4px 20px 4px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+.navbook { padding: 0 20px 6px; font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav .stepn { display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--hairline-strong); font-family: var(--mono); font-size: 10px; color: var(--ink-3); flex: none; }
+.nav a.on .stepn { color: var(--tungsten); border-color: var(--tungsten-dim); }
+.navgroup.tools a { padding: 6px 20px; font-size: 12.5px; font-weight: 400; color: var(--ink-3); }
+.navgroup.tools a:hover, .navgroup.tools a.on { color: var(--ink); }
 .nav .foot { margin-top: auto; padding: 14px 20px; border-top: 1px solid var(--hairline); font-family: var(--mono); font-size: 10px; color: var(--ink-3); line-height: 1.7; }
 /* health pill: the footer's live status, a silkscreen key that opens the System drawer */
 .hpill { display: flex; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; padding: 5px 8px; border: 1px solid var(--hairline); font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); text-align: left; }
@@ -155,7 +163,7 @@
 .main { overflow-y: auto; padding: 24px 28px 40px; }
 .screen { max-width: 1200px; }
 
-/* theme switch (booth / daylight / system) — silkscreen buttons in the nav */
+/* theme switch (dark / light / auto) — silkscreen buttons in the nav */
 .themesw { display: flex; gap: 4px; padding: 12px 20px 0; align-items: center; }
 .themesw .cap { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); margin-right: auto; }
 .themesw button { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--hairline); padding: 2px 7px; }

@@ -66,12 +66,15 @@ export function useLiveJobs() {
   });
 }
 
-export function useBooks() {
+export function useBooks({ enabled = true }: { enabled?: boolean } = {}) {
   // Stable key: JobCompletionWatcher invalidates on job transitions, and a same-key
   // refetch keeps old data on screen — no undefined window, no derived-bookId flicker.
+  // `enabled` only gates THIS observer's fetch (the nav rail needs the shelf only when it
+  // has a book to check); the key and any cached data are shared with every other caller.
   return useQuery({
     queryKey: ["books"],
     queryFn: () => api<BooksOut>("/api/books"),
+    enabled,
   });
 }
 
