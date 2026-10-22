@@ -829,6 +829,7 @@ describe("RenderJobs", () => {
       expected: "He drew the blade.",
       transcript: "He threw the blade.",
       synth_attempts: 2,
+      reason: "'drew' heard as 'threw'",
     };
     server.get("/api/books/demo/validation", {
       validated_segments: 12,
@@ -846,6 +847,7 @@ describe("RenderJobs", () => {
     expect(await screen.findByText("1 failed of 12 checked")).toBeInTheDocument();
     expect(screen.getByText("He drew the blade.")).toBeInTheDocument();
     expect(screen.getByText("He threw the blade.")).toBeInTheDocument();
+    expect(screen.getByText("'drew' heard as 'threw'")).toBeInTheDocument(); // the plain-words why
   });
 
   it("assembled-but-not-rendered (the post-reclone signature) shows the stale-audio banner", async () => {

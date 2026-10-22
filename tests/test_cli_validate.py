@@ -39,6 +39,22 @@ def test_validate_reports_failures(tmp_path):
     assert "ch001_b0001" not in result.output  # passing segment hidden by default
 
 
+def test_validate_failure_line_carries_the_reason(tmp_path):
+    # Under the content-aware scorer a high-similarity read can still fail; the line says why.
+    out = tmp_path / "out"
+    why = "wrong number: 'twelve' heard as 'thirteen'"
+    bad = RenderedSegment(
+        block_id="ch001_b0002", type=BlockType.PARAGRAPH, wav="cache/b.wav", voice_id="v",
+        validation=ValidationResult(
+            ok=False, score=0.95, transcript="at thirteen", expected="at twelve", reason=why
+        ),
+    )  # fmt: skip
+    _write_manifest(out, bad)
+    result = CliRunner().invoke(main, ["validate", "test-book", "--output-dir", str(out)])
+    assert result.exit_code == 0, result.output
+    assert f"score=0.95  FAIL ({why})" in result.output
+
+
 def test_validate_all_lists_passing_segments(tmp_path):
     out = tmp_path / "out"
     ok = RenderedSegment(

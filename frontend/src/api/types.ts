@@ -239,6 +239,9 @@ export interface ValidationRow {
   expected: string;
   transcript: string;
   synth_attempts: number;
+  /** plain-words reason a verdict failed ("wrong number: ..."); absent/null for passes and
+   *  verdicts stored before the content-aware scorer */
+  reason?: string | null;
 }
 
 export interface ValidationReportOut {

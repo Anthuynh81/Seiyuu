@@ -15,6 +15,9 @@ export function ValidationFailure({ bookId, row }: { bookId: string; row: Valida
           {playing ? "hide player" : "▶ play segment"}
         </button>
       </div>
+      {/* the scorer's plain-words why (wrong number, dropped words, ...) — the score alone
+          can't say it: a high-similarity read still fails when it gets a number wrong */}
+      {row.reason && <p className="mb-2 text-caution">{row.reason}</p>}
       <div className="vdiff">
         <div className="paper exp"><span className="cap text-paper-ink-2">expected (book)</span>{row.expected}</div>
         <div className="got"><span className="cap text-ink-3">whisper heard</span>{row.transcript}</div>
