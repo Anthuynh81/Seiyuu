@@ -24,6 +24,10 @@ dependencies = [
     # Resampling to the canonical 24 kHz (engines/audio.py); replaces torchaudio,
     # which is in maintenance mode.
     "soxr>=1.1.0",
+    # chatterbox-tts -> resemble-perth 1.0.1 (latest) imports pkg_resources, which setuptools
+    # 82 removed; perth then silently sets PerthImplicitWatermarker=None and Chatterbox
+    # fails to construct ("NoneType object is not callable"). Keep setuptools < 81.
+    "setuptools<81",
     "num2words>=0.5.14",
     "elevenlabs>=2.55.0",
     "fastapi>=0.136.3",
