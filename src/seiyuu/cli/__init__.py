@@ -17,6 +17,7 @@ from seiyuu.cli import (  # noqa: E402, F401
     assemble,
     attribute,
     casting,
+    evaluation,
     ingest,
     lexicon,
     render,
