@@ -664,7 +664,13 @@ def test_segment_audio_addresses_multivoice_segments(client) -> None:
                         type="paragraph",
                         wav="cache/b.wav",
                         duration_seconds=1.0,
-                        validation={"ok": False, "score": 0.31, "transcript": "y", "expected": "z"},
+                        validation={
+                            "ok": False,
+                            "score": 0.31,
+                            "transcript": "y",
+                            "expected": "z",
+                            "reason": "6 words in a row differ from the text",
+                        },
                     ),
                 ],
             )
@@ -676,6 +682,12 @@ def test_segment_audio_addresses_multivoice_segments(client) -> None:
     rows = client.get(f"/api/books/{client.book_id}/validation").json()["results"]
     assert len(rows) == 1
     assert rows[0]["segment_index"] == 1  # the FAILING span, not the block
+    assert rows[0]["reason"] == "6 words in a row differ from the text"  # round-trips
+    every = client.get(f"/api/books/{client.book_id}/validation", params={"all": True}).json()
+    assert [r["reason"] for r in every["results"]] == [  # a pass (or legacy verdict) has none
+        None,
+        "6 words in a row differ from the text",
+    ]
 
     first = client.get(f"/api/books/{client.book_id}/segments/ch001_b0001/audio")
     assert first.content == b"RIFFnarration"

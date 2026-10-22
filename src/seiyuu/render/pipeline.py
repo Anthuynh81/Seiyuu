@@ -229,17 +229,42 @@ class RenderResult:
         return sum(s.duration_seconds for c in self.manifest.chapters for s in c.segments)
 
 
+def _failure_detail(result: ValidationResult) -> str:
+    """The parenthetical of a "validation failed" log line: the score, plus the scorer's
+    plain-words reason when it gave one ("score 0.95: wrong number: ...")."""
+    return f"score {result.score}: {result.reason}" if result.reason else f"score {result.score}"
+
+
+def _plain_alternates(
+    raw: str, profile: str, lexicon: "CompiledLexicon | None", text: str
+) -> tuple[str, ...]:
+    """The segment text WITHOUT pronunciation respellings, when the lexicon changed it: whisper
+    writes "Hermione", not the "Her-my-oh-nee" the engine was given."""
+    if lexicon is None:
+        return ()
+    plain = normalize_text(raw, profile=profile)
+    return (plain,) if plain != text else ()
+
+
+def _alternates_kwargs(validator: Any, alternates: tuple[str, ...]) -> dict[str, Any]:
+    """Only the real Validator takes ``alternates``; scripted test validators never see it."""
+    if alternates and getattr(validator, "accepts_alternates", False):
+        return {"alternates": alternates}
+    return {}
+
+
 def _validate_capturing_words(
-    validator: Validator, wav_path: Path, text: str
+    validator: Validator, wav_path: Path, text: str, alternates: tuple[str, ...] = ()
 ) -> tuple[ValidationResult, list[WordTiming] | None]:
     """One transcription pass that yields BOTH the verdict and the word timings when the
     validator supports it (the real ``Validator``); otherwise the verdict alone. This is the
     F2 piggyback — a `requires_validation` engine already transcribes every attempt, so its
     word alignment costs no extra whisper pass. Scripted test validators exposing only
     ``validate`` transparently fall back to no words."""
+    extra = _alternates_kwargs(validator, alternates)
     if hasattr(validator, "validate_with_words"):
-        return validator.validate_with_words(wav_path, text)
-    return validator.validate(wav_path, text), None
+        return validator.validate_with_words(wav_path, text, **extra)
+    return validator.validate(wav_path, text, **extra), None
 
 
 @dataclass
@@ -266,6 +291,7 @@ class _PendingSegment:
     where: str  # "book=… chapter=… block=…" in the owning loop's error shape
     flag_where: str  # the validation-failure say() fragment in the owning loop's shape
     revalidate_wav: Path | None = None
+    alternates: tuple[str, ...] = ()  # the text without lexicon respellings, if different
     attempts: int = 0
     audio: Any = None  # the attempt currently being scored
     best_audio: Any = None
@@ -295,6 +321,7 @@ class _PlannedSynthesis:
     engine_voice: str
     where: str
     flag_where: str
+    alternates: tuple[str, ...] = ()
 
 
 class _ValidationWorker:
@@ -352,15 +379,17 @@ class _ValidationWorker:
     def _score(self, job: _PendingSegment) -> tuple[ValidationResult, list[WordTiming] | None]:
         validator = self._validator
         if job.revalidate_wav is not None:
-            return _validate_capturing_words(validator, job.revalidate_wav, job.text)
+            return _validate_capturing_words(
+                validator, job.revalidate_wav, job.text, job.alternates
+            )
         if getattr(validator, "accepts_arrays", False):
             # real Validator: hand whisper the waveform, skip the tmp-wav round trip
             source = resample_to_whisper(job.audio.samples, job.audio.sample_rate)
-            return _validate_capturing_words(validator, source, job.text)
+            return _validate_capturing_words(validator, source, job.text, job.alternates)
         tmp = self._cache_dir / f"_validate.{job.key.key_hash}.tmp.wav"
         try:
             job.audio.save(tmp)
-            return _validate_capturing_words(validator, tmp, job.text)
+            return _validate_capturing_words(validator, tmp, job.text, job.alternates)
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -405,6 +434,23 @@ class _ValidationOverlap:
 
     def handles(self, engine: TTSEngine) -> bool:
         return self._validator is not None and engine.requires_validation
+
+    def rescored(
+        self,
+        key: SegmentKey,
+        verdict: ValidationResult | None,
+        alternates: tuple[str, ...] = (),
+    ) -> ValidationResult | None:
+        """A cache hit's stored verdict, re-judged under the current scoring rules from its saved
+        transcript (no whisper pass); persisted when it changed. Scripted test validators
+        without ``rescore`` keep the stored verdict."""
+        rescore = getattr(self._validator, "rescore", None)
+        if verdict is None or rescore is None:
+            return verdict
+        fresh = rescore(verdict, **_alternates_kwargs(self._validator, alternates))
+        if fresh != verdict:
+            self._cache.put_validation(key, fresh)
+        return fresh
 
     def wait_for_key(self, key: SegmentKey) -> None:
         """Park until an identical in-flight segment finalizes — its cached wav then
@@ -461,7 +507,10 @@ class _ValidationOverlap:
             if isinstance(exc, RenderError):
                 raise exc
             raise RenderError(f"synthesis failed: {job.where}: {exc}") from exc
-        if job.best_result is None or result.score > job.best_result.score:
+        # Rank by (ok, score): a verdict can fail while its similarity is high (a wrong number in
+        # an otherwise perfect read), so a passing retry must always beat a failing attempt.
+        best = job.best_result
+        if best is None or (result.ok, result.score) > (best.ok, best.score):
             job.best_audio, job.best_result, job.best_words = job.audio, result, words
         if job.revalidate_wav is None and not result.ok and job.attempts <= self._max_retries:
             self._synth_attempt(job)  # retry with the next seed; the engine is still resident
@@ -505,7 +554,7 @@ class _ValidationOverlap:
         if not result.ok:
             self.validation_failures += 1
             self._say(
-                f"  ! validation failed (score {result.score}) {job.flag_where} "
+                f"  ! validation failed ({_failure_detail(result)}) {job.flag_where} "
                 f"after {job.attempts} attempt(s) — flagged for review"
             )
         job.rows[job.slot] = RenderedSegment(
@@ -790,6 +839,7 @@ def render_book(
                     segments.append(RenderedSegment(block_id=block.id, type=block.type))
                     continue
                 text = normalize_text(block.text, profile=profile, lexicon=lexicon)
+                alternates = _plain_alternates(block.text, profile, lexicon, text)
                 key = SegmentKey.build(
                     engine=engine.engine_id,
                     engine_model_version=engine.model_version,
@@ -804,7 +854,7 @@ def render_book(
                 wav_path = None if force else cache.get(key)
                 if wav_path is not None:
                     cache_hits += 1
-                    validation = cache.get_validation(key)
+                    validation = overlap.rescored(key, cache.get_validation(key), alternates)
                     if validation is None and overlap.handles(engine):
                         # A cache hit with no stored verdict (crash between the wav write and
                         # the verdict write, or a pre-M4 segment) must not ship unvalidated:
@@ -821,6 +871,7 @@ def render_book(
                                 seed=effective_seed,
                                 key=key,
                                 text=text,
+                                alternates=alternates,
                                 engine=engine,
                                 engine_voice=engine_voice,
                                 settings=effective_settings,
@@ -839,8 +890,8 @@ def render_book(
                     if validation is not None and not validation.ok:
                         validation_failures += 1
                         say(
-                            f"  ! validation failed (score {validation.score}) block={block.id} "
-                            f"after 1 attempt(s) — flagged for review"
+                            f"  ! validation failed ({_failure_detail(validation)}) "
+                            f"block={block.id} after 1 attempt(s) — flagged for review"
                         )
                     segments.append(
                         RenderedSegment(
@@ -874,6 +925,7 @@ def render_book(
                             seed=effective_seed,
                             key=key,
                             text=text,
+                            alternates=alternates,
                             engine=engine,
                             engine_voice=engine_voice,
                             settings=effective_settings,
@@ -1108,6 +1160,9 @@ def render_book_multivoice(
                     text = normalize_text(
                         seg.text, profile=profile_for(meta.engine), lexicon=lexicon
                     )
+                    alternates = _plain_alternates(
+                        seg.text, profile_for(meta.engine), lexicon, text
+                    )
                     engine_voice, settings = render_voice_args(meta)
                     # F2: fold the per-segment emotion override in BEFORE the FROZEN SegmentKey
                     # (and before synthesis), so it rides settings_hash. No-op when apply_emotion
@@ -1149,6 +1204,7 @@ def render_book_multivoice(
                                 meta=meta,
                                 engine=engine,
                                 text=text,
+                                alternates=alternates,
                                 settings=settings,
                                 key=key,
                                 engine_voice=engine_voice,
@@ -1158,7 +1214,7 @@ def render_book_multivoice(
                         )
                         continue
                     cache_hits += 1
-                    validation = cache.get_validation(key)
+                    validation = overlap.rescored(key, cache.get_validation(key), alternates)
                     if validation is None and overlap.handles(engine):
                         # A cache hit with no stored verdict (crash between the wav write
                         # and the verdict write, or a pre-M4 segment) must not ship
@@ -1175,6 +1231,7 @@ def render_book_multivoice(
                                 seed=meta.seed,
                                 key=key,
                                 text=text,
+                                alternates=alternates,
                                 engine=engine,
                                 engine_voice=engine_voice,
                                 settings=settings,
@@ -1189,7 +1246,7 @@ def render_book_multivoice(
                     if validation is not None and not validation.ok:
                         validation_failures += 1
                         say(
-                            f"  ! validation failed (score {validation.score}) "
+                            f"  ! validation failed ({_failure_detail(validation)}) "
                             f"block={block.id} voice={voice_id} after 1 attempt(s) — "
                             f"flagged for review"
                         )
@@ -1232,7 +1289,7 @@ def render_book_multivoice(
                         if validation is not None and not validation.ok:
                             validation_failures += 1
                             say(
-                                f"  ! validation failed (score {validation.score}) "
+                                f"  ! validation failed ({_failure_detail(validation)}) "
                                 f"{p.flag_where} after 1 attempt(s) — flagged for review"
                             )
                         rendered[p.slot] = RenderedSegment(
@@ -1275,6 +1332,7 @@ def render_book_multivoice(
                                 seed=p.meta.seed,
                                 key=p.key,
                                 text=p.text,
+                                alternates=p.alternates,
                                 engine=p.engine,
                                 engine_voice=synth_voice,
                                 settings=p.settings,

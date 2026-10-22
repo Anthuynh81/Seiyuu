@@ -65,6 +65,9 @@ class SegmentResult(BaseModel):
     worker_restarts: int = 0
     validation_score: float | None = None
     validation_ok: bool | None = None
+    # the scorer's plain-words why for a failure ("wrong number: ..."); optional so bench.json
+    # written before the content-aware scorer still loads
+    validation_reason: str | None = None
     transcript: str | None = None
 
 

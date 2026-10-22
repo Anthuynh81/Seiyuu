@@ -434,7 +434,7 @@ def validate(book_id: str, show_all: bool, output_dir: Path | None) -> None:
     click.echo(f"validated segments: {len(validated)}, failures: {len(failures)}")
     for ci, seg in validated if show_all else failures:
         v = seg.validation
-        mark = "" if v.ok else "  FAIL"
+        mark = "" if v.ok else f"  FAIL ({v.reason})" if v.reason else "  FAIL"
         click.echo(f"  ch{ci} {seg.block_id} voice={seg.voice_id} score={v.score}{mark}")
         if not v.ok:
             click.echo(f"      expected: {textwrap.shorten(v.expected, 70)}")

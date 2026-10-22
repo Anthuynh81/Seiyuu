@@ -676,8 +676,9 @@ def test_validation_and_audio_saving(tmp_path: Path) -> None:
             assert isinstance(audio, np.ndarray)  # in-memory 16 kHz, like the render loop
             ok = expected.startswith("Hello")
             return ValidationResult(
-                ok=ok, score=1.0 if ok else 0.2, transcript="x", expected=expected
-            )
+                ok=ok, score=1.0 if ok else 0.2, transcript="x", expected=expected,
+                reason=None if ok else "wrong number: 'twelve' heard as 'thirteen' | dropped",
+            )  # fmt: skip
 
     report = run_benchmark(
         [_plan()], SEGS, gpu=GpuResourceManager(), engine_factory=lambda *_: BenchFakeEngine(),
@@ -687,6 +688,18 @@ def test_validation_and_audio_saving(tmp_path: Path) -> None:
     r = report.results[0]
     assert r.validation is not None and (r.validation.passed, r.validation.total) == (1, 2)
     assert [s.validation_ok for s in r.segments] == [True, False]
+    assert [s.validation_reason for s in r.segments] == [
+        None,
+        "wrong number: 'twelve' heard as 'thirteen' | dropped",
+    ]
+    # the FAIL cell says why; the pipe is escaped so the markdown row keeps its columns
+    md = render_markdown(report)
+    assert "| 0.200 FAIL (wrong number: 'twelve' heard as 'thirteen' \\| dropped) |" in md
+    assert "| 1.000 |" in md  # a pass carries no reason
+    # bench.json written before the field existed still loads (optional, defaults to None)
+    old = r.segments[0].model_dump(mode="json")
+    del old["validation_reason"]
+    assert SegmentResult.model_validate(old).validation_reason is None
     saved = sorted(p.name for p in (tmp_path / "audio" / "kokoro").iterdir())
     assert saved == ["00_dialogue.wav", "01_narration.wav"]
 

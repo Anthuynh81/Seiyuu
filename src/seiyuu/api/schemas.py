@@ -527,6 +527,9 @@ class ValidationRow(BaseModel):
     expected: str
     transcript: str
     synth_attempts: int
+    # the scorer's plain-words explanation of a failure ("wrong number: ..."); None for passes
+    # and for verdicts stored before the content-aware scorer
+    reason: str | None = None
 
 
 class ValidationReportOut(BaseModel):

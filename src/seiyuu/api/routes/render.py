@@ -575,6 +575,7 @@ def validation_report(
                     expected=seg.validation.expected,
                     transcript=seg.validation.transcript,
                     synth_attempts=seg.synth_attempts,
+                    reason=seg.validation.reason,
                 )
             )
     return ValidationReportOut(

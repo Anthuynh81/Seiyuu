@@ -122,6 +122,9 @@ def render_markdown(report: BenchReport) -> str:
             score = "-" if s.validation_score is None else f"{s.validation_score:.3f}"
             if s.validation_ok is False:
                 score += " FAIL"
+                if s.validation_reason:  # escaped: a bare pipe would split the markdown cell
+                    why = s.validation_reason.replace("|", "\\|")
+                    score += f" ({why})"
             restarted = f"{s.worker_restarts} (includes reload)" if s.worker_restarts else "0"
             lines.append(
                 f"| {s.index} | {s.kind.value} | {s.chars} | {s.wall_s:.2f} | {s.audio_s:.1f} "

@@ -511,6 +511,7 @@ def validate_engine_audio(
         verdict = validator.validate(resample_to_whisper(clip.samples, clip.sample_rate), text)
         seg.validation_score = verdict.score
         seg.validation_ok = verdict.ok
+        seg.validation_reason = verdict.reason
         seg.transcript = verdict.transcript
     result.validation = summarize_validation(result.segments, float(validator.min_ratio))
 

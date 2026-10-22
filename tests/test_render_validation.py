@@ -35,16 +35,22 @@ def _one_block_book() -> NormalizedBook:
 
 
 class ScriptedValidator:
-    """Returns scripted (ok, score) verdicts in call order; ignores the audio."""
+    """Returns scripted (ok, score[, reason]) verdicts in call order; ignores the audio."""
 
     def __init__(self, verdicts):
         self.verdicts = list(verdicts)
         self.calls = 0
 
     def validate(self, wav_path, expected_text):
-        ok, score = self.verdicts[min(self.calls, len(self.verdicts) - 1)]
+        ok, score, *reason = self.verdicts[min(self.calls, len(self.verdicts) - 1)]
         self.calls += 1
-        return ValidationResult(ok=ok, score=score, transcript="heard", expected=expected_text)
+        return ValidationResult(
+            ok=ok,
+            score=score,
+            transcript="heard",
+            expected=expected_text,
+            reason=reason[0] if reason else None,
+        )
 
 
 def _validating_engine() -> FakeEngine:
@@ -93,6 +99,33 @@ def test_persistent_failure_is_flagged_not_dropped(tmp_path):
     assert seg.wav is not None  # surfaced for review, NOT dropped
     assert result.validation_failures == 1
     assert result.manifest.validation_failures == 1
+
+
+def test_passing_retry_beats_failing_attempt_with_higher_score(tmp_path):
+    # Under the content-aware scorer a verdict can fail while its similarity is high (a wrong
+    # number in an otherwise perfect read). A later PASSING attempt must win, even though its
+    # raw score is lower — attempts rank by (ok, score), not score alone.
+    eng = _validating_engine()
+    v = ScriptedValidator([(False, 0.97), (True, 0.93)])
+    result = render_book(_one_block_book(), eng, "v", tmp_path / "out", seed=41172, validator=v)
+    seg = _seg(result)
+    assert seg.synth_attempts == 2
+    assert seg.validation.ok and seg.validation.score == 0.93  # shipped the passing attempt
+    assert result.validation_failures == 0
+
+
+def test_failure_log_line_carries_the_reason(tmp_path):
+    # The flagged-for-review line says WHY in plain words, not just a bare score.
+    why = "wrong number: 'twelve' heard as 'thirteen'"
+    v = ScriptedValidator([(False, 0.95, why)])
+    msgs: list[str] = []
+    result = render_book(
+        _one_block_book(), _validating_engine(), "v", tmp_path / "out", seed=41172,
+        validator=v, validation_max_retries=0, progress=msgs.append,
+    )  # fmt: skip
+    assert _seg(result).validation.reason == why
+    (line,) = [m for m in msgs if "validation failed" in m]
+    assert f"(score 0.95: {why})" in line
 
 
 def test_kokoro_skips_validation(tmp_path):
@@ -171,6 +204,62 @@ def test_verdict_persists_across_cache_hit(tmp_path):
     assert fresh.calls == 0
     seg = _seg(second)
     assert seg.validation is not None and seg.validation.ok and seg.validation.score == 0.9
+
+
+def test_cache_hit_rescores_a_stale_verdict(tmp_path):
+    # A verdict stored by an older scorer (word-perfect audio judged a failure) is re-judged
+    # from its saved transcript on the next cache hit, persisted, and no longer flagged.
+    import json
+
+    book, out = _one_block_book(), tmp_path / "out"
+    render_book(
+        book, _validating_engine(), "v", out, seed=41172,
+        validator=ScriptedValidator([(False, 0.28)]), validation_max_retries=0,
+    )  # fmt: skip
+    (sidecar,) = (out / "cache").glob("*.validation.json")
+    stored = json.loads(sidecar.read_text(encoding="utf-8"))
+    stored["transcript"] = "hello there"  # what whisper heard: the right words
+    sidecar.write_text(json.dumps(stored), encoding="utf-8")
+
+    class NoWhisper:
+        def transcribe(self, *a, **k):
+            raise AssertionError("a cache hit must not re-transcribe")
+
+    second = render_book(
+        book, _validating_engine(), "v", out, seed=41172, validator=Validator(model=NoWhisper())
+    )
+    assert second.cache_hits == 1 and second.validation_failures == 0
+    assert _seg(second).validation.ok and _seg(second).validation.score == 1.0
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["ok"] is True  # persisted
+
+
+def test_lexicon_render_validates_against_the_unrespelled_text(tmp_path):
+    # The engine speaks the respelling; whisper writes the real name. The render loop hands
+    # the validator the text without respellings too, so correct audio is not flagged.
+    from seiyuu.normalize.lexicon import BookLexicon, LexiconEntry, compile_lexicon
+
+    text = "Euripides looked up from the table, and nobody in the room said a word."
+    book = _one_block_book()
+    book.chapters[0].blocks[0] = Block(id="ch001_b0001", type=BlockType.PARAGRAPH, text=text)
+    lexicon = compile_lexicon(
+        BookLexicon(
+            book_id="b", entries=[LexiconEntry(term="Euripides", respelling="Yoo-RIP-ih-deez")]
+        )
+    )
+
+    class FakeWhisper:
+        def transcribe(self, source, **kwargs):
+            seg = SimpleNamespace(text=text, words=[])
+            return iter([seg]), None
+
+    result = render_book(
+        book, _validating_engine(), "v", tmp_path / "out", seed=1,
+        validator=Validator(model=FakeWhisper()), lexicon=lexicon, validation_max_retries=0,
+    )  # fmt: skip
+    seg = _seg(result)
+    assert seg.validation.expected.startswith("Yoo-RIP-ih-deez")  # what the engine was given
+    assert seg.validation.ok, seg.validation.reason
+    assert result.validation_failures == 0
 
 
 def _blocks_book(*texts: str) -> NormalizedBook:

@@ -18,6 +18,7 @@ class ValidationResult(BaseModel):
     score: float  # 0..1 fuzzy ratio of transcript vs the normalized text
     transcript: str  # what whisper heard
     expected: str  # the normalized text the engine was asked to speak
+    reason: str | None = None  # plain words for a failure (wrong number, dropped clause, ...)
 
 
 class WordTiming(BaseModel):
