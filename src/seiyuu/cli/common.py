@@ -1,7 +1,9 @@
 """Shared CLI helpers: book-dir resolution, reusable option decorators, the cost gate,
 and the multi-voice render glue used by both `render` and `convert`."""
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -47,24 +49,42 @@ def _build_validator(cfg):
     )
 
 
-def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cost, cost_token):
-    """The M6a money gate: no paid synthesis without the ceiling AND explicit approval.
+@dataclass(frozen=True)
+class _PendingCost:
+    """A paid render that passed every NON-consuming money check — nothing approved yet.
 
-    Returns the approved paid budget in USD (threaded into the render loop as its hard
-    spend cap), or None when nothing paid may run — free renders never engage the gate
-    and the per-segment refusal in the pipeline stays as the safety net. A provided
-    ``cost_token`` is verified against the FRESH estimate (single-use; any drift refuses
-    with the reason); otherwise the ceiling is enforced and approval is
-    ``--confirm-cost`` or the interactive prompt.
-    """
+    Produced by ``_check_cost_gate``; only ``_commit_cost_gate`` turns it into a spend
+    budget (consuming the token / asking the user), so the render's cheap pre-flight can
+    run in between with the single-use token still unburned."""
+
+    est: Any  # seiyuu.render.CostEstimate (lazy import keeps CLI startup light)
+    book_id: str
+    chapters: tuple[int, ...]
+    assignment_hash: str | None
+    quote: Any | None  # the decoded CostQuote, or None for --confirm-cost / prompt
+
+
+def _check_cost_gate(
+    cfg, est, *, book_id, chapters, assignment_hash, cost_token
+) -> _PendingCost | None:
+    """Money checks that never spend the approval (the API's enqueue dry-run, CLI-side).
+
+    None for a free render (the gate never engages; the pipeline's per-segment refusal
+    stays the safety net). With a token: decode + full ``verify_quote(consume=False)``
+    against the FRESH estimate + a single-use ledger probe, so a tampered / expired /
+    drifted / already-spent token refuses now. Without one: the ``render_max_usd``
+    ceiling. Raises ClickException with the gate's reason."""
     if est.total_usd <= 0:
         return None
     from seiyuu.render import CostGateError, CostQuote, check_ceiling, verify_quote
+    from seiyuu.render.gate import quote_consumed
 
     click.echo(
         f"cost estimate: ${est.total_usd:.2f} over {est.paid_segments} paid segment(s) "
         f"({est.cached_segments} cached)"
     )
+    chapters = tuple(chapters)
+    quote = None
     try:
         if cost_token:
             quote = CostQuote.decode(cost_token)
@@ -77,14 +97,69 @@ def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cos
                 recomputed_total_usd=est.total_usd,
                 max_usd=cfg.render_max_usd,
                 data_dir=cfg.data_dir,
+                consume=False,  # dry-run: the commit step re-verifies and consumes
             )
-            return quote.total_usd
-        check_ceiling(est.total_usd, cfg.render_max_usd)
+            # verify(consume=False) never reads the ledger; best-effort probe so a spent
+            # token refuses here — the commit's atomic consume remains the enforcement
+            if quote_consumed(cfg.data_dir, quote.sig):
+                raise CostGateError(
+                    "cost token already used (tokens are single-use); re-run estimate-cost "
+                    "for a new approval"
+                )
+        else:
+            check_ceiling(est.total_usd, cfg.render_max_usd)
     except CostGateError as exc:
         raise click.ClickException(str(exc)) from exc
+    return _PendingCost(
+        est=est, book_id=book_id, chapters=chapters, assignment_hash=assignment_hash, quote=quote
+    )
+
+
+def _commit_cost_gate(cfg, pending: _PendingCost | None, *, confirm_cost: bool) -> float | None:
+    """The ONLY step that approves spend: call it after every cheap pre-flight, right
+    before synthesis. Returns the approved paid budget in USD (the render loop's hard
+    spend cap), or None when nothing paid may run.
+
+    A token is re-verified in full against the same estimate and atomically CONSUMED
+    (``verify_quote(consume=True)`` — consumption is its last step, so a refusal here
+    still never burns it). Without a token, approval is ``--confirm-cost`` or the
+    interactive prompt (asked only once the render is known to be startable)."""
+    if pending is None:
+        return None
+    if pending.quote is not None:
+        from seiyuu.render import CostGateError, verify_quote
+
+        try:
+            verify_quote(
+                pending.quote,
+                book_id=pending.book_id,
+                chapters=pending.chapters,
+                fingerprint=pending.est.fingerprint,
+                assignment_hash=pending.assignment_hash,
+                recomputed_total_usd=pending.est.total_usd,
+                max_usd=cfg.render_max_usd,
+                data_dir=cfg.data_dir,
+                consume=True,
+            )
+        except CostGateError as exc:
+            raise click.ClickException(str(exc)) from exc
+        return pending.quote.total_usd
     if not confirm_cost:
         click.confirm("This makes paid cloud API calls. Continue?", abort=True)
-    return est.total_usd
+    return pending.est.total_usd
+
+
+def _pass_cost_gate(cfg, est, *, book_id, chapters, assignment_hash, confirm_cost, cost_token):
+    """The M6a money gate in one step: no paid synthesis without the ceiling AND explicit
+    approval. ``_check_cost_gate`` then ``_commit_cost_gate`` with nothing in between —
+    for callers with no pre-flight to run. Paths that DO have cheap pre-flight checks
+    (the render commands) call the two halves separately so a pre-flight failure never
+    consumes a single-use token."""
+    pending = _check_cost_gate(
+        cfg, est, book_id=book_id, chapters=chapters, assignment_hash=assignment_hash,
+        cost_token=cost_token,
+    )  # fmt: skip
+    return _commit_cost_gate(cfg, pending, confirm_cost=confirm_cost)
 
 
 def _render_multivoice_cli(
@@ -119,19 +194,34 @@ def _render_multivoice_cli(
     # gate authorizes a different bill than render runs up.
     apply_emotion = cfg.apply_emotion if apply_emotion is None else apply_emotion
 
-    # cost gate: estimate first; paid segments require the ceiling + explicit approval
-    est = estimate_render_cost(
-        report, book, lib, assignment, out_book_dir, chapters=chapter_indices, lexicon=lexicon,
-        apply_emotion=apply_emotion, force=force,
-    )  # fmt: skip
-    approved_usd = _pass_cost_gate(
-        cfg, est,
-        book_id=book_id,
-        chapters=chapter_indices,
-        assignment_hash=hash_assignment(assignment),
-        confirm_cost=confirm_cost,
-        cost_token=cost_token,
-    )  # fmt: skip
+    from seiyuu.engines import SynthesisError
+    from seiyuu.render.preflight import preflight_multivoice
+    from seiyuu.voices import VoiceLibraryError
+
+    # Verify-then-consume, the API's order: estimate -> non-consuming money check ->
+    # cheap pre-flight -> consume -> render. Nothing between the commit and synthesis can
+    # fail for a reason the pre-flight could have caught, so a dead-end never burns the
+    # user's single-use token (or asks them to approve spend for a doomed render).
+    try:
+        est = estimate_render_cost(
+            report, book, lib, assignment, out_book_dir, chapters=chapter_indices,
+            lexicon=lexicon, apply_emotion=apply_emotion, force=force,
+        )  # fmt: skip
+        pending = _check_cost_gate(
+            cfg, est,
+            book_id=book_id,
+            chapters=chapter_indices,
+            assignment_hash=hash_assignment(assignment),
+            cost_token=cost_token,
+        )  # fmt: skip
+        preflight_multivoice(
+            report, book, lib, assignment, out_book_dir, est, chapters=chapter_indices
+        )
+        validator = _build_validator(cfg)
+    # SynthesisError: an indextts2 voice without checkpoints fails in model_version
+    except (RenderError, SynthesisError, ValueError, VoiceLibraryError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    approved_usd = _commit_cost_gate(cfg, pending, confirm_cost=confirm_cost)
 
     try:
         result = render_book_multivoice(
@@ -142,7 +232,7 @@ def _render_multivoice_cli(
             out_book_dir,
             chapters=chapter_indices,
             progress=click.echo,
-            validator=_build_validator(cfg),
+            validator=validator,
             validation_max_retries=cfg.validation_max_retries,
             allow_paid=approved_usd is not None,
             max_paid_usd=approved_usd,

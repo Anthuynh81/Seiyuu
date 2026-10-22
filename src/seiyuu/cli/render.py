@@ -7,7 +7,8 @@ import click
 from seiyuu.cli import main
 from seiyuu.cli.common import (
     _build_validator,
-    _pass_cost_gate,
+    _check_cost_gate,
+    _commit_cost_gate,
     _render_multivoice_cli,
     _resolve_book_dir,
     _voices_dir_option,
@@ -108,6 +109,7 @@ def render(
     from seiyuu.engines import SynthesisError, get_engine, voices_dir_kwargs
     from seiyuu.normalize.lexicon import load_compiled_lexicon
     from seiyuu.render import RenderError, estimate_render_cost_single, render_book
+    from seiyuu.render.preflight import preflight_single
     from seiyuu.voices import VoiceLibrary, VoiceLibraryError
 
     engine_id = engine_id or cfg.tts_engine
@@ -126,14 +128,21 @@ def render(
             settings={"speed": speed}, seed=seed, chapters=chapter_indices, library=lib,
             lexicon=lexicon, force=force,
         )  # fmt: skip
-        approved_usd = _pass_cost_gate(
+        # verify-then-consume (the API's order): non-consuming money check -> cheap
+        # pre-flight -> consume -> render, so a dead-end never burns the single-use token
+        pending = _check_cost_gate(
             cfg, est,
             book_id=book.book_meta.book_id,
             chapters=chapter_indices,
             assignment_hash=None,
-            confirm_cost=confirm_cost,
             cost_token=cost_token,
         )  # fmt: skip
+        preflight_single(
+            book, engine, voice, out_book_dir, est,
+            settings={"speed": speed}, seed=seed, chapters=chapter_indices, library=lib,
+        )  # fmt: skip
+        validator = _build_validator(cfg)
+        approved_usd = _commit_cost_gate(cfg, pending, confirm_cost=confirm_cost)
         result = render_book(
             book,
             engine,
@@ -144,7 +153,7 @@ def render(
             chapters=chapter_indices,
             progress=click.echo,
             library=lib,  # consent gate for cloned voices on the single-voice path
-            validator=_build_validator(cfg),
+            validator=validator,
             validation_max_retries=cfg.validation_max_retries,
             allow_paid=approved_usd is not None,
             max_paid_usd=approved_usd,
