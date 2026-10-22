@@ -1,5 +1,5 @@
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { type QueryClient, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 
 import { api, ApiError, postForm, postFormWithStatus, postJson } from "./client";
 import type {
@@ -388,11 +388,36 @@ export function useSettings() {
 
 // -- character review ----------------------------------------------------------------------
 
+/** One fetcher for the ["characters", id] key, so every reader of it caches the same shape. */
+function fetchCharacters(bookId: string): Promise<CharactersOverview> {
+  return api<CharactersOverview>(`/api/books/${bookId}/characters?sample_lines=1`);
+}
+
 export function useCharacters(bookId: string | null, attributed: boolean) {
   return useQuery({
     queryKey: ["characters", bookId],
-    queryFn: () => api<CharactersOverview>(`/api/books/${bookId}/characters?sample_lines=1`),
+    queryFn: () => fetchCharacters(bookId as string),
     enabled: bookId !== null && attributed,
+  });
+}
+
+/** Character names for several books at once (book id -> character id -> name), read through
+    the same ["characters", id] key Character Review uses. A book whose characters can't be read
+    simply has no entry; callers fall back to a generic label. */
+export function useCharacterNames(bookIds: string[]): Map<string, Map<string, string>> {
+  return useQueries({
+    queries: bookIds.map((id) => ({
+      queryKey: ["characters", id],
+      queryFn: () => fetchCharacters(id),
+      retry: false,
+    })),
+    combine: (results) => {
+      const out = new Map<string, Map<string, string>>();
+      results.forEach((r) => {
+        if (r.data) out.set(r.data.book_id, new Map(r.data.characters.map((c) => [c.id, c.name])));
+      });
+      return out;
+    },
   });
 }
 
@@ -791,6 +816,30 @@ export function useRenameVoice() {
   });
 }
 
+/** Every book role still cast with a voice — what the delete confirmation shows. Its own key
+    (never ["books"]/["book"]), always refetched when a dialog opens: it must be current. */
+export function useVoiceReferences(voiceId: string | null) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["voice-references", voiceId],
+    queryFn: () => api<VoiceReferencesOut>(`/api/voices/${voiceId}/references`),
+    enabled: voiceId !== null,
+    staleTime: 0,
+    refetchOnMount: "always",
+    retry: false,
+  });
+  // a 404 means the voice is already gone (deleted elsewhere): refresh the library so its stale
+  // card disappears, matching the dialog's "already deleted" message
+  const gone = q.error instanceof ApiError && q.error.code === "not_found";
+  useEffect(() => {
+    if (gone) void qc.invalidateQueries({ queryKey: ["voices"] });
+  }, [gone, qc]);
+  return q;
+}
+
+/** Irreversible: the UI only calls this from the confirmation dialog. The references re-check
+    right before DELETE is belt-and-braces (casting may change while the dialog is open); the
+    server refuses a referenced voice too. */
 export function useDeleteVoice() {
   const qc = useQueryClient();
   return useMutation({
@@ -803,6 +852,15 @@ export function useDeleteVoice() {
       return api<{ deleted: string }>(`/api/voices/${voiceId}`, { method: "DELETE" });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+    onError: (err, voiceId) => {
+      // the dialog's list is out of date (voice_referenced) or the voice is already gone
+      if (err instanceof ApiError && err.code === "voice_referenced") {
+        return qc.invalidateQueries({ queryKey: ["voice-references", voiceId] });
+      }
+      if (err instanceof ApiError && err.code === "not_found") {
+        return qc.invalidateQueries({ queryKey: ["voices"] });
+      }
+    },
   });
 }
 
