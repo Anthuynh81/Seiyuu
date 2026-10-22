@@ -23,7 +23,14 @@ import { useScreenBook } from "../app/currentBook";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
-import { castingDiffers, castingFromServer, castingVoicesDiffer, type CastingState } from "../lib/casting";
+import { auditionLine } from "../lib/audition";
+import {
+  castingDiffers,
+  castingFromServer,
+  castingVoicesDiffer,
+  genderLabel,
+  type CastingState,
+} from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
 import { nextStep } from "../lib/nextStep";
 import { CharacterEditor } from "./review/CharacterEditor";
@@ -34,7 +41,9 @@ import { RosterRow } from "./review/RosterRow";
 import { AttributePanel } from "./render/AttributePanel";
 import { SegmentPair } from "./review/SegmentPair";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
+import { PlayableRow } from "./review/PlayableRow";
 import { VoicePicker } from "./review/VoicePicker";
+import { AddVoiceDialog } from "./voices/AddVoiceDialog";
 
 /* -------------------------------------------------- the screen */
 
@@ -134,6 +143,11 @@ export function Review() {
     () => allVoices.filter((v) => tagFilter.every((t) => v.tags.includes(t))),
     [allVoices, tagFilter],
   );
+  const voiceById = useMemo(() => new Map(allVoices.map((v) => [v.voice_id, v])), [allVoices]);
+  // "+ new voice for <Name>": the Add voice dialog opens OVER this screen, so the unsaved
+  // casting in `casting` survives; the new voice is cast for that character (still unsaved).
+  const [newVoiceFor, setNewVoiceFor] = useState<CharacterSummary | null>(null);
+  useEffect(() => setNewVoiceFor(null), [bookId]);
   const toggleTag = (t: string) =>
     setTagFilter((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
 
@@ -531,20 +545,29 @@ export function Review() {
                     <th>lines</th>
                     <th>voice</th>
                   </tr>
-                  <tr>
-                    <td>Narration<span className="sample">the book's own voice</span></td>
-                    <td>{overview.data?.narration_segments.toLocaleString()}</td>
-                    <td className="vcell">
-                      {casting && (
+                  <PlayableRow
+                    colSpan={3}
+                    voice={casting ? voiceById.get(casting.narrator) : undefined}
+                    // the narrator reads the open chapter's first stretch of narration
+                    text={auditionLine(segments.data?.segments.find((s) => s.type === "narration")?.text)}
+                    who="the narrator's voice"
+                    cells={
+                      <>
+                        <td>Narration<span className="sample">the book's own voice</span></td>
+                        <td>{overview.data?.narration_segments.toLocaleString()}</td>
+                      </>
+                    }
+                    picker={
+                      casting && (
                         <VoicePicker
                           value={casting.narrator}
                           onChange={(v) => v && setCasting({ ...casting, narrator: v })}
                           voices={filteredVoices}
                           pool={allVoices}
                         />
-                      )}
-                    </td>
-                  </tr>
+                      )
+                    }
+                  />
                   {casting && (
                     <tr>
                       <td className="text-ink-2">
@@ -571,6 +594,7 @@ export function Review() {
                       onEdit={() => setEditingChar(c)}
                       selected={selectedChar === c.id}
                       onSelect={() => setSelectedChar(selectedChar === c.id ? null : c.id)}
+                      voice={casting?.map[c.id] ? voiceById.get(casting.map[c.id]) : undefined}
                       voiceCell={
                         casting ? (
                           <VoicePicker
@@ -578,6 +602,8 @@ export function Review() {
                             onChange={(v) => v && setCasting({ ...casting, map: { ...casting.map, [c.id]: v } })}
                             voices={filteredVoices}
                             pool={allVoices}
+                            newVoiceFor={c.name}
+                            onNewVoice={() => setNewVoiceFor(c)}
                           />
                         ) : (
                           <span className="mono text-ink-3">—</span>
@@ -683,6 +709,19 @@ export function Review() {
             draftCast.mutate({ strategy: "smart", stage: savedStage, keep_existing: false });
           }}
           onClose={() => setResetOpen(false)}
+        />
+      )}
+      {newVoiceFor && (
+        <AddVoiceDialog
+          prefill={{
+            forCharacter: newVoiceFor.name,
+            gender: genderLabel(newVoiceFor.gender),
+          }}
+          // functional update: the dialog may have been open across other casting changes
+          onCreated={(v) =>
+            setCasting((cur) => (cur ? { ...cur, map: { ...cur.map, [newVoiceFor.id]: v.voice_id } } : cur))
+          }
+          onClose={() => setNewVoiceFor(null)}
         />
       )}
     </section>

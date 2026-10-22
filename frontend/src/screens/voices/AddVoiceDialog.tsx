@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { ApiError } from "../../api/client";
 import { useCreateVoice, useKokoroPresets } from "../../api/hooks";
-import type { VoiceCreate } from "../../api/types";
+import type { VoiceCreate, VoiceOut } from "../../api/types";
 import { TalkDialog } from "../../components/Dialog";
 import { TalkSelect } from "../../components/Select";
 import { TalkSlider } from "../../components/Slider";
@@ -11,15 +11,37 @@ import { mixPreviewUrl, presetPreviewUrl, useDemoPlayer } from "./useDemoPlayer"
 
 /* -------------------------------------------------- add / clone dialogs */
 
-export function AddVoiceDialog({ onClose, initial }: { onClose: () => void; initial?: DuplicateRecipe }) {
+/** Starting values when the dialog is opened from casting ("+ new voice for <Name>"). */
+export interface VoicePrefill {
+  /** the character the new voice is for — names the dialog and the voice */
+  forCharacter: string;
+  /** "female" / "male" seeds the recipe's gender hint; anything else leaves it unknown */
+  gender?: string | null;
+}
+
+export function AddVoiceDialog({
+  onClose,
+  initial,
+  prefill,
+  onCreated,
+}: {
+  onClose: () => void;
+  initial?: DuplicateRecipe;
+  prefill?: VoicePrefill;
+  /** hears the created voice before the dialog closes (casting assigns it to the character) */
+  onCreated?: (voice: VoiceOut) => void;
+}) {
   const create = useCreateVoice();
   const presets = useKokoroPresets();
-  const [kind, setKind] = useState<"preset" | "blend">(initial?.kind ?? "preset");
-  const [name, setName] = useState(initial?.name ?? "");
+  // from casting: a voice of its own, derived from the character's name, unless a recipe is given
+  const [kind, setKind] = useState<"preset" | "blend">(initial?.kind ?? (prefill ? "blend" : "preset"));
+  const [name, setName] = useState(initial?.name ?? prefill?.forCharacter ?? "");
   const [engine, setEngine] = useState(initial?.engine ?? "kokoro");
   const [presetId, setPresetId] = useState(initial?.presetId ?? "af_heart");
   const [cloudId, setCloudId] = useState(initial?.kind === "preset" && initial.engine !== "kokoro" ? (initial.presetId ?? "") : "");
-  const [gender, setGender] = useState("");
+  const [gender, setGender] = useState(
+    prefill?.gender === "female" || prefill?.gender === "male" ? prefill.gender : "",
+  );
   const [accent, setAccent] = useState<"a" | "b">("a");
   // manual mix: layers of (preset, weight) — the server normalizes weights, so only
   // the ratios matter; the mixer shows the resulting percentages live. A duplicated blend
@@ -65,7 +87,12 @@ export function AddVoiceDialog({ onClose, initial }: { onClose: () => void; init
         : manual
           ? { kind, name, components: layers.filter((l) => l.weight > 0), ...seedPart }
           : { kind, name, gender: gender || null, accent, ...seedPart };
-    create.mutate(body, { onSuccess: onClose });
+    create.mutate(body, {
+      onSuccess: (voice) => {
+        onCreated?.(voice);
+        onClose();
+      },
+    });
   };
 
   const active = layers.filter((l) => l.weight > 0);
@@ -76,7 +103,7 @@ export function AddVoiceDialog({ onClose, initial }: { onClose: () => void; init
 
   return (
     <TalkDialog
-      title={initial ? "Duplicate voice" : "Add voice"}
+      title={initial ? "Duplicate voice" : prefill ? `New voice for ${prefill.forCharacter}` : "Add voice"}
       onClose={onClose}
       footer={
         <>
@@ -99,6 +126,12 @@ export function AddVoiceDialog({ onClose, initial }: { onClose: () => void; init
       {initial && (
         <div className="tag mb-2 normal-case tracking-[0.02em] text-ink-3">
           creates a new voice from this recipe — the original stays exactly as it is
+        </div>
+      )}
+      {prefill && (
+        <div className="tag mb-2 normal-case tracking-[0.02em] text-ink-3">
+          it is cast for {prefill.forCharacter} as soon as it's made — your other casting changes stay as they are;
+          save casting to keep them all
         </div>
       )}
       <div className="modewrap mb-1">

@@ -121,6 +121,19 @@ export async function fetchDepartedJobs(qc: QueryClient, ids: string[]): Promise
   );
 }
 
+/** One job followed by id until it finishes (GET /api/jobs/{id}), polling only while it is
+    live: for a recourse a row started itself and wants to see through (a voice sample's
+    "Download now"). null = nothing to follow. A new key under ["jobs"], so any ["jobs"]
+    invalidation refreshes it too. */
+export function useJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["jobs", "one", jobId],
+    queryFn: () => api<JobOut>(`/api/jobs/${encodeURIComponent(jobId ?? "")}`),
+    enabled: jobId !== null,
+    refetchInterval: (q) => (q.state.data?.is_terminal ? false : 2000),
+  });
+}
+
 /** A wider job window for the Library shelf: each card's latest unresolved failure. A
     failure inside this window always has every NEWER job inside it too, so "superseded by a
     newer job of the same kind" is decided on complete data. Refreshed by
@@ -781,11 +794,18 @@ export function useCloneVoice() {
   });
 }
 
-export function useAudition(voiceId: string) {
+/** Synthesize a voice sample. `text` (≤500 chars, the endpoint's limit — see
+    lib/audition.ts auditionLine) is what it speaks, e.g. a character's own line; omitted, the
+    server's default sentence plays. The mutation variable stays the explicit paid
+    confirmation, so no retry can silently upgrade an unpaid attempt. */
+export function useAudition(voiceId: string, text?: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (confirmPaid: boolean) =>
-      postJson<AuditionOut>(`/api/voices/${voiceId}/audition`, { confirm_paid: confirmPaid }),
+      postJson<AuditionOut>(`/api/voices/${voiceId}/audition`, {
+        confirm_paid: confirmPaid,
+        ...(text ? { text } : {}),
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["voices"] });
       qc.invalidateQueries({ queryKey: ["cloud-slots"] });

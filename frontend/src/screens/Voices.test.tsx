@@ -291,12 +291,12 @@ describe("Voices", () => {
     renderWithProviders(<Voices />);
 
     await user.click(await screen.findByRole("button", { name: /^audition/ }));
-    expect(await screen.findByText("payment_confirmation_required")).toBeInTheDocument();
+    // plain words and the price — the raw code is only a tooltip
+    expect(await screen.findByText(/billed per use — this sample costs about \$0\.0123/)).toBeInTheDocument();
+    expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /confirm ~\$0\.0123 & play/ }));
 
-    await waitFor(() =>
-      expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText(/billed per use/)).not.toBeInTheDocument());
     const posts = server.calls.filter((c) => c.method === "POST" && c.url.includes("/audition"));
     expect(posts).toHaveLength(2);
     expect(JSON.parse(posts[0].body as string)).toEqual({ confirm_paid: false });
@@ -307,18 +307,19 @@ describe("Voices", () => {
     const user = userEvent.setup();
     const server = mountServer({ voices: [makeVoice({ voice_id: "k1", name: "Cold Heart" })] });
     server.error("POST", "/api/voices/k1/audition", 409, "engine_cold", "kokoro has no warm worker");
-    server.post("/api/engines/kokoro/warmup", makeJob({ job_id: "w1", kind: "warmup", state: "queued" }));
+    server.post("/api/engines/kokoro/warmup", makeJob({ job_id: "w1", kind: "warmup", state: "running" }));
+    server.get("/api/jobs/w1", makeJob({ job_id: "w1", kind: "warmup", state: "running" }));
     renderWithProviders(<Voices />);
 
     await user.click(await screen.findByRole("button", { name: /^audition/ }));
-    expect(await screen.findByText("engine_cold")).toBeInTheDocument();
-    expect(screen.getByText(/kokoro has no warm worker/)).toBeInTheDocument();
+    expect(await screen.findByText(/Kokoro hasn't been downloaded yet/)).toBeInTheDocument();
 
     // the recourse targets the VOICE's engine, and success clears back to an idle audition
-    await user.click(screen.getByRole("button", { name: "warm up first" }));
+    await user.click(screen.getByRole("button", { name: "Download now" }));
     await waitFor(() => expect(server.lastCall("POST", "/warmup")?.url).toBe("/api/engines/kokoro/warmup"));
     expect(await screen.findByRole("button", { name: /^audition/ })).toBeInTheDocument();
-    expect(screen.queryByText("engine_cold")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hasn't been downloaded yet/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Downloading Kokoro in the background/)).toBeInTheDocument();
   });
 
   // Fake timers drive the backoff deterministically. fireEvent (not userEvent) on purpose:
@@ -348,7 +349,7 @@ describe("Voices", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
       });
-      expect(screen.getByText("payment_confirmation_required")).toBeInTheDocument();
+      expect(screen.getByText(/billed per use/)).toBeInTheDocument();
       expect(bodies).toEqual([{ confirm_paid: false }]);
 
       // the user confirms the paid audition; the server then refuses softly (GPU borrowed)
@@ -357,7 +358,7 @@ describe("Voices", () => {
         await vi.advanceTimersByTimeAsync(50);
       });
       expect(bodies).toEqual([{ confirm_paid: false }, { confirm_paid: true }]);
-      expect(screen.getByText(/queued behind a render segment — retrying/)).toBeInTheDocument();
+      expect(screen.getByText(/Waiting for the recording to pause between lines/)).toBeInTheDocument();
 
       // bounded auto-retry with backoff: every re-POST must keep the user's confirm_paid=true
       for (let i = 0; i < 6; i++) {
@@ -367,7 +368,7 @@ describe("Voices", () => {
       }
       expect(bodies).toHaveLength(5); // 1 unpaid + 1 explicit confirm + exactly 3 auto-retries
       expect(bodies.slice(1)).toEqual(Array(4).fill({ confirm_paid: true }));
-      expect(screen.getByText(/the render keeps running/)).toBeInTheDocument();
+      expect(screen.getByText(/hasn't paused for a sample yet/)).toBeInTheDocument();
 
       // ...and the budget is truly exhausted: no further auto-POST however long the clock runs
       await act(async () => {
@@ -376,7 +377,7 @@ describe("Voices", () => {
       expect(bodies).toHaveLength(5);
 
       // the manual retry also preserves the paid confirmation — never a fresh unpaid attempt
-      fireEvent.click(screen.getByRole("button", { name: "retry" }));
+      fireEvent.click(screen.getByRole("button", { name: "try again" }));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
       });
@@ -409,7 +410,7 @@ describe("Voices", () => {
     const posts = server.calls.filter((c) => c.method === "POST" && c.url.includes("/audition"));
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0].body as string)).toEqual({ confirm_paid: false });
-    expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
+    expect(screen.queryByText(/billed per use/)).not.toBeInTheDocument();
   });
 
   it("delete always asks first: the dialog lists each book by title and each part by character name", async () => {

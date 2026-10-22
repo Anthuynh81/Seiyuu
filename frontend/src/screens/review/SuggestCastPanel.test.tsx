@@ -1,9 +1,11 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, type Mock } from "vitest";
 
 import type { SuggestInput } from "../../api/hooks";
 import type { CharacterSummary, SuggestCastResponse, VoiceAssignment, VoiceOut } from "../../api/types";
+import { makeQueryClient } from "../../test/utils";
 import { SuggestCastPanel } from "./SuggestCastPanel";
 
 function assignmentOf(assignments: Record<string, string>, narrator = "narrator_af_heart"): VoiceAssignment {
@@ -91,8 +93,10 @@ function renderPanel(
     refreshing = false,
   } = {},
 ) {
+  // each row's ▶ is a real audition mutation, so the panel needs a query client
   render(
-    <SuggestCastPanel
+    <QueryClientProvider client={makeQueryClient()}>
+      <SuggestCastPanel
       preview={p}
       saved={saved}
       characters={CHARACTERS}
@@ -105,7 +109,8 @@ function renderPanel(
       onPreview={onPreview}
       onApply={onApply}
       onDismiss={() => {}}
-    />,
+      />
+    </QueryClientProvider>,
   );
   return { onPreview, onApply };
 }
@@ -198,7 +203,8 @@ describe("SuggestCastPanel preview table", () => {
     // the server appends overridden characters: alice (just changed) comes back last
     renderPanel(preview({ bob: "bob_auto", carol: "carol_auto", alice: "af_nicole" }));
     const rows = within(screen.getByRole("table", { name: "proposed voices" })).getAllByRole("row").slice(1);
-    expect(rows.map((r) => within(r).getByRole("button").getAttribute("aria-label"))).toEqual([
+    // each row has its voice select (and a ▶); the select names the character
+    expect(rows.map((r) => within(r).getByRole("button", { name: /voice for/ }).getAttribute("aria-label"))).toEqual([
       expect.stringMatching(/voice for Alice/),
       expect.stringMatching(/voice for Bob/),
       expect.stringMatching(/voice for Carol/),
@@ -325,5 +331,27 @@ describe("SuggestCastPanel preview table", () => {
     const narratorList = await screen.findByRole("listbox");
     expect(within(narratorList).getByRole("option", { name: "Adam · kokoro" })).toBeInTheDocument();
     expect(within(narratorList).queryByText(/Carol/)).not.toBeInTheDocument();
+  });
+});
+
+describe("SuggestCastPanel ▶ per row", () => {
+  it("an existing proposed voice gets a ▶; one made only on apply is greyed and says why, reachably", async () => {
+    const user = userEvent.setup();
+    renderPanel(preview({ alice: "alice_auto", bob: "bob_new" }, { create: ["bob_new"] }));
+    const aliceKey = within(rowOf(/Alice/)).getByRole("button", { name: "hear Alice's proposed voice" });
+    expect(aliceKey).toBeEnabled();
+    expect(aliceKey).not.toHaveAttribute("aria-disabled");
+    const bobKey = within(rowOf(/Bob/)).getByRole("button", { name: /hear Bob's proposed voice/ });
+    // aria-disabled, not disabled: still focusable, so the keyboard reaches the reason too
+    expect(bobKey).toHaveAttribute("aria-disabled", "true");
+    expect(bobKey).toHaveAccessibleName(/made when you apply the cast/);
+    for (let i = 0; i < 40 && document.activeElement !== bobKey; i++) await user.tab();
+    expect(bobKey).toHaveFocus();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/made when you apply the cast — hear it then/);
+  });
+
+  it("a hidden (spoiler-safe) character's row has no ▶", () => {
+    renderPanel(preview({ alice: "alice_auto", carol: "carol_auto" }), { masked: ["carol"] });
+    expect(screen.getAllByRole("button", { name: /proposed voice/ })).toHaveLength(1);
   });
 });

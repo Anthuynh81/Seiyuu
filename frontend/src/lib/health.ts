@@ -54,6 +54,9 @@ const MANUAL_INSTALL: Record<string, string> = {
     "Needs a manual install: download the IndexTTS-2 checkpoints and set INDEXTTS2_CHECKPOINTS_DIR in .env, then restart the backend.",
 };
 
+/** The manual-install instructions for an engine the warm-up job can't fetch, if any. */
+export const manualInstallFor = (engineId: string): string | undefined => MANUAL_INSTALL[engineId];
+
 /** The live warm-up job for an engine, if one is queued or running. Warm-up jobs use the
     documented `engine:<id>` subject in the book column. */
 export function warmupJobFor(engineId: string, liveJobs: JobOut[] | undefined): JobOut | undefined {

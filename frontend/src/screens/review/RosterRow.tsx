@@ -1,6 +1,8 @@
-import type { CharacterSummary } from "../../api/types";
+import type { CharacterSummary, VoiceOut } from "../../api/types";
 import { chapterOfBlock } from "../../api/types";
 import { Tip } from "../../components/Tooltip";
+import { auditionLine } from "../../lib/audition";
+import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- roster */
 
@@ -12,6 +14,7 @@ export function RosterRow({
   selected,
   onSelect,
   voiceCell,
+  voice,
 }: {
   char: CharacterSummary;
   masked: boolean;
@@ -20,6 +23,9 @@ export function RosterRow({
   selected: boolean;
   onSelect: () => void;
   voiceCell: React.ReactNode;
+  /** the voice cast for this character right now (unsaved picks included) — its ▶ plays it
+      speaking the character's first sample line */
+  voice?: VoiceOut;
 }) {
   const debutChapter = chapterOfBlock(char.first_appearance);
   if (masked) {
@@ -51,24 +57,34 @@ export function RosterRow({
     );
   }
   return (
-    <tr className={selected ? "sel" : ""} onClick={onSelect}>
-      <td>
-        {char.name}
-        <Tip content="rename / merge">
-          <button
-            className="rowedit"
-            onClick={(e) => {
-              e.stopPropagation();
-              onEdit();
-            }}
-          >
-            ✎
-          </button>
-        </Tip>
-        {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
-      </td>
-      <td>{char.line_count.toLocaleString()}</td>
-      <td className="vcell" onClick={(e) => e.stopPropagation()}>{voiceCell}</td>
-    </tr>
+    <PlayableRow
+      className={selected ? "sel" : ""}
+      onClick={onSelect}
+      colSpan={3}
+      voice={voice}
+      text={auditionLine(char.sample_lines[0])}
+      who={`${char.name}'s voice`}
+      cells={
+        <>
+          <td>
+            {char.name}
+            <Tip content="rename / merge">
+              <button
+                className="rowedit"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEdit();
+                }}
+              >
+                ✎
+              </button>
+            </Tip>
+            {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
+          </td>
+          <td>{char.line_count.toLocaleString()}</td>
+        </>
+      }
+      picker={voiceCell}
+    />
   );
 }

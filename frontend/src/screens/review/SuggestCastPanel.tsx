@@ -4,7 +4,9 @@ import { ApiError } from "../../api/client";
 import type { SuggestInput } from "../../api/hooks";
 import type { CastAccent, CharacterSummary, SuggestCastResponse, VoiceAssignment, VoiceOut } from "../../api/types";
 import { TalkSelect } from "../../components/Select";
-import { castRowStatus, manualPicks, proposalMatchesSaved, type CastRowStatus } from "../../lib/casting";
+import { auditionLine } from "../../lib/audition";
+import { castRowStatus, genderLabel, manualPicks, proposalMatchesSaved, type CastRowStatus } from "../../lib/casting";
+import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- casting */
 
@@ -23,15 +25,6 @@ const STATUS_CLASS: Record<CastRowStatus, string> = {
   "your pick": "kept",
   unchanged: "same",
 };
-
-function genderLabel(g: string | null): string | null {
-  if (!g) return null;
-  const k = g.trim().toLowerCase();
-  if (k === "f" || k === "female") return "female";
-  if (k === "m" || k === "male") return "male";
-  if (k === "unknown" || k === "u") return null;
-  return k;
-}
 
 /** The choices the user makes in the panel; they become the suggest/apply request. */
 interface Choices {
@@ -259,17 +252,25 @@ export function SuggestCastPanel({
               ...voiceOptions,
             ];
             return (
-              <tr key={id}>
-                <td>
-                  {name}
-                  {(gender || c?.age_hint) && (
-                    <span className="mt-0.5 flex gap-1">
-                      {gender && <span className="castchip">{gender}</span>}
-                      {c?.age_hint && <span className="castchip">{c.age_hint}</span>}
-                    </span>
-                  )}
-                </td>
-                <td className="vcell">
+              <PlayableRow
+                key={id}
+                colSpan={3}
+                voice={voiceById.get(voiceId)}
+                text={auditionLine(c?.sample_lines[0])}
+                who={`${name}'s proposed voice`}
+                unavailable="this voice is made when you apply the cast — hear it then"
+                cells={
+                  <td>
+                    {name}
+                    {(gender || c?.age_hint) && (
+                      <span className="mt-0.5 flex gap-1">
+                        {gender && <span className="castchip">{gender}</span>}
+                        {c?.age_hint && <span className="castchip">{c.age_hint}</span>}
+                      </span>
+                    )}
+                  </td>
+                }
+                picker={
                   <TalkSelect
                     className="vpick"
                     ariaLabel={`voice for ${name}`}
@@ -277,11 +278,13 @@ export function SuggestCastPanel({
                     onChange={(v) => setRow(id, v, voiceId)}
                     options={options}
                   />
-                </td>
-                <td>
-                  <span className={`castst ${STATUS_CLASS[status]}`}>{status}</span>
-                </td>
-              </tr>
+                }
+                after={
+                  <td>
+                    <span className={`castst ${STATUS_CLASS[status]}`}>{status}</span>
+                  </td>
+                }
+              />
             );
           })}
         </tbody>

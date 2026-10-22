@@ -317,6 +317,11 @@ details.fine summary:hover { color: var(--tungsten); }
 .roster tr.masked td { color: var(--ink-3); }
 .roster .mask { letter-spacing: 1px; color: var(--ink-3); }
 .roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
+/* a casting ▶'s wait / refusal, on its own full-width row under the character */
+.roster tr.playnote td { text-align: left; padding-top: 0; font-weight: 400; }
+.roster tr.playnote:hover td { background: none; }
+.refusal.compact { padding: 4px 8px; }
+.refusal.compact p { font-size: 11.5px; }
 .caststrip { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); }
 .caststrip details.fine { margin-top: 0; }
 /* suggest-a-cast preview: a raised block over the roster; status + trait chips are hairline

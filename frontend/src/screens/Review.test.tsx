@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AttributionOut,
@@ -12,9 +12,9 @@ import type {
   VoiceAssignment,
   VoiceOut,
 } from "../api/types";
-import { makeBook } from "../test/fixtures";
+import { makeBook, makeJob } from "../test/fixtures";
 import type { MockApi } from "../test/utils";
-import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
+import { errorResponse, jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Review } from "./Review";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -1038,5 +1038,388 @@ describe("Review cast reset", () => {
     // the existing create/recast summary is unchanged
     // "already cast" counts the saved cast (Alice and Bob), not the voices that exist
     expect(screen.getByText(/0 new · 2 already cast/)).toBeInTheDocument();
+  });
+});
+
+/* ------------------------------------------------------------------ hear a voice where you cast it */
+
+/** A cast book: Alice on v-alice, Bob on v-bob, narrated by v-narr (all local kokoro voices). */
+function setupHear(): MockApi {
+  const server = setupReview();
+  server.get("/api/books/b1/assignment", ASSIGNMENT);
+  return server;
+}
+
+const auditionPosts = (server: MockApi, voiceId?: string) =>
+  server.calls.filter(
+    (c) =>
+      c.method === "POST" &&
+      c.url.endsWith("/audition") &&
+      (!voiceId || c.url === `/api/voices/${voiceId}/audition`),
+  );
+const bodyOf = (call: { body: unknown }) => JSON.parse(call.body as string) as Record<string, unknown>;
+const tick = () => new Promise((r) => setTimeout(r, 60));
+/** The visible refusal box's sentence (the row's screen-reader live region repeats it). */
+const shown = (re: RegExp) => screen.findByText(re, { selector: ".refusal *" });
+/** What the row's always-mounted live region currently announces. */
+const announced = (row: HTMLElement) => row.querySelector("[aria-live]")?.textContent ?? "";
+
+describe("Review: hear a voice where you cast it", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("▶ on a roster row plays the cast voice speaking that character's first line", async () => {
+    const user = userEvent.setup();
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play");
+    const server = setupHear().post("/api/voices/v-alice/audition", {
+      voice_id: "v-alice",
+      duration_seconds: 1.2,
+      cost_usd: 0,
+      audition_url: "/api/voices/v-alice/audition.wav",
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    const el = play.mock.contexts.at(-1) as HTMLAudioElement;
+    expect(el.src).toContain("/api/voices/v-alice/audition.wav?t=");
+    const posts = auditionPosts(server);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/voices/v-alice/audition");
+    // a fresh click is never a paid confirmation; the line is Alice's own
+    expect(bodyOf(posts[0])).toEqual({ confirm_paid: false, text: '"Hello there," she said.' });
+  });
+
+  it("a character with no sample line plays the default sentence; an unsaved pick is what plays", async () => {
+    const user = userEvent.setup();
+    const server = setupHear().post(/\/api\/voices\/[^/]+\/audition$/, {
+      voice_id: "v-narr",
+      duration_seconds: 1,
+      cost_usd: 0,
+      audition_url: "/x",
+    });
+    renderWithProviders(<Review />);
+
+    // re-cast Bob to the Narrator voice WITHOUT saving: the ▶ follows the picker
+    const bobRow = await screen.findByRole("row", { name: /Bob/ });
+    await user.click(within(bobRow).getByRole("button", { name: /auto:Bob · kokoro/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
+    await user.click(screen.getByRole("button", { name: "hear Bob's voice" }));
+
+    await waitFor(() => expect(auditionPosts(server)).toHaveLength(1));
+    expect(auditionPosts(server)[0].url).toBe("/api/voices/v-narr/audition");
+    expect(bodyOf(auditionPosts(server)[0])).toEqual({ confirm_paid: false }); // no text → server default
+    expect(server.calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
+  it("engine_cold offers Download now, which queues the voice engine's warm-up job", async () => {
+    const user = userEvent.setup();
+    const server = setupHear()
+      .error("POST", "/api/voices/v-alice/audition", 409, "engine_cold", "kokoro has never loaded")
+      .post(
+        "/api/engines/kokoro/warmup",
+        makeJob({ job_id: "w1", kind: "warmup", state: "queued", book_id: "engine:kokoro" }),
+      );
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    expect(await shown(/Kokoro hasn't been downloaded yet/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Download now" }));
+    await waitFor(() => expect(server.lastCall("POST", "/warmup")?.url).toBe("/api/engines/kokoro/warmup"));
+    expect(await shown(/The Kokoro download is queued — it starts on its own/)).toBeInTheDocument();
+    // the download is a job; the sample is NOT re-tried behind the user's back
+    expect(auditionPosts(server)).toHaveLength(1);
+  });
+
+  it("the queued download is followed to its end: ready says so, a failure says why, both dismissable", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({ job_id: "w1", kind: "warmup", state: "queued", book_id: "engine:kokoro" });
+    let current = job;
+    const server = setupHear()
+      .error("POST", "/api/voices/v-alice/audition", 409, "engine_cold", "kokoro has never loaded")
+      .post("/api/engines/kokoro/warmup", job);
+    server.on("GET", "/api/jobs/w1", () => jsonResponse(current));
+    const { queryClient } = renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    await user.click(await screen.findByRole("button", { name: "Download now" }));
+    expect(await shown(/The Kokoro download is queued/)).toBeInTheDocument();
+
+    current = { ...job, state: "succeeded", is_terminal: true, finished_at: "2026-07-11T00:05:00Z" };
+    await queryClient.refetchQueries({ queryKey: ["jobs", "one", "w1"] });
+    expect(await shown(/Kokoro is downloaded and ready — press ▶/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "dismiss" }));
+    expect(screen.queryByText(/downloaded and ready/, { selector: ".refusal *" })).not.toBeInTheDocument();
+
+    // again, and this time the job fails: the row says so (no stale "downloading") and offers the download again
+    await user.click(screen.getByRole("button", { name: "hear Alice's voice" }));
+    await user.click(await screen.findByRole("button", { name: "Download now" }));
+    current = { ...job, state: "failed", is_terminal: true, error: "ffmpeg not found on PATH" };
+    await queryClient.refetchQueries({ queryKey: ["jobs", "one", "w1"] });
+    expect(await shown(/Couldn't get Kokoro ready/)).toBeInTheDocument();
+    expect(screen.queryByText(/Downloading Kokoro/, { selector: ".refusal *" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "download again" })).toBeInTheDocument();
+    expect(auditionPosts(server)).toHaveLength(2); // one per ▶ click, never on its own
+  });
+
+  it("pressing ▶ a second time plays the NEW take and shows ■ even when pause events fire late", async () => {
+    const user = userEvent.setup();
+    // browser-like media: pause() dispatches 'pause' asynchronously and an interrupted play() rejects
+    const made: HTMLAudioElement[] = [];
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function (this: HTMLMediaElement) {
+      made.push(this as HTMLAudioElement);
+      return new Promise<void>((resolve, reject) => {
+        (this as unknown as { _reject: (e: Error) => void })._reject = reject;
+        setTimeout(resolve, 200);
+      });
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(function (this: HTMLMediaElement) {
+      const el = this as unknown as { _reject?: (e: Error) => void } & HTMLMediaElement;
+      setTimeout(() => {
+        el._reject?.(new DOMException("interrupted", "AbortError"));
+        el.dispatchEvent(new Event("pause"));
+      }, 0);
+    });
+    setupHear().post("/api/voices/v-alice/audition", {
+      voice_id: "v-alice",
+      duration_seconds: 1,
+      cost_usd: 0,
+      audition_url: "/x",
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    const stop = await screen.findByRole("button", { name: "stop Alice's voice" });
+    made[0].dispatchEvent(new Event("ended"));
+    await waitFor(() => expect(stop).toHaveAccessibleName("hear Alice's voice"));
+
+    await user.click(stop);
+    await waitFor(() => expect(made).toHaveLength(2));
+    await tick();
+    // exactly one new element, for a new take — the first take is never replayed…
+    expect(made).toHaveLength(2);
+    expect(made[1].src).not.toBe(made[0].src);
+    // …and the stale element's late pause/AbortError can't flip the ■ of the take now playing
+    expect(screen.getByRole("button", { name: "stop Alice's voice" })).toBe(stop);
+  });
+
+  it("the ▶ keeps keyboard focus while the sample is made, and gets it back after a recourse click", async () => {
+    const user = userEvent.setup();
+    let release: () => void = () => {};
+    const server = setupHear();
+    server.on(
+      "POST",
+      "/api/voices/v-alice/audition",
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(errorResponse(409, "gpu_busy", "a job holds the GPU"));
+        }),
+    );
+    renderWithProviders(<Review />);
+
+    const key = await screen.findByRole("button", { name: "hear Alice's voice" });
+    key.focus();
+    await user.keyboard("{Enter}");
+    // still focused and only aria-disabled while it works (never `disabled`, which drops focus)
+    await waitFor(() => expect(key).toHaveAttribute("aria-busy", "true"));
+    expect(key).not.toBeDisabled();
+    expect(key).toHaveAttribute("aria-disabled", "true");
+    expect(key).toHaveFocus();
+    await user.keyboard("{Enter}"); // ignored while working
+    release();
+    await shown(/Busy recording/);
+    expect(auditionPosts(server)).toHaveLength(1);
+
+    // the recourse removes its own button; focus comes home to the ▶, not <body>
+    screen.getByRole("button", { name: "dismiss" }).focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(key).toHaveFocus());
+  });
+
+  it("a paid voice refused as busy quotes its price again: try again is never a confirmed call", async () => {
+    const user = userEvent.setup();
+    const server = setupHear().get("/api/voices", {
+      voices: [
+        voice("v-narr", "Narrator"),
+        { ...voice("v-alice", "Cloud Alice"), kind: "preset", engine: "elevenlabs", preset_id: "stock1" },
+        voice("v-bob", "auto:Bob"),
+      ],
+      unreadable: [],
+    });
+    let busy = true;
+    server.on("POST", "/api/voices/v-alice/audition", (_u, init) => {
+      const paid = (JSON.parse(String(init?.body)) as { confirm_paid: boolean }).confirm_paid;
+      if (!paid) return errorResponse(402, "payment_confirmation_required", "a paid call", { estimated_usd: 0.0123 });
+      return busy
+        ? errorResponse(409, "cloud_busy", "voice slots in use")
+        : jsonResponse({ voice_id: "v-alice", duration_seconds: 2, cost_usd: 0.0123, audition_url: "/x" });
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    await user.click(await screen.findByRole("button", { name: /confirm ~\$0\.0123 & play/ }));
+    expect(await shown(/A recording is using the cloud voices/)).toBeInTheDocument();
+
+    busy = false;
+    await user.click(screen.getByRole("button", { name: "try again" }));
+    // the retry is unconfirmed, so the price is named again and needs its own click
+    expect(await shown(/billed per use — this sample costs about \$0\.0123/)).toBeInTheDocument();
+    const bodies = auditionPosts(server).map(bodyOf);
+    expect(bodies.map((b) => b.confirm_paid)).toEqual([false, true, false]);
+  });
+
+  it("gpu_busy says what is busy, in plain words, and is never retried until clicked", async () => {
+    const user = userEvent.setup();
+    const server = setupHear().error(
+      "POST",
+      "/api/voices/v-alice/audition",
+      409,
+      "gpu_busy",
+      "a render job is running; the single GPU cannot also host an audition",
+      makeJob({ kind: "render", state: "running" }),
+    );
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    expect(await shown(/Busy recording — try after it finishes/)).toBeInTheDocument();
+    // announced through the row's always-mounted live region
+    expect(announced(screen.getByRole("row", { name: /Alice/ }))).toMatch(/Busy recording/);
+    expect(screen.queryByText("gpu_busy")).not.toBeInTheDocument(); // the code is a tooltip only
+    await tick();
+    await tick();
+    expect(auditionPosts(server)).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "try again" }));
+    await waitFor(() => expect(auditionPosts(server)).toHaveLength(2));
+    expect(bodyOf(auditionPosts(server)[1]).confirm_paid).toBe(false);
+  });
+
+  it("audition_in_flight asks to wait a moment", async () => {
+    const user = userEvent.setup();
+    const server = setupHear().error(
+      "POST",
+      "/api/voices/v-alice/audition",
+      409,
+      "audition_in_flight",
+      "another audition is already synthesizing",
+    );
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    expect(await shown(/Another voice sample is being made — wait a moment/)).toBeInTheDocument();
+    await tick();
+    expect(auditionPosts(server)).toHaveLength(1);
+  });
+
+  it("a paid voice names its price and plays only after the confirm click", async () => {
+    const user = userEvent.setup();
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play");
+    const server = setupHear().get("/api/voices", {
+      voices: [
+        voice("v-narr", "Narrator"),
+        { ...voice("v-alice", "Cloud Alice"), kind: "preset", engine: "elevenlabs", preset_id: "stock1" },
+        voice("v-bob", "auto:Bob"),
+      ],
+      unreadable: [],
+    });
+    server.on("POST", "/api/voices/v-alice/audition", (_u, init) =>
+      (JSON.parse(String(init?.body)) as { confirm_paid: boolean }).confirm_paid
+        ? jsonResponse({ voice_id: "v-alice", duration_seconds: 2, cost_usd: 0.0123, audition_url: "/x" })
+        : errorResponse(402, "payment_confirmation_required", "a paid call", { estimated_usd: 0.0123 }),
+    );
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "hear Alice's voice" }));
+    expect(await shown(/billed per use — this sample costs about \$0\.0123/)).toBeInTheDocument();
+    await tick();
+    // nothing paid happened on its own
+    expect(auditionPosts(server)).toHaveLength(1);
+    expect(play).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /confirm ~\$0\.0123 & play/ }));
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    const posts = auditionPosts(server);
+    expect(posts).toHaveLength(2);
+    expect(bodyOf(posts[1])).toEqual({ confirm_paid: true, text: '"Hello there," she said.' });
+  });
+
+  it("▶ in the Suggest-a-cast table plays the proposed voice with the character's line", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server
+      .post("/api/books/b1/assignment/suggest", {
+        assignment: ASSIGNMENT,
+        would_create_voice_ids: [],
+        would_recast_voice_ids: [],
+        edit_warnings: [],
+      })
+      .post("/api/voices/v-alice/audition", {
+        voice_id: "v-alice",
+        duration_seconds: 1,
+        cost_usd: 0,
+        audition_url: "/x",
+      });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    const table = await screen.findByRole("table", { name: "proposed voices" });
+    await user.click(within(table).getByRole("button", { name: "hear Alice's proposed voice" }));
+    await waitFor(() => expect(auditionPosts(server, "v-alice")).toHaveLength(1));
+    expect(bodyOf(auditionPosts(server)[0])).toEqual({ confirm_paid: false, text: '"Hello there," she said.' });
+  });
+
+  it("+ new voice for Alice opens Add voice over Review, prefilled, and keeps the unsaved casting", async () => {
+    const user = userEvent.setup();
+    let voices = [voice("v-narr", "Narrator"), voice("v-alice", "auto:Alice"), voice("v-bob", "auto:Bob")];
+    const server = setupHear();
+    server.on("GET", "/api/voices", () => jsonResponse({ voices, unreadable: [] }));
+    server.on("POST", "/api/voices", () => {
+      const created = voice("v-new", "Alice");
+      voices = [...voices, created];
+      return jsonResponse(created);
+    });
+    server.on("PUT", "/api/books/b1/assignment", (_u, init) =>
+      jsonResponse({ ...ASSIGNMENT, ...(JSON.parse(String(init?.body)) as Partial<VoiceAssignment>) }),
+    );
+    renderWithProviders(<Review />);
+
+    // an unsaved change first: Bob → Narrator
+    const bobRow = await screen.findByRole("row", { name: /Bob/ });
+    await user.click(within(bobRow).getByRole("button", { name: /auto:Bob · kokoro/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
+    expect(screen.getByRole("button", { name: "save casting" })).toBeEnabled();
+
+    // Alice's picker offers a new voice of her own
+    const aliceRow = screen.getByRole("row", { name: /Alice/ });
+    await user.click(within(aliceRow).getByRole("button", { name: /auto:Alice · kokoro/ }));
+    await user.click(
+      within(await screen.findByRole("listbox")).getByRole("option", { name: "+ new voice for Alice" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "New voice for Alice" });
+    expect(within(dialog).getByPlaceholderText("Narrator")).toHaveValue("Alice");
+    await user.click(within(dialog).getByRole("button", { name: "add voice" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // a recipe from her name, seeded with her gender
+    expect(server.jsonBodyOf("POST", "/api/voices")).toEqual({
+      kind: "blend",
+      name: "Alice",
+      gender: "female",
+      accent: "a",
+    });
+    // Bob's unsaved pick survived, and Alice is now on the new voice — still unsaved
+    expect(
+      within(screen.getByRole("row", { name: /Bob/ })).getByRole("button", { name: /Narrator · kokoro/ }),
+    ).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("row", { name: /Alice/ })).findByRole("button", { name: /^Alice · kokoro/ }),
+    ).toBeInTheDocument();
+    expect(server.calls.some((c) => c.method === "PUT")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "save casting" }));
+    await waitFor(() => expect(server.lastCall("PUT", "/api/books/b1/assignment")).toBeDefined());
+    expect(server.jsonBodyOf("PUT", "/api/books/b1/assignment")).toMatchObject({
+      assignments: { alice: "v-new", bob: "v-narr" },
+    });
   });
 });
