@@ -69,7 +69,8 @@ Interface: `attribute_chunk(chunk_text, registry, schema) -> segments`,
 - Final export: AAC .m4b at 44.1kHz (single upsample at the end) + per-chapter MP3s.
 
 ## GPU Resource Management
-- Single consumer GPU, never assume more than 8GB VRAM.
+- Single consumer GPU. Target: RTX 3080 Ti, 12GB VRAM (raised from 8GB on 2026-10-22).
+  Older measurements in this spec were taken on an 8GB RTX 3070.
 - A resource manager owns the GPU: at most one heavy model resident at a time —
   a TTS model OR the local attribution LLM, never both.
 - Ollama keeps models resident after requests (default ~5 min). The attribution

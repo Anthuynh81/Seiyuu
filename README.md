@@ -8,7 +8,7 @@ chaptered audiobook. Runs locally as a `localhost` web app, with a full CLI unde
 > **Local-first, cloud-as-finisher.** Draft everything for free on a local LLM and local
 > TTS; opt in to cloud intelligence (Claude) and cloud voices (ElevenLabs) as quality
 > finishers, behind explicit cost gates. Designed for a single consumer NVIDIA GPU
-> (assume 8 GB).
+> (target: 12 GB RTX 3080 Ti).
 
 ---
 
@@ -48,7 +48,7 @@ CLI before any UI is involved.
   block*; segment text is sliced from the source. That's what makes small local models
   usable, and the reconstruction guard can't be violated by a well-behaved splitter.
 - **One GPU, one resident model** — a resource manager guarantees only a single heavy
-  model (a TTS engine *or* the local LLM) is loaded at a time, so the 8 GB budget is never
+  model (a TTS engine *or* the local LLM) is loaded at a time, so the VRAM budget is never
   blown. Whisper validation runs on CPU so it never contends.
 - **The reference clip is the voice** — for cloned voices, `voices/{id}/reference.wav` is
   the engine-agnostic source of truth; embeddings, conditionals, and cloud voice ids are

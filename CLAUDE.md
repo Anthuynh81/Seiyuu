@@ -19,12 +19,12 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
   both are required for reasoning models. The `/v1` shim stays available via
   `ollama_transport=openai` for non-thinking models. Default model: `qwen2.5:7b`
   (~4.7GB, non-thinking) — it fits an 8GB GPU fully and is reliable at the per-block
-  speaker task. `qwen3.5:9b` is higher quality but its weights exceed usable 8GB VRAM, so
-  it offloads to CPU (~10x slower); use it only with more VRAM. Ollama being down is a
-  clear, actionable error, not a crash.
+  speaker task. `qwen3.5:9b` is higher quality; it spilled to CPU (~10x slower) on the old
+  8GB card but should fit the 12GB target. Benchmark before switching the default.
+  Ollama being down is a clear, actionable error, not a crash.
 - ffmpeg is on PATH and is the only sanctioned way to touch audio containers/m4b.
 
-## Critical: GPU discipline (single consumer GPU, assume 8GB)
+## Critical: GPU discipline (single consumer GPU: RTX 3080 Ti 12GB target)
 - At most ONE heavy model resident at a time: a TTS model OR the local LLM, never
   both. The GPU resource manager owns load/unload; stages acquire through it.
 - Ollama keeps models resident after requests (default ~5 min). Attribution
