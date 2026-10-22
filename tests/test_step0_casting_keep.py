@@ -394,7 +394,11 @@ def test_convert_multivoice_keeps_manual_picks(
     tmp_path,
     fake_provider,  # noqa: F811
     fake_render_engine,  # noqa: F811
+    monkeypatch,
 ) -> None:
+    # The synthetic EPUB has no quoted dialogue, so the narration fast path would skip the
+    # (faked) provider and find no characters; this test is about casting, so turn it off.
+    monkeypatch.setenv("ATTRIBUTION_NARRATION_FAST_PATH", "false")
     args = [
         "convert", str(synthetic_epub), "--multivoice",
         "--books-dir", str(tmp_path / "books"), "--output-dir", str(tmp_path / "out"),

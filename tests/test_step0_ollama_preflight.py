@@ -50,6 +50,15 @@ class FakeGet:
         return {"models": [{"name": n, "model": n} for n in self.names]}
 
 
+def _quoted_book():
+    """make_book() with real quoted dialogue so chunks reach the provider: a quote-free book
+    takes the narration fast path and never consults it (or the chunk cache)."""
+    book = make_book()
+    book.chapters[0].blocks[1].text = '"Hello world."'
+    book.chapters[1].blocks[1].text = '"Second chapter."'
+    return book
+
+
 def _narrate(chunk, registry, attempt) -> ChunkAttribution:
     return ChunkAttribution(
         segments=[
@@ -195,7 +204,7 @@ def test_run_attribution_with_injected_provider_skips_preflight(tmp_path, real_p
     book_dir = tmp_path / "book"
     book_dir.mkdir()
     report = svc.run_attribution(
-        make_book(), book_dir, cfg=make_settings(tmp_path), provider=provider
+        _quoted_book(), book_dir, cfg=make_settings(tmp_path), provider=provider
     )
     assert report.chapters
     assert provider.calls
@@ -205,7 +214,7 @@ def test_run_attribution_with_injected_provider_skips_preflight(tmp_path, real_p
 def test_cached_rerun_only_warns_when_ollama_down(tmp_path, real_preflight, monkeypatch) -> None:
     # A re-run (attribution.db exists) can be served wholly from the chunk cache, as before
     # the pre-flight existed — e.g. `convert --multivoice` again after recasting voices.
-    book, cfg, book_dir = make_book(), make_settings(tmp_path), tmp_path / "book"
+    book, cfg, book_dir = _quoted_book(), make_settings(tmp_path), tmp_path / "book"
     book_dir.mkdir()
     svc.run_attribution(book, book_dir, cfg=cfg, provider=FakeProvider(_narrate))  # warm
 
@@ -234,7 +243,7 @@ def test_rerun_cache_miss_still_fails_loudly(tmp_path, real_preflight, monkeypat
 
     monkeypatch.setattr(svc, "build_provider", lambda *_a, **_k: FakeProvider(offline))
     with pytest.raises(AttributionError, match="ollama serve"):
-        svc.run_attribution(make_book(), book_dir, cfg=make_settings(tmp_path))
+        svc.run_attribution(_quoted_book(), book_dir, cfg=make_settings(tmp_path))
 
 
 # -- CLI ----------------------------------------------------------------------------------
