@@ -1,6 +1,6 @@
 # Seiyuu — Multi-Voice Audiobook Creator
 
-Turn an EPUB into a multi-voice `.m4b` audiobook: a local LLM attributes each line of
+Turn an EPUB or PDF into a multi-voice `.m4b` audiobook: a local LLM attributes each line of
 dialogue to a character, every character is cast with a voice (a preset, a blend, or one
 cloned from a short sample), and the book is rendered, validated, and assembled into a
 chaptered audiobook. Runs locally as a `localhost` web app, with a full CLI underneath.
@@ -202,17 +202,18 @@ endpoints). To reach it from another device on your LAN (e.g. the Listen screen 
 tablet), add that machine's address in `.env`:
 `API_ALLOWED_HOSTS=localhost,127.0.0.1,testserver,192.168.1.20`
 
-The UI has five screens: **Library** (books, status, estimates), **Listen** (real-audio
+The UI has seven screens: **Library** (books, status, estimates), **Listen** (real-audio
 read-along with a word-karaoke highlight and chapter auto-advance), **Character Review**
-(reassign / rename / merge the cast, spoiler-safe), **Voice Studio** (upload → curate →
-consent → audition; Kokoro blend builder; cloud-slot view), and **Render & Jobs** (the
-guided cost flow, progress, downloads, and validation diffs).
+(reassign / rename / merge the cast, casting, spoiler-safe), **Pronunciation** (the per-book
+lexicon), **Voice Studio** (upload → consent → audition; Kokoro blend builder; cloud-slot
+view), **Series** (carry character voices across books), and **Render & Jobs** (the guided
+cost flow, progress, downloads, and validation diffs).
 
 ## Project layout
 
 ```
 src/seiyuu/
-  ingest/        EPUB → normalized JSON
+  ingest/        EPUB / PDF → normalized JSON
   attribute/     LLM speaker attribution (providers/ holds the LLM SDKs)
   normalize/     pure, deterministic text normalization
   voices/        voice library, blends, cloud slot manager
@@ -225,7 +226,7 @@ src/seiyuu/
   repository/    SQLite (WAL) + atomic file writes behind a seam
   api/           FastAPI app (routes/, uniform error envelope)
   services/      stage orchestration shared by CLI and API
-  cli.py         the Click CLI
+  cli/           the Click CLI, one module per stage
 frontend/        React + Vite + TypeScript + TanStack Query
 prompts/         versioned attribution prompts (prompt_version is part of the cache key)
 SPEC.md          full architecture, data models, and milestones
@@ -244,17 +245,17 @@ cd frontend && npm test       # vitest
 cd frontend && npm run build  # tsc + vite build
 ```
 
-The default test suite makes **no live LLM or TTS calls** — attribution tests replay
-recorded fixtures (free to regenerate from the local model), and GPU work is behind
+The default test suite makes **no live LLM or TTS calls** — attribution tests use
+scripted fake providers and canned JSON, and GPU work is behind
 `@pytest.mark.gpu` (deselected by default).
 
 ## Status
 
-Milestones **M1–M6 are complete**: the full CLI pipeline (ingest → attribute → normalize →
+Milestones **M1–M8 are complete**: the full CLI pipeline (ingest → attribute → normalize →
 cast → render → validate → assemble → master), local + cloud attribution, the voice library
 with cloning and blends, cloud TTS with the cost gate, a durable job/persistence layer, the
-FastAPI backend, and the React web UI. **M7** (IndexTTS-2, a second local cloning engine with
-native emotion control) is in progress — the out-of-process worker + adapter and its clone/render
-surface are landed; see [IndexTTS-2 setup](#indextts-2-optional-second-local-engine). **M8** (PDF
-ingestion) is planned. See [SPEC.md](SPEC.md) for the full design and the per-milestone design
-notes.
+FastAPI backend, the React web UI, IndexTTS-2 as a second local cloning engine with native
+emotion control (see [IndexTTS-2 setup](#indextts-2-optional-second-local-engine)), and PDF
+ingestion. **M9** (guided UX + engine refresh) is planned; its research and plans are in
+`design/` (`ux-upgrade-plan-2026-10-22.md`, `tech-refresh-2026-10-22.md`). See
+[SPEC.md](SPEC.md) for the full design and the per-milestone design notes.

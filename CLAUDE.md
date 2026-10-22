@@ -112,8 +112,9 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
   and frontend gates (oxlint, tsc -b, vitest) on every PR and push to main.
 - `uv run pytest -m gpu` — TTS smoke tests; only when engine code changed, and ask
   before multi-minute GPU jobs.
-- No live LLM or TTS calls in the default suite — recorded fixtures only (record
-  from the local model; it's free to regenerate).
+- No live LLM or TTS calls in the default suite — scripted fake providers and canned
+  JSON responses only (when you need realistic output, capture it from the local model;
+  it's free to regenerate).
 - The reconstruction invariant has its own adversarial fixture suite (paraphrase,
   dropped sentence, reordered dialogue).
 - `uv run ruff check` and `uv run ruff format --check` must pass before done.

@@ -46,15 +46,16 @@ Interface: `list_voices()`, `synthesize(text, voice, settings) -> AudioFile`,
 ### Attribution LLM providers (`AttributionLLM` interface)
 | Provider | Type | Role | Cost |
 |---|---|---|---|
-| Local (Ollama, OpenAI-compatible endpoint) | Local, default for dev/drafts | All prompt iteration + draft attribution. Default model: Qwen3.5 9B (`qwen3.5:9b`, Q4_K_M, ~6.6GB, full GPU offload with 32K context on 8GB); Gemma 4 8B as fallback | Free |
+| Local (Ollama, native `/api/chat`) | Local, default for dev/drafts | All prompt iteration + draft attribution. Default model: `qwen2.5:7b` (non-thinking, ~4.7GB). Qwen3.5 4B/9B are candidates pending the M9 accuracy A/B | Free |
 | Anthropic (Claude API) | Cloud | Final-quality attribution; escalation target for low-confidence chunks | ~$1–5/novel depending on model |
 
 Interface: `attribute_chunk(chunk_text, registry, schema) -> segments`,
 `provider_id`, `model_id`. Requirements:
 - **Schema-enforced JSON output** where the backend supports it (Ollama structured
   outputs, Anthropic tool-use schema) so malformed JSON is impossible, not retried.
-- The local provider is the OpenAI SDK pointed at `http://localhost:11434/v1`;
-  the Anthropic provider uses the Anthropic SDK. Both live ONLY in
+- The local provider talks to Ollama's native `/api/chat` by default (the `/v1` OpenAI
+  shim can't disable thinking or set `num_ctx`; it remains available via
+  `ollama_transport=openai`); the Anthropic provider uses the Anthropic SDK. Both live ONLY in
   `src/seiyuu/attribute/providers/`.
 - Provider + model are config (`attribution.provider`, `attribution.model`);
   ANTHROPIC_API_KEY is optional unless the anthropic provider or hybrid mode is on.
@@ -325,17 +326,48 @@ regenerable from reference.wav.
      Adversarial review workflows ran pre-commit on the risky sections and pre-merge
      cumulatively; the confirmed finds (stale GPU-residency flag, envelope gaps, missing
      assemble/master routes, IVC handle surviving re-clone, single-voice clip merging in
-     Listen) are all fixed and regression-tested. Known gaps, deliberate: frontend has
-     build+lint gates but no test suite yet; casting (assignment) has API endpoints but no
-     UI panel — multivoice renders need `seiyuu assign` or /docs until M6c-6.
-7. **M7 — IndexTTS-2:** second local cloning engine; emotion refs.
-8. **M8 — PDF ingestion.**
+     Listen) are all fixed and regression-tested. Known gaps at the time (since closed):
+     the frontend test suite and the casting UI both landed after M6c.
+7. **M7 — IndexTTS-2:** ✅ **done.** Second local cloning engine in a subprocess-isolated
+   cu128 worker (its torch/transformers pins conflict with Chatterbox's), 8-dim emotion vector
+   mapped from the per-quote emotion labels (ear-tuned), weights-fingerprint `model_version`,
+   OOM-safe restart. See README "IndexTTS-2 setup".
+8. **M8 — PDF ingestion:** ✅ **done.** PyMuPDF parser behind the shared ingest core with suffix
+   dispatch; header/footer stripping, reflow, outline or heuristic chapters; scanned and
+   encrypted PDFs are refused.
+9. **M9 — Guided UX + engine refresh:** planned 2026-10-22. Sources:
+   `design/ux-upgrade-plan-2026-10-22.md` (usability), `design/tech-refresh-2026-10-22.md`
+   (new tech per stage), `design/voicestudio-assessment-2026-10-22.md` (competitor). Work
+   alternates usability and engine steps, usability first:
+   - **Step 0 — housekeeping:** stop casting from discarding manual picks; ElevenLabs per-model
+     pricing; soxr instead of torchaudio for resampling; Ollama pre-flight; docs refresh; GPU
+     smoke run, then merge the render wall-clock and attribution fast-path PRs.
+   - **Step 1 — stop the confusion, start measuring:** one "Suggest a cast" flow, health
+     checklist, job notices, next-step buttons; an attribution accuracy harness and an engine
+     benchmark on the 12GB card.
+   - **Step 2 — clarity + drop-ins:** workflow-ordered navigation, auditions where you cast,
+     Review/Listen/Render clarity, plain language; IndexTTS-2.5, inter-voice loudness matching,
+     Haiku 5.5 for cloud attribution, Chatterbox-Turbo, Parakeet validation, reference-clip prep.
+   - **Step 3 — guided flow:** per-book stepper (Import → Speakers → Voices → Proof → Produce →
+     Listen), server-side finish chain, staleness, structured progress and retry; a shared
+     subprocess-worker base for engines.
+   - **Step 4 — proofing studio:** issues inbox, combined proof/listen workspace, pronunciation
+     in place, exports (EPUB3 media overlays, Audiobookshelf, SRT).
+   - **Step 5 — gated and experimental:** items below that need sign-off, plus spikes.
+   - **Owner decisions (2026-10-22):** re-drafting a cast keeps existing picks by default
+     (`keep_existing=true`; an explicit reset is a separate action); "Full cast" auto-drafts a
+     free local cast after attribution and builds the `.m4b` when recording ends, both on by
+     default and never on a paid path; Seiyuu keeps each book's original upload and may bundle a
+     short public-domain sample EPUB; spoiler-safe starts off in Review; editable per-voice
+     settings are the first gated item approved (it writes `VoiceMeta.settings`); the other gated
+     items (book-scoped auto voices, new edit ops, per-line takes, voice design,
+     context-aware rendering, a CUDA-free main env) still need individual sign-off; pulling
+     about 11GB of Ollama models for the attribution A/B is approved once the harness exists.
 
 ## Testing
 - Project Gutenberg fixture + tiny synthetic EPUB.
-- Per-stage snapshot tests. Attribution tests use recorded provider responses (from
-  the local model — free to regenerate); no live LLM or TTS calls in the default
-  suite. Normalization: pure-function fixture tests.
+- Per-stage snapshot tests. Attribution tests use scripted fake providers and canned
+  JSON responses; no live LLM or TTS calls in the default suite. Normalization: pure-function fixture tests.
 - GPU/TTS smoke tests behind `@pytest.mark.gpu`; pyproject.toml sets
   `addopts = "-m 'not gpu'"`.
 - The reconstruction invariant gets its own test suite with adversarial fixtures
