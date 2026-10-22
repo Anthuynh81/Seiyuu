@@ -7,23 +7,22 @@ reach assembly. Deterministic engines (Kokoro) don't need it. Runs on CPU (small
 per the GPU-discipline rule, so it never contends with a GPU TTS model — the `unload()` /
 `device='cuda'` path exists only for users who explicitly opt a spare GPU in.
 
-The comparison folds case and punctuation before scoring: whisper's spelling/casing/punctuation
-differ cosmetically from the normalized text (and number words vs digits drift), so we compare
-what was SAID, not how it was written. Gross failures — hallucination, big drops — still score far
-below threshold; only cosmetic differences are forgiven.
+Scoring lives in `scoring.py` (pure): both sides are folded through the normalizer's spoken-word
+rules, so whisper's "Mr."/"12,000" match the "Mister"/"twelve thousand" the engine was given;
+numbers are compared by value; then a character similarity must reach `min_ratio` AND an optimal
+word alignment must show no long run of wrong words, no lost negation and no pile-up of small
+errors. Cosmetic differences are forgiven; dropped, looped or invented clauses, wrong numbers and
+a dropped "not" are not. Each failed verdict carries a plain-words `reason`.
 """
 
-import re
-from difflib import SequenceMatcher
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from seiyuu.validate.models import ValidationResult, WordTiming
-
-_WS = re.compile(r"\s+")
-_NON_WORD = re.compile(r"[^\w\s]")
+from seiyuu.validate.scoring import DEFAULT_MAX_WORD_GAP, score, similarity
 
 WHISPER_SAMPLE_RATE = 16_000
 
@@ -65,14 +64,10 @@ class ValidationError(Exception):
     """Loud validation failure (model load or transcription)."""
 
 
-def _fold(text: str) -> str:
-    """Lowercase, drop punctuation, collapse whitespace — compare spoken content, not spelling."""
-    return _WS.sub(" ", _NON_WORD.sub(" ", text.casefold())).strip()
-
-
 def match_ratio(expected: str, transcript: str) -> float:
-    """Folded fuzzy similarity in [0, 1]; 1.0 == identical once case/punctuation are ignored."""
-    return SequenceMatcher(None, _fold(expected), _fold(transcript)).ratio()
+    """Folded similarity in [0, 1]; 1.0 == the same spoken words once spelling, case and
+    punctuation are ignored. The similarity half of a verdict only (see `scoring.score`)."""
+    return similarity(expected, transcript)
 
 
 class Validator:
@@ -83,6 +78,9 @@ class Validator:
     # accepts an in-memory 16 kHz waveform instead of a wav path. Duck-typed test
     # validators without it keep receiving paths.
     accepts_arrays = True
+    # ...and this one takes ``alternates``: other spellings of the expected text (the book text
+    # without pronunciation respellings) that whisper may legitimately match instead.
+    accepts_alternates = True
 
     def __init__(
         self,
@@ -91,6 +89,7 @@ class Validator:
         device: str = "cpu",
         compute_type: str = "int8",
         min_ratio: float = 0.85,
+        max_word_gap: int = DEFAULT_MAX_WORD_GAP,
         language: str = "en",
         model: Any | None = None,
     ) -> None:
@@ -98,6 +97,7 @@ class Validator:
         self.device = device
         self.compute_type = compute_type
         self.min_ratio = min_ratio
+        self.max_word_gap = max_word_gap
         self.language = language
         self._model = model
 
@@ -125,18 +125,47 @@ class Validator:
                 f"whisper transcription failed for {_describe(wav_path)}: {exc}"
             ) from exc
 
-    def validate(self, wav_path: AudioSource, expected_text: str) -> ValidationResult:
+    def validate(
+        self, wav_path: AudioSource, expected_text: str, *, alternates: Sequence[str] = ()
+    ) -> ValidationResult:
         transcript = self.transcribe(wav_path)
-        return self._score(expected_text, transcript)
+        return self._score(expected_text, transcript, alternates)
 
-    def _score(self, expected_text: str, transcript: str) -> ValidationResult:
-        score = match_ratio(expected_text, transcript)
+    def _score(
+        self, expected_text: str, transcript: str, alternates: Sequence[str] = ()
+    ) -> ValidationResult:
+        try:
+            result = score(
+                expected_text,
+                transcript,
+                alternates=alternates,
+                min_ratio=self.min_ratio,
+                max_word_gap=self.max_word_gap,
+            )
+        except Exception as exc:  # e.g. a 300+ digit run num2words can't spell
+            # One unscorable transcript fails its own segment (retried, then flagged) rather
+            # than aborting the whole render — and every later cache-hit rescore with it.
+            return ValidationResult(
+                ok=False,
+                score=0.0,
+                transcript=transcript,
+                expected=expected_text,
+                reason=f"transcript could not be scored ({type(exc).__name__})",
+            )
         return ValidationResult(
-            ok=score >= self.min_ratio,
-            score=round(score, 4),
+            ok=result.ok,
+            score=round(result.similarity, 4),
             transcript=transcript,
             expected=expected_text,
+            reason=result.reason,
         )
+
+    def rescore(
+        self, verdict: ValidationResult, *, alternates: Sequence[str] = ()
+    ) -> ValidationResult:
+        """Re-judge a stored verdict under the current scoring rules from its saved transcript
+        (no whisper pass), so a cache hit never keeps a verdict an older scorer got wrong."""
+        return self._score(verdict.expected, verdict.transcript, alternates)
 
     def transcribe_words(self, wav_path: AudioSource) -> list[WordTiming]:
         """Per-word (start, end, word) spans for forced alignment (F2).
@@ -157,7 +186,7 @@ class Validator:
             ) from exc
 
     def validate_with_words(
-        self, wav_path: AudioSource, expected_text: str
+        self, wav_path: AudioSource, expected_text: str, *, alternates: Sequence[str] = ()
     ) -> tuple[ValidationResult, list[WordTiming]]:
         """Score AND align in ONE transcription pass — the render-loop piggyback for
         `requires_validation` engines, so a Chatterbox/Fish segment yields word timings at
@@ -176,7 +205,7 @@ class Validator:
             raise ValidationError(
                 f"whisper transcription failed for {_describe(wav_path)}: {exc}"
             ) from exc
-        return self._score(expected_text, transcript), words
+        return self._score(expected_text, transcript, alternates), words
 
     @staticmethod
     def _flatten_words(segments: Any) -> list[WordTiming]:
