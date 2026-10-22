@@ -422,7 +422,10 @@ def test_straight_single_book_warns_but_does_not_switch(tmp_path):
     book = _book([f"'Line {i} here, don't stop,' said Tom." for i in range(25)])
     provider = SpanLabelingProvider()
     with AttributionCache(tmp_path / "attribution.db") as cache:
-        report = attribute_book(book, provider, cache=cache)
+        # fast path off: the assertions below are about the PROVIDER path's cache keys
+        # (a straight-single book is all-narration under the double splitter, so the
+        # fast path would otherwise skip the LLM and leave the cache empty)
+        report = attribute_book(book, provider, cache=cache, narration_fast_path=False)
     # Warn-only: no dialogue split (too ambiguous), no cache suffix, but a loud note.
     assert _keys_in_cache(tmp_path) == {"v1"}
     assert report.prompt_version == "v1"

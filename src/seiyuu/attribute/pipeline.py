@@ -175,12 +175,20 @@ def attribute_book(
     adjudication_confidence_threshold: float = 0.85,
     adjudication_candidate_cap: int = 40,
     adjudication_use_nicknames: bool = True,
+    narration_fast_path: bool = True,
 ) -> AttributionReport:
     """Attribute a book (or a 1-based subset of ``chapters``) into segments + a registry.
 
     ``check_cancel`` (when given) is called between chapters and between chunks and may
     raise to abort cooperatively; completed chunks are already cached and no report is
     written, so a re-run resumes from the cache.
+
+    ``narration_fast_path`` (default on) synthesizes pure-narration chunks — no quoted
+    span, no thought candidate in any owned block — deterministically instead of calling
+    the LLM: the model provably cannot affect such a chunk's segments, so narration-heavy
+    stretches (and quote-free non-fiction) skip the ~5-10s round trip per chunk entirely.
+    Fast-path results are recomputed each run, never cached — the cache stays a record of
+    actual LLM output.
     """
     say = progress or (lambda _msg: None)
     check = check_cancel or (lambda: None)
@@ -251,8 +259,15 @@ def attribute_book(
                 prompt_version=key_prompt_version,
             )
             label = f"  chunk {chunk.index + 1}/{len(chunks)} ({len(chunk.owned_ids)} blocks)"
-            attribution = cache.get(key)
+            # Pure-narration fast path FIRST (before the cache): deterministic, free, and
+            # independent of cache state — the model cannot affect these segments, so
+            # neither a stale row nor a fresh call could change the outcome.
+            attribution = (
+                provider.narration_only_attribution(chunk) if narration_fast_path else None
+            )
             if attribution is not None:
+                say(f"{label}: narration only, no LLM call")
+            elif (attribution := cache.get(key)) is not None:
                 say(f"{label}: cached")
             else:
                 outcome = _attribute_chunk_validated(provider, chunk, registry, max_local_retries)
