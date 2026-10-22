@@ -19,6 +19,7 @@ import type {
   CoverOut,
   EditLog,
   EditRequest,
+  EnginesOut,
   EngineVoicesOut,
   IngestResponse,
   JobOut,
@@ -40,6 +41,7 @@ import type {
   SeriesListOut,
   SuggestCastResponse,
   SettingsOut,
+  SystemProbeOut,
   SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
@@ -291,6 +293,28 @@ export function useSystem() {
     queryKey: ["system"],
     queryFn: () => api<SystemStatusOut>("/api/system"),
     staleTime: 60_000, // config facts; no need to poll
+  });
+}
+
+/** Live health: ?probe=true reaches out to Ollama (reachable + model pulled) and checks
+    ffmpeg. NEW key ["system","probe"] — never folded into ["system"]'s config facts. Polls
+    gently (30 s, visible tab only) and on focus, so starting a service and switching back
+    to the browser updates the pill. */
+export function useSystemProbe() {
+  return useQuery({
+    queryKey: ["system", "probe"],
+    queryFn: () => api<SystemProbeOut>("/api/system?probe=true"),
+    refetchOnWindowFocus: true,
+    refetchInterval: 30_000,
+  });
+}
+
+/** The engine catalog with each local engine's weights-cached probe. A warm-up job changes
+    weights_cached/resident; JobCompletionWatcher invalidates ["engines"] when a job ends. */
+export function useEngines() {
+  return useQuery({
+    queryKey: ["engines"],
+    queryFn: () => api<EnginesOut>("/api/engines"),
   });
 }
 
@@ -716,6 +740,15 @@ export function useWarmup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (engineId: string) => api<JobOut>(`/api/engines/${engineId}/warmup`, { method: "POST" }),
+    // RETURN the invalidation: the mutation stays pending until the live-jobs refetch has
+    // landed, so a caller never sees "not pending, and no live job yet" (which would re-offer
+    // the button for a round-trip and invite a duplicate_job click)
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    // duplicate_job: one is already live (another tab, the CLI) — refetch so it shows as such
+    onError: (err) => {
+      if (err instanceof ApiError && err.code === "duplicate_job") {
+        return qc.invalidateQueries({ queryKey: ["jobs", "live"] });
+      }
+    },
   });
 }

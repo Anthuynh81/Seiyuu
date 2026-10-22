@@ -529,6 +529,40 @@ export interface SystemStatusOut {
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
 }
 
+export interface OllamaStatus {
+  base_url: string;
+  reachable: boolean | null; // null = not probed (only ?probe=true reaches out)
+  // probe-only: is the configured attribution model pulled? null = not probed / tags unreadable
+  model_installed?: boolean | null;
+}
+
+/** Full GET /api/system?probe=true — the health pill and setup checklist read this. */
+export interface SystemProbeOut extends SystemStatusOut {
+  gpu_resident: string | null;
+  active_job: JobOut | null;
+  queued_jobs: number;
+  audition_in_flight: boolean;
+  ffmpeg_available: boolean;
+  ollama: OllamaStatus;
+  engines: string[];
+  version: string;
+}
+
+/** GET /api/engines — static catalog facts plus two live probes. */
+export interface EngineInfo {
+  engine_id: string;
+  uses_gpu: boolean;
+  requires_validation: boolean;
+  paid: boolean;
+  supports_cloning: boolean;
+  weights_cached: boolean | null; // best-effort cache probe; null for cloud engines / unknowable
+  resident: boolean;
+}
+
+export interface EnginesOut {
+  engines: EngineInfo[];
+}
+
 /** Slim view of GET /api/settings (redacted config) — only what screens consume. */
 export interface SettingsOut {
   kokoro_default_voice: string; // the preset a full cast reset narrates with

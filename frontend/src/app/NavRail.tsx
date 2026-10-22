@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 
 import { useLiveJobs } from "../api/hooks";
+import { HealthPill } from "./SystemDrawer";
 import { type ThemePref, useTheme } from "./useTheme";
 
 const items = [
@@ -44,9 +45,8 @@ export function NavRail() {
         ))}
       </div>
       <div className="foot">
-        api /api → 127.0.0.1:8000
-        <br />
-        talkback v4 · console online
+        <HealthPill />
+        <div>api /api → 127.0.0.1:8000</div>
       </div>
     </nav>
   );

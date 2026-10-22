@@ -33,6 +33,9 @@ function JobCompletionWatcher() {
         for (const key of ["segments", "render-summary", "validation", "estimate", "assignment", "voices"]) {
           qc.invalidateQueries({ queryKey: [key] });
         }
+        // a finished warm-up flips weights_cached/resident; any finish may follow a setup fix
+        qc.invalidateQueries({ queryKey: ["engines"] });
+        qc.invalidateQueries({ queryKey: ["system", "probe"] });
       }
     }
     if (count !== undefined) prev.current = count;

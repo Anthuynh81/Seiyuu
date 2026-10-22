@@ -1,4 +1,4 @@
-import type { BookCard, JobOut } from "../api/types";
+import type { BookCard, EngineInfo, JobOut, SystemProbeOut } from "../api/types";
 
 /** Typed factories for the shapes most tests share. Only the widely-reused ones live here —
     screen-specific payloads belong next to the screen's test, built from api/types. */
@@ -33,6 +33,43 @@ export function makeJob(overrides: Partial<JobOut> = {}): JobOut {
     finished_at: null,
     is_terminal: false,
     params: null,
+    ...overrides,
+  };
+}
+
+/** GET /api/system?probe=true with everything healthy; override the parts a test breaks. */
+export function makeSystemProbe(overrides: Partial<SystemProbeOut> = {}): SystemProbeOut {
+  return {
+    attribution: {
+      provider: "local",
+      model: "qwen2.5:7b",
+      anthropic_model: "claude-test",
+      prompt_version: "v6",
+      hybrid: false,
+    },
+    keys: { anthropic_configured: false, elevenlabs_configured: false },
+    apply_emotion: false,
+    gpu_resident: null,
+    active_job: null,
+    queued_jobs: 0,
+    audition_in_flight: false,
+    ffmpeg_available: true,
+    ollama: { base_url: "http://localhost:11434", reachable: true, model_installed: true },
+    engines: ["kokoro", "chatterbox"],
+    version: "0.9.0",
+    ...overrides,
+  };
+}
+
+export function makeEngine(overrides: Partial<EngineInfo> = {}): EngineInfo {
+  return {
+    engine_id: "kokoro",
+    uses_gpu: true,
+    requires_validation: false,
+    paid: false,
+    supports_cloning: false,
+    weights_cached: true,
+    resident: false,
     ...overrides,
   };
 }

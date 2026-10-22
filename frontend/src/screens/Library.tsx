@@ -1,11 +1,13 @@
-import { useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ApiError } from "../api/client";
+import { ApiError, isBackendDown } from "../api/client";
 import { useBooks, useDeleteBook, useIngest } from "../api/hooks";
 import type { BookCard as BookCardT, JobOut, PaidArtifacts } from "../api/types";
 import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
+import { SetupChecklist } from "../components/SetupChecklist";
 
 function SignalPath({ book }: { book: BookCardT }) {
   const activeStage = book.active_job ? KIND_STAGE[book.active_job.kind] : undefined;
@@ -203,7 +205,17 @@ function UploadSlot() {
 }
 
 export function Library() {
+  const qc = useQueryClient();
   const books = useBooks();
+  const empty = books.data?.books.length === 0;
+  // the backend row of the checklist already says "not running" and how to start it
+  const backendDown = isBackendDown(books.error);
+  // the shelf noticed the outage before the probe's 30 s poll did: ask the probe once now, so
+  // the checklist below agrees with this panel instead of showing a stale "Running"
+  useEffect(() => {
+    if (backendDown) void qc.invalidateQueries({ queryKey: ["system", "probe"] });
+  }, [backendDown, qc]);
+  const shelfCached = (books.data?.books.length ?? 0) > 0;
   return (
     <section className="screen">
       <h1>Library</h1>
@@ -212,7 +224,22 @@ export function Library() {
         position on the signal path. Progress lives in the transport bar — cards only say what stage owns the book.
       </p>
       {books.isPending && <div className="loadline">reading the shelf…</div>}
-      {books.isError && <div className="errline">{books.error.message}</div>}
+      {books.isError && !backendDown && <div className="errline">{books.error.message}</div>}
+      {(empty || backendDown) && (
+        <div className="panel">
+          <div className="panel-h">
+            <b>{backendDown ? "The Seiyuu backend isn't running" : "Before your first book"}</b>
+          </div>
+          <div className="panel-sub">
+            {backendDown
+              ? shelfCached
+                ? "The shelf below is from before it stopped and can't change until it's back. Start it, then return to this page."
+                : "Start it, then return to this page. Everything below should be green before you start."
+              : "Everything below should be green before you start. Each fix says what to run."}
+          </div>
+          <SetupChecklist />
+        </div>
+      )}
       <div className="grid2">
         <UploadSlot />
         {books.data?.books.map((b) => <Card key={b.book_id} book={b} />)}

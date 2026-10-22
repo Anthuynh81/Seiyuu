@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { makeBook, makeJob } from "../test/fixtures";
+import { makeBook, makeEngine, makeJob, makeSystemProbe } from "../test/fixtures";
 import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Library } from "./Library";
 
@@ -142,5 +142,63 @@ describe("Library", () => {
     expect(await screen.findByText(/new-book · 12 chapters, 340 blocks/)).toBeInTheDocument();
     const form = server.formBodyOf("POST", "/api/books");
     expect((form.get("file") as File).name).toBe("novel.epub");
+  });
+
+  describe("empty state", () => {
+    it("an empty shelf shows the setup checklist above the drop zone", async () => {
+      mockApi()
+        .get("/api/books", { books: [] })
+        .get(
+          "/api/system?probe=true",
+          makeSystemProbe({ ollama: { base_url: "x", reachable: true, model_installed: false } }),
+        )
+        .get("/api/engines", { engines: [makeEngine()] });
+      const { container } = renderWithProviders(<Library />);
+
+      const list = await screen.findByRole("list", { name: "Setup checklist" });
+      expect(screen.getByText("Before your first book")).toBeInTheDocument();
+      expect(await within(list).findByText("ollama pull qwen2.5:7b")).toBeInTheDocument();
+      // above the drop zone, in document order
+      const drop = container.querySelector(".drop")!;
+      expect(list.compareDocumentPosition(drop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it("a shelf with books hides the checklist (the NavRail pill still has it)", async () => {
+      mockApi().get("/api/books", { books: [makeBook({ title: "Has Books" })] });
+      renderWithProviders(<Library />);
+      expect(await screen.findByText("Has Books")).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "Setup checklist" })).not.toBeInTheDocument();
+    });
+
+    it("backend dies after the shelf loaded: retitled panel, Not running row, probe asked again", async () => {
+      const server = mockApi()
+        .get("/api/books", { books: [makeBook({ title: "Has Books" })] })
+        .get("/api/system?probe=true", makeSystemProbe())
+        .get("/api/engines", { engines: [makeEngine()] });
+      const { queryClient } = renderWithProviders(<Library />);
+      expect(await screen.findByText("Has Books")).toBeInTheDocument();
+      // the probe has a cached success from before the outage
+      await queryClient.fetchQuery({ queryKey: ["system", "probe"], queryFn: () => makeSystemProbe() });
+      const probesBefore = server.calls.filter((c) => c.url === "/api/system?probe=true").length;
+
+      server.on("GET", /^\/api\//, () => new Response("", { status: 502 }));
+      await queryClient.refetchQueries({ queryKey: ["books"] });
+
+      expect(await screen.findByText("The Seiyuu backend isn't running")).toBeInTheDocument();
+      expect(screen.queryByText("Before your first book")).not.toBeInTheDocument();
+      expect(screen.getByText(/shelf below is from before it stopped/)).toBeInTheDocument();
+      const backend = await screen.findByRole("listitem", { name: "Seiyuu backend" });
+      await waitFor(() => expect(within(backend).getByText("Not running")).toBeInTheDocument());
+      expect(server.calls.filter((c) => c.url === "/api/system?probe=true").length).toBeGreaterThan(probesBefore);
+      expect(screen.getByText("Has Books")).toBeInTheDocument(); // cached shelf stays visible
+    });
+
+    it("backend down: the checklist carries the start command instead of a raw error line", async () => {
+      mockApi().on("GET", /^\/api\//, () => new Response("", { status: 500 }));
+      renderWithProviders(<Library />);
+      const list = await screen.findByRole("list", { name: "Setup checklist" });
+      expect(await within(list).findByText("uv run uvicorn seiyuu.api.main:app")).toBeInTheDocument();
+      expect(document.querySelector(".errline")).toBeNull();
+    });
   });
 });

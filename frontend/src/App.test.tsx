@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { JobOut } from "./api/types";
 import App from "./App";
-import { makeJob } from "./test/fixtures";
+import { makeEngine, makeJob, makeSystemProbe } from "./test/fixtures";
 import { type MockApi, makeQueryClient, mockApi, renderWithProviders } from "./test/utils";
 
 /** Every mount-time GET the seven screens make, answered with settled empty payloads so each
@@ -15,6 +15,7 @@ function mockEmptyBackend(): MockApi {
     .get("/api/cloud-slots", { max_slots: 10, count: 0, slots: [] })
     .get("/api/series", { series: [] })
     .get("/api/engines/kokoro/voices", { engine_id: "kokoro", voices: [] })
+    .get("/api/engines", { engines: [makeEngine()] })
     .get("/api/system", {
       attribution: {
         provider: "local",
@@ -24,7 +25,9 @@ function mockEmptyBackend(): MockApi {
       },
       keys: { anthropic_configured: false, elevenlabs_configured: false },
       apply_emotion: false,
-    });
+    })
+    // registered AFTER the pathname-only /api/system route: the latest match wins
+    .get("/api/system?probe=true", makeSystemProbe());
 }
 
 describe("App", () => {
@@ -68,6 +71,9 @@ describe("App", () => {
       for (const key of families) {
         expect(invalidate).toHaveBeenCalledWith({ queryKey: [key] });
       }
+      // a finished warm-up flips weights_cached: the NEW health keys refresh too
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["engines"] });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["system", "probe"] });
     });
   });
 });
