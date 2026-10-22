@@ -25,6 +25,7 @@ from seiyuu.attribute import ATTRIBUTION_NAME, AttributionCache, attribute_book,
 from seiyuu.attribute.aliases import resolve_registry_aliases
 from seiyuu.attribute.models import AttributionReport, CharacterRegistry
 from seiyuu.attribute.pipeline import _drop_superseded_notes
+from seiyuu.attribute.providers.local import OllamaPreflightError, ollama_preflight
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import NormalizedBook
 from seiyuu.repository import file_lock
@@ -83,6 +84,41 @@ def build_adjudicator(cfg, cache, book_id: str):
         prompt_version=cfg.adjudication_prompt_version,
         prompts_dir=cfg.prompts_dir,
     )
+
+
+def preflight_attribution(
+    cfg,
+    *,
+    provider_id: str | None = None,
+    model: str | None = None,
+    use_adjudicate: bool | None = None,
+    chapters: tuple[int, ...] | list[int] = (),
+    check_primary: bool = True,
+    check_adjudicator: bool = True,
+) -> None:
+    """Fail fast (``OllamaPreflightError``, carrying the fix) when a run that will call
+    Ollama can't: the server is down or a model the run needs isn't pulled.
+
+    A cheap /api/tags read — never a generation call, so nothing loads onto the GPU. Checks
+    only what the run will actually call locally: the primary model when the provider is
+    local (hybrid still runs local first), and the adjudication model when adjudication
+    runs (full book only, as in ``run_attribution``) on the local provider. An anthropic-only
+    run makes no Ollama call and is skipped. ``ollama_preflight`` is resolved at call time
+    so tests can stub this one seam."""
+    provider_id = provider_id or cfg.attribution_provider
+    use_adjudicate = cfg.attribution_adjudicate if use_adjudicate is None else use_adjudicate
+    models: list[str] = []
+    if check_primary and provider_id == "local":
+        models.append(model or cfg.attribution_model)
+    if (
+        check_adjudicator
+        and use_adjudicate
+        and not chapters
+        and cfg.adjudication_provider == "local"
+    ):
+        models.append(_adjudication_model(cfg, "local"))
+    if models:
+        ollama_preflight(cfg.ollama_base_url, models)
 
 
 def load_report(book_dir: Path) -> tuple[AttributionReport, list[str]]:
@@ -189,6 +225,28 @@ def run_attribution(
     prompt_version = prompt_version or default_prompt_version
     use_hybrid = cfg.attribution_hybrid if use_hybrid is None else use_hybrid
     use_adjudicate = cfg.attribution_adjudicate if use_adjudicate is None else use_adjudicate
+
+    # Fail fast with the fix (start Ollama / pull the model) before the GPU hold and before
+    # any chunk work — not minutes in, out of sight in a background job. Only for what this
+    # run BUILDS from cfg: an injected provider/resolver makes no Ollama call of ours.
+    # A RE-run (attribution.db already exists) may be served entirely from the chunk cache
+    # with Ollama stopped — e.g. a re-convert after recasting — so there the check only
+    # warns; a real cache miss still fails loudly through the provider's own Ollama error.
+    # The POST /attribute route keeps the check strict (that is where jobs fail unseen).
+    try:
+        preflight_attribution(
+            cfg,
+            provider_id=provider_id,
+            model=model,
+            use_adjudicate=use_adjudicate,
+            chapters=chapters,
+            check_primary=provider is None,
+            check_adjudicator=resolver is None,
+        )
+    except OllamaPreflightError as exc:
+        if not (book_dir / "attribution.db").is_file():
+            raise
+        say(f"warning: {exc}; continuing from the attribution cache (an uncached chunk fails)")
 
     provider = provider or build_provider(
         cfg, provider_id, model, prompt_version, emit_thoughts=emit_thoughts

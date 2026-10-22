@@ -10,6 +10,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # editable install, so two parents up is the repo root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# ElevenLabs API list price, USD per 1k characters, by model id (elevenlabs.io/pricing/api,
+# verified 2026-10). These feed the paid-call cost gate and the render_max_usd ceiling, so
+# an id NOT in this table is priced at the HIGHEST rate below — never under-estimate.
+# Users on plan pricing set ELEVENLABS_PRICE_PER_1K_CHARS, which wins over the table.
+ELEVENLABS_PRICE_PER_1K_CHARS: dict[str, float] = {
+    "eleven_multilingual_v2": 0.08,
+    "eleven_v3": 0.08,
+    "eleven_turbo_v2_5": 0.04,
+    "eleven_turbo_v2": 0.04,
+    "eleven_flash_v2_5": 0.04,
+    "eleven_flash_v2": 0.04,
+}
+
+
+def elevenlabs_price_per_1k_chars(model_id: str, override: float | None = None) -> float:
+    """Effective USD/1k chars for ``model_id``: the explicit override when set, else the
+    model's list rate, else (unknown model) the highest known rate. Always > 0 — paid-ness
+    everywhere derives from cost_estimate(text) > 0."""
+    if override is not None:
+        if override <= 0:
+            raise ValueError(f"elevenlabs price override must be > 0, got {override!r}")
+        return override
+    return ELEVENLABS_PRICE_PER_1K_CHARS.get(model_id, max(ELEVENLABS_PRICE_PER_1K_CHARS.values()))
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -171,9 +195,11 @@ class Settings(BaseSettings):
     # Cloud TTS (M5, ElevenLabs). Paid; renders go through the explicit cost gate. The key's
     # absence must not raise until the provider is actually used.
     elevenlabs_model_id: str = "eleven_multilingual_v2"
-    # Conservative USD/1k chars for the cost gate. MUST be > 0: paid-ness everywhere derives
-    # from cost_estimate(text) > 0, so a zero price would silently disable the whole gate.
-    elevenlabs_price_per_1k_chars: float = Field(0.30, gt=0)
+    # OPTIONAL USD/1k chars override for plan pricing; None = the per-model list rate from
+    # ELEVENLABS_PRICE_PER_1K_CHARS (unknown model -> highest rate). When set it MUST be > 0:
+    # paid-ness everywhere derives from cost_estimate(text) > 0, so a zero price would
+    # silently disable the whole gate.
+    elevenlabs_price_per_1k_chars: float | None = Field(None, gt=0)
     elevenlabs_max_voice_slots: int = 10  # tier-limited; evict LRU seiyuu voices past this
 
     # Cost gate (M6a). Hard ceiling on ONE render's paid total — no flag or token can
@@ -199,6 +225,13 @@ class Settings(BaseSettings):
     # the safety timeout the parked render waits for the borrower's done signal. ~30s
     # absorbs a Chatterbox segment + its CPU whisper validation without spurious refusals.
     borrow_grant_timeout_s: float = Field(30.0, gt=0)
+
+    @property
+    def elevenlabs_effective_price_per_1k_chars(self) -> float:
+        """The rate cost estimates actually use: override, else the model's list rate."""
+        return elevenlabs_price_per_1k_chars(
+            self.elevenlabs_model_id, self.elevenlabs_price_per_1k_chars
+        )
 
 
 @lru_cache

@@ -529,6 +529,11 @@ export interface SystemStatusOut {
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
 }
 
+/** Slim view of GET /api/settings (redacted config) — only what screens consume. */
+export interface SettingsOut {
+  kokoro_default_voice: string; // the preset a full cast reset narrates with
+}
+
 /** "ch013_b0042" -> 13; null when unparsable. */
 export function chapterOfBlock(blockId: string | null): number | null {
   const m = blockId?.match(/^ch(\d+)_/);

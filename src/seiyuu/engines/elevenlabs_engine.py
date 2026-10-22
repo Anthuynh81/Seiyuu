@@ -33,23 +33,24 @@ class ElevenLabsEngine(TTSEngine):
         *,
         api_key: str | None = None,
         model_id: str | None = None,
-        price_per_1k_chars: float | None = None,
+        price_per_1k_chars: float | None = None,  # override; None = per-model list rate
         client: Any | None = None,  # injectable for tests
     ) -> None:
-        if api_key is None or model_id is None or price_per_1k_chars is None:
+        from seiyuu.settings import elevenlabs_price_per_1k_chars
+
+        if api_key is None or model_id is None:
             from seiyuu.settings import get_settings
 
             cfg = get_settings()
             api_key = api_key or cfg.elevenlabs_api_key
             model_id = model_id or cfg.elevenlabs_model_id
-            price_per_1k_chars = (
-                cfg.elevenlabs_price_per_1k_chars
-                if price_per_1k_chars is None
-                else price_per_1k_chars
-            )
+            if price_per_1k_chars is None:
+                price_per_1k_chars = cfg.elevenlabs_price_per_1k_chars
         self._api_key = api_key
         self.model_id = model_id
-        self.price_per_1k_chars = price_per_1k_chars
+        # Resolved once: an explicit override wins, else the model's list rate, else (an
+        # unknown model id) the HIGHEST known rate — the gate must never under-estimate.
+        self.price_per_1k_chars = elevenlabs_price_per_1k_chars(model_id, price_per_1k_chars)
         self._client = client
 
     @property

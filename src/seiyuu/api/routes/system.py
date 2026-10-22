@@ -20,6 +20,11 @@ from seiyuu.api.schemas import (
     SettingsView,
     SystemStatus,
 )
+from seiyuu.attribute.providers.local import (
+    OllamaPreflightError,
+    canonical_model_name,
+    list_ollama_models,
+)
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.render.gate import FULL_RENDER_CONFIRM_BLOCKS
 from seiyuu.repository import JobState
@@ -41,6 +46,16 @@ def _probe_ollama(base_url: str) -> bool:
         return False
 
 
+def _probe_model_installed(base_url: str, model: str) -> bool | None:
+    """Is the local attribution model pulled? One /api/tags read (no generation, nothing
+    loads onto the GPU); None when the tags list itself can't be read."""
+    try:
+        installed = list_ollama_models(base_url, timeout=1.0)
+    except OllamaPreflightError:
+        return None
+    return canonical_model_name(model) in installed
+
+
 @router.get("/health", response_model=HealthOut)
 def health() -> HealthOut:
     return HealthOut(status="ok", version=__version__)
@@ -57,6 +72,10 @@ def system_status(
     probe: bool = False,
 ) -> SystemStatus:
     running = store.list_jobs(states=[JobState.RUNNING], limit=1)
+    reachable = _probe_ollama(cfg.ollama_base_url) if probe else None
+    model_installed = (
+        _probe_model_installed(cfg.ollama_base_url, cfg.attribution_model) if reachable else None
+    )
     return SystemStatus(
         gpu_resident=get_gpu_manager().resident,
         active_job=JobOut.from_job(running[0]) if running else None,
@@ -66,7 +85,8 @@ def system_status(
         ffmpeg_available=shutil.which("ffmpeg") is not None,
         ollama=OllamaStatus(
             base_url=cfg.ollama_base_url,
-            reachable=_probe_ollama(cfg.ollama_base_url) if probe else None,
+            reachable=reachable,
+            model_installed=model_installed,
         ),
         keys=KeyStatus(
             anthropic_configured=bool(cfg.anthropic_api_key),
@@ -115,7 +135,7 @@ def settings_view(cfg: SettingsDep) -> SettingsView:
         render_max_usd=cfg.render_max_usd,
         cost_quote_ttl_seconds=cfg.cost_quote_ttl_seconds,
         elevenlabs_model_id=cfg.elevenlabs_model_id,
-        elevenlabs_price_per_1k_chars=cfg.elevenlabs_price_per_1k_chars,
+        elevenlabs_price_per_1k_chars=cfg.elevenlabs_effective_price_per_1k_chars,
         elevenlabs_max_voice_slots=cfg.elevenlabs_max_voice_slots,
         anthropic_key_configured=bool(cfg.anthropic_api_key),
         elevenlabs_key_configured=bool(cfg.elevenlabs_api_key),

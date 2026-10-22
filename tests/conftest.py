@@ -28,6 +28,17 @@ def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     get_gpu_manager.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _ollama_preflight_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the default suite offline: run_attribution and POST /attribute pre-flight
+    Ollama (GET /api/tags) before any work. Stub that one seam to pass so tests that
+    attribute with a fake provider (or enqueue attribute jobs) never touch the network.
+    tests/test_step0_ollama_preflight.py restores the real function to exercise it."""
+    monkeypatch.setattr(
+        "seiyuu.services.attribution.ollama_preflight", lambda *_args, **_kwargs: None
+    )
+
+
 CH12_HTML = """<html><body>
 <h2>Chapter 1</h2>
 <p>First paragraph of chapter one.</p>

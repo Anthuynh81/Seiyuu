@@ -61,6 +61,95 @@ def _urllib_get(url: str, timeout: float) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+PREFLIGHT_TIMEOUT = 3.0  # seconds; /api/tags is a metadata read — never loads a model
+_DEFAULT_REGISTRY_PREFIX = "registry.ollama.ai/library/"
+
+
+class OllamaPreflightError(AttributionError):
+    """Ollama isn't ready for an attribution run; the message carries the fix.
+
+    ``code`` is a stable machine string (the API maps it onto the 503 envelope).
+    Subclasses AttributionError so every existing CLI/job catch already handles it.
+    """
+
+    code = "ollama_not_ready"
+
+    def __init__(self, message: str, *, base_url: str, model: str | None = None) -> None:
+        super().__init__(message)
+        self.base_url = base_url
+        self.model = model
+
+
+class OllamaUnreachableError(OllamaPreflightError):
+    code = "ollama_unreachable"
+
+
+class OllamaModelMissingError(OllamaPreflightError):
+    code = "model_missing"
+
+
+def ollama_root(base_url: str) -> str:
+    """The server root: the native API lives there, not under the /v1 OpenAI shim."""
+    return base_url.rstrip("/").removesuffix("/v1")
+
+
+def canonical_model_name(name: str) -> str:
+    """Ollama's own naming: a bare name means ``:latest`` and the default registry/library
+    prefix is implicit (``qwen2.5`` == ``qwen2.5:latest`` ==
+    ``registry.ollama.ai/library/qwen2.5:latest``). Only the LAST path component can carry
+    a tag — a ``host:port/`` registry prefix is not one."""
+    name = name.strip().lower().removeprefix(_DEFAULT_REGISTRY_PREFIX)
+    last = name.rsplit("/", 1)[-1]
+    return name if ":" in last else f"{name}:latest"
+
+
+def list_ollama_models(
+    base_url: str,
+    *,
+    timeout: float = PREFLIGHT_TIMEOUT,
+    get: Callable[..., dict] | None = None,
+) -> set[str]:
+    """Canonical names of the locally pulled models (GET /api/tags — no generation, so no
+    model is loaded onto the GPU). Raises :class:`OllamaUnreachableError` with the fix."""
+    get = get or _urllib_get
+    url = ollama_root(base_url) + "/api/tags"
+    try:
+        data = get(url, timeout)
+    except (OSError, ValueError) as exc:  # URLError/timeout are OSError; bad JSON ValueError
+        raise OllamaUnreachableError(
+            f"Ollama isn't reachable at {ollama_root(base_url)} - start it with "
+            f"'ollama serve' (or fix OLLAMA_BASE_URL) ({exc})",
+            base_url=base_url,
+        ) from exc
+    names: set[str] = set()
+    for entry in data.get("models") or []:
+        for key in ("name", "model"):
+            if entry.get(key):
+                names.add(canonical_model_name(entry[key]))
+    return names
+
+
+def ollama_preflight(
+    base_url: str,
+    models: list[str] | tuple[str, ...],
+    *,
+    timeout: float = PREFLIGHT_TIMEOUT,
+    get: Callable[..., dict] | None = None,
+) -> None:
+    """Fail fast before an attribution run: Ollama must answer and every model the run
+    will call must already be pulled. One cheap /api/tags read; raises a typed
+    :class:`OllamaPreflightError` whose message is the exact fix."""
+    installed = list_ollama_models(base_url, timeout=timeout, get=get)
+    for model in dict.fromkeys(models):
+        if canonical_model_name(model) not in installed:
+            raise OllamaModelMissingError(
+                f"model {model} isn't pulled in Ollama at {ollama_root(base_url)} - run "
+                f"'ollama pull {model}'",
+                base_url=base_url,
+                model=model,
+            )
+
+
 class OllamaProvider(AttributionLLM):
     provider_id = "local"
 
@@ -101,7 +190,7 @@ class OllamaProvider(AttributionLLM):
         self._post = post or _urllib_post
         self._get = get or _urllib_get
         # The native API lives at the server root, not under the /v1 OpenAI shim.
-        self._root = base_url.rstrip("/").removesuffix("/v1")
+        self._root = ollama_root(base_url)
         self.native_url = self._root + "/api/chat"
 
     def _complete_json(

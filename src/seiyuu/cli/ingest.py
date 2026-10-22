@@ -104,10 +104,22 @@ def _convert_multivoice(
     hybrid: bool | None,
     confirm_cost: bool = False,
 ):
-    """convert --multivoice: attribute -> auto-assign draft voices -> multi-voice render."""
+    """convert --multivoice: attribute -> auto-assign draft voices -> multi-voice render.
+
+    A re-convert keeps the saved assignment's manual picks, narrator and thought voice (only
+    auto picks are re-drafted); use `seiyuu assign --reset` to start the cast over."""
+    from pydantic import ValidationError
+
     from seiyuu.attribute import AttributionError
     from seiyuu.gpu import GpuBusyError
-    from seiyuu.services import ServiceError, draft_assignment, run_attribution, save_assignment
+    from seiyuu.services import (
+        ServiceError,
+        draft_assignment,
+        load_existing_assignment,
+        merge_existing_cast,
+        run_attribution,
+        save_assignment,
+    )
     from seiyuu.voices import VoiceLibrary
 
     click.echo("== attribute ==")
@@ -127,18 +139,35 @@ def _convert_multivoice(
 
     click.echo("== assign ==")
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    out_dir = output_dir or cfg.output_dir
+    try:
+        existing = load_existing_assignment(out_dir, report.book_id)
+    except (ValidationError, OSError, ValueError) as exc:  # ValueError: bad UTF-8
+        raise click.ClickException(
+            f"corrupt assignment for {report.book_id!r} ({exc}); "
+            f"fix it or run `seiyuu assign {report.book_id} --reset`"
+        ) from exc
+    kept = merge_existing_cast(
+        existing,
+        report,
+        lib,
+        narrator_voice_id=narrator_voice_id,
+        thought_voice_id=thought_voice_id,
+        overrides=None,
+    )
     try:
         assignment = draft_assignment(
             report,
             lib,
-            narrator_voice_id=narrator_voice_id,
-            thought_voice_id=thought_voice_id,
+            narrator_voice_id=kept.narrator_voice_id,
+            thought_voice_id=kept.thought_voice_id,
             accent=accent,
             default_preset=cfg.kokoro_default_voice,
+            overrides=kept.overrides,
         )
     except ServiceError as exc:
         raise click.ClickException(str(exc)) from exc
-    save_assignment(assignment, output_dir or cfg.output_dir)
+    save_assignment(assignment, out_dir)
     click.echo(
         f"narrator {assignment.narrator_voice_id}, {len(assignment.assignments)} character voices"
     )

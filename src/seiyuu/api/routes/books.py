@@ -44,6 +44,7 @@ from seiyuu.api.schemas import (
     SegmentBrowserOut,
     SegmentRow,
 )
+from seiyuu.attribute.providers.local import OllamaPreflightError
 from seiyuu.attribute.spans import is_unattributed_quote
 from seiyuu.duration import estimate_runtime_seconds, format_hms
 from seiyuu.ingest import IngestError, extract_cover_art, parse_book, write_normalized
@@ -51,6 +52,7 @@ from seiyuu.repository import Job, JobKind, JobState, get_book_status, list_book
 from seiyuu.repository.books import CHAPTERS_DIR, MANIFEST_NAME, NORMALIZED_NAME, delete_book_trees
 from seiyuu.repository.covers import COVER_MAGIC, COVER_TYPES, CoverTypeError, write_cover
 from seiyuu.services import ServiceError, characters_overview
+from seiyuu.services import attribution as attribution_service
 from seiyuu.services.characters import CharactersOverview
 from seiyuu.services.deletion import detect_paid_artifacts
 from seiyuu.voices import drop_book_everywhere
@@ -383,6 +385,22 @@ def attribute_book_job(
             raise ApiError(
                 503, "not_ready", "ANTHROPIC_API_KEY not set; required for anthropic adjudication"
             )
+
+    # Ollama pre-flight BEFORE enqueuing: a stopped server or an unpulled model is a 503
+    # with the fix now, not a background job failing later out of sight. Skipped when the
+    # run makes no Ollama call (anthropic provider, no local adjudication).
+    try:
+        attribution_service.preflight_attribution(
+            cfg,
+            provider_id=effective_provider,
+            model=params.model,
+            use_adjudicate=effective_adjudicate,
+            chapters=params.chapters,
+        )
+    except OllamaPreflightError as exc:
+        raise ApiError(
+            503, exc.code, str(exc), detail={"base_url": exc.base_url, "model": exc.model}
+        ) from exc
 
     job = enqueue_job(
         store=store,

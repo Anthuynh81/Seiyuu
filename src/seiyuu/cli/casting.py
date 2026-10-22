@@ -54,6 +54,13 @@ from seiyuu.cli.common import _resolve_book_dir, _voices_dir_option
     "(re-renders those voices' segments).",
 )
 @click.option(
+    "--reset",
+    is_flag=True,
+    default=False,
+    help="Rebuild from scratch, discarding the saved assignment's manual picks, narrator and "
+    "thought voice (default: keep them; --map/--narrator/--thought still win).",
+)
+@click.option(
     "--use-llm",
     is_flag=True,
     default=False,
@@ -93,6 +100,7 @@ def assign(
     maps: tuple[str, ...],
     strategy: str,
     recast: bool,
+    reset: bool,
     use_llm: bool,
     cast_provider: str | None,
     confirm_paid: bool,
@@ -100,10 +108,22 @@ def assign(
     output_dir: Path | None,
     voices_dir: Path | None,
 ) -> None:
-    """Build a character->voice assignment (auto-drafts locals; --map overrides, e.g. to cloud)."""
+    """Build a character->voice assignment (auto-drafts locals; --map overrides, e.g. to cloud).
+
+    Re-running keeps the saved assignment's manual picks, narrator and thought voice (only
+    auto picks are re-drafted); --reset rebuilds from scratch."""
+    from pydantic import ValidationError
+
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.gpu import GpuBusyError
-    from seiyuu.services import ServiceError, draft_assignment, load_report, save_assignment
+    from seiyuu.services import (
+        ServiceError,
+        draft_assignment,
+        load_existing_assignment,
+        load_report,
+        merge_existing_cast,
+        save_assignment,
+    )
     from seiyuu.services.llm_advisory import resolve_advisory, run_cast_hints
     from seiyuu.settings import get_settings
     from seiyuu.voices import AssignmentStage, VoiceLibrary
@@ -119,8 +139,29 @@ def assign(
             raise click.ClickException(f"bad --map {entry!r}; expected CHARACTER_ID=VOICE_ID")
         overrides[char_id] = vid
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    out_dir = output_dir or cfg.output_dir
     try:
         report, edit_warnings = load_report(book_dir)
+        existing = None
+        if not reset:
+            # report.book_id, NOT the CLI arg: `assign` accepts a book_id PREFIX, and the save
+            # below goes to the full id — loading by the prefix would find nothing and the
+            # save would silently overwrite every manual pick.
+            try:
+                existing = load_existing_assignment(out_dir, report.book_id)
+            except (ValidationError, OSError, ValueError) as exc:
+                raise click.ClickException(
+                    f"corrupt assignment for {report.book_id!r} ({exc}); "
+                    "fix it or re-run with --reset"
+                ) from exc
+        kept = merge_existing_cast(
+            existing,
+            report,
+            lib,
+            narrator_voice_id=narrator_voice_id,
+            thought_voice_id=thought_voice_id,
+            overrides=overrides,
+        )
         # F4: opt-in LLM caster. Only meaningful on the smart path; the paid gate mirrors
         # attribution — anthropic needs --confirm-paid + the key, local is free-but-explicit.
         trait_hints = None
@@ -136,19 +177,19 @@ def assign(
                     raise click.ClickException(
                         "ANTHROPIC_API_KEY not set; required for the anthropic LLM caster"
                     )
-            castable = [c for c in report.registry.characters if c.id not in overrides]
+            castable = [c for c in report.registry.characters if c.id not in kept.overrides]
             trait_hints = run_cast_hints(cfg, resolved, castable)
         elif use_llm:
             click.echo("--use-llm has no effect on the 'hash' strategy; ignoring.")
         assignment = draft_assignment(
             report,
             lib,
-            narrator_voice_id=narrator_voice_id,
-            thought_voice_id=thought_voice_id,
+            narrator_voice_id=kept.narrator_voice_id,
+            thought_voice_id=kept.thought_voice_id,
             accent=accent,
             default_preset=cfg.kokoro_default_voice,
             stage=AssignmentStage(stage),
-            overrides=overrides,
+            overrides=kept.overrides,
             strategy=strategy,
             recast=recast,
             trait_hints=trait_hints,
@@ -158,7 +199,7 @@ def assign(
     for warning in edit_warnings:
         click.echo(f"edit overlay: {warning}")
 
-    path = save_assignment(assignment, output_dir or cfg.output_dir)
+    path = save_assignment(assignment, out_dir)
 
     click.echo(f"stage: {assignment.stage.value}  narrator: {assignment.narrator_voice_id}")
     for char in report.registry.characters:
