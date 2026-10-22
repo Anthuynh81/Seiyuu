@@ -459,6 +459,30 @@ describe("RenderJobs", () => {
     });
   });
 
+  it("an Ollama pre-flight refusal reads in plain words with the fix; the raw message stays under Details", async () => {
+    const user = userEvent.setup();
+    const card = makeBook();
+    mockApi()
+      .get("/api/books", { books: [card] })
+      .get("/api/books/demo", makeDetail(card))
+      .get("/api/system", makeSystem())
+      .get("/api/books/demo/cost-estimate", makeEstimate({ mode: "single" }))
+      .error(
+        "POST",
+        "/api/books/demo/attribute",
+        503,
+        "ollama_unreachable",
+        "Ollama isn't reachable at http://localhost:11434 - start it with 'ollama serve' ([WinError 10061])",
+      );
+    renderWithProviders(<RenderJobs />);
+
+    await user.click(await screen.findByRole("button", { name: /attribute the whole book/ }));
+    expect(await screen.findByText(/couldn't reach Ollama/)).toBeInTheDocument();
+    expect(screen.getByText("ollama serve")).toBeInTheDocument();
+    expect(screen.getByText("Details")).toBeInTheDocument();
+    expect(screen.getByText(/WinError 10061/).closest("details")).not.toBeNull(); // never the primary text
+  });
+
   /* ---- active render mode (instant fallback) ------------------------------------------ */
 
   const modeGroup = async () => within(await screen.findByRole("group", { name: "active render mode" }));

@@ -499,6 +499,31 @@ details.fine summary:hover { color: var(--tungsten); }
 .loadline { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); padding: 18px 0; }
 .errline { font-family: var(--mono); font-size: 11.5px; color: var(--clip); padding: 12px 14px; border: 1px solid var(--hairline); background: var(--booth-0); }
 
+/* a failure in plain words (toast, card banner, job history): sentence, fix, details */
+.joberr-sum { margin: 0; color: var(--ink); font-size: 12.5px; }
+.joberr-fix { margin: 3px 0 0; color: var(--ink-2); font-size: 12px; }
+.joberr-det { margin-top: 6px; }
+.joberr-det .errblock { margin-top: 4px; }
+
+/* finish notices: a stack above the transport bar; the region itself never takes clicks */
+.toasts { position: fixed; right: 20px; bottom: 60px; z-index: 40; display: flex; flex-direction: column; gap: 8px; width: 380px; max-width: calc(100vw - 32px); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; gap: 10px; align-items: flex-start; background: var(--raised); border: 1px solid var(--hairline-strong); border-left: 2px solid var(--ok); padding: 10px 12px; }
+.toast.fail { border-left-color: var(--clip); }
+.toast.stop { border-left-color: var(--ink-3); }
+.toast .led { margin-top: 5px; }
+.toast-body { flex: 1; min-width: 0; }
+.toast-head { margin: 0; font-weight: 600; font-size: 13px; }
+.toast-acts { display: flex; gap: 10px; margin-top: 6px; }
+.toast-x { flex: none; font-family: var(--mono); font-size: 11px; color: var(--ink-3); border: 1px solid var(--hairline); padding: 1px 7px; }
+.toast-x:hover { color: var(--ink); border-color: var(--hairline-strong); }
+
+/* library card: the last run failed and nothing newer has replaced it */
+.failbanner { margin-top: 10px; border: 1px solid var(--hairline); border-left: 2px solid var(--clip); background: var(--booth-0); padding: 8px 10px; }
+.failbanner-top { display: flex; align-items: center; gap: 8px; }
+.failbanner-top b { font-size: 12.5px; font-weight: 600; }
+.failbanner-top .key { margin-left: auto; padding: 2px 10px; font-size: 11px; }
+.failbanner .joberr { margin-top: 4px; }
+
 /* ---- primitives (react-aria base, Talkback skin) ---- */
 
 /* select: trigger reads like a console control; the popover is ours, not the OS's */

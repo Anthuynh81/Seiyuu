@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { api, ApiError, postForm, postJson } from "./client";
@@ -70,6 +70,60 @@ export function useBooks() {
   return useQuery({
     queryKey: ["books"],
     queryFn: () => api<BooksOut>("/api/books"),
+  });
+}
+
+/** The last few jobs across every subject, finished or not: what the finish notices read.
+    No polling of its own — JobCompletionWatcher fetches it when a live job leaves the poll
+    (and any ["jobs"] invalidation after a mutation refreshes it too). */
+export const recentJobsQuery = {
+  queryKey: ["jobs", "recent"] as const,
+  queryFn: () => api<JobsOut>("/api/jobs?limit=10"),
+};
+
+export function useRecentJobs() {
+  return useQuery(recentJobsQuery);
+}
+
+/** Jobs this session SAW leave the live poll, each fetched by id (GET /api/jobs/{id}). The
+    recent window alone can miss them: the worker runs oldest-first, so a finishing job is
+    usually the oldest live one and can sit below the 10 newest when work is queued behind it.
+    Written only by JobCompletionWatcher (fetchDepartedJobs); the queryFn just re-reads the
+    cache, so a broad ["jobs"] invalidation can't blank it. */
+export const departedJobsKey = ["jobs", "departed"] as const;
+const DEPARTED_KEEP = 50;
+
+export function useDepartedJobs() {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: departedJobsKey,
+    queryFn: () => qc.getQueryData<JobOut[]>(departedJobsKey) ?? [],
+    staleTime: Infinity,
+  });
+}
+
+export async function fetchDepartedJobs(qc: QueryClient, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const rows = await Promise.all(
+    // a 404 means the job went with its deleted book: nothing to tell
+    ids.map((id) => api<JobOut>(`/api/jobs/${encodeURIComponent(id)}`).catch(() => null)),
+  );
+  const got = rows.filter((j): j is JobOut => j !== null && j.is_terminal);
+  if (got.length === 0) return;
+  const fresh = new Set(got.map((j) => j.job_id));
+  qc.setQueryData<JobOut[]>(departedJobsKey, (prev) =>
+    [...(prev ?? []).filter((j) => !fresh.has(j.job_id)), ...got].slice(-DEPARTED_KEEP),
+  );
+}
+
+/** A wider job window for the Library shelf: each card's latest unresolved failure. A
+    failure inside this window always has every NEWER job inside it too, so "superseded by a
+    newer job of the same kind" is decided on complete data. Refreshed by
+    JobCompletionWatcher when a job finishes; no polling. */
+export function useShelfJobs() {
+  return useQuery({
+    queryKey: ["jobs", "shelf"],
+    queryFn: () => api<JobsOut>("/api/jobs?limit=200"),
   });
 }
 

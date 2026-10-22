@@ -15,8 +15,10 @@ import {
   useValidation,
 } from "../api/hooks";
 import type { RenderMode } from "../api/types";
+import { JobErrorText } from "../components/JobErrorText";
 import { TalkSelect } from "../components/Select";
 import { StaleAudioBanner } from "../components/StaleAudio";
+import { explainJobError } from "../lib/jobErrors";
 import { classifyRenderFailure } from "../lib/money";
 import { scopeChapters, type Scope } from "../lib/scope";
 import { ActiveModeControl } from "./render/ActiveModeControl";
@@ -93,6 +95,8 @@ export function RenderJobs() {
       ...(confirmPaid ? { confirm_paid: true } : {}),
     });
   const attrErr = attribute.error instanceof ApiError ? attribute.error : null;
+  // the synchronous refusals (Ollama pre-flight 503s, render_active, ...) read in plain words
+  const attrExplained = attrErr ? explainJobError({ code: attrErr.code, message: attrErr.message }) : null;
   const render = useStartJob(bookId ?? "", "render");
   const assemble = useStartJob(bookId ?? "", "assemble");
   const master = useStartJob(bookId ?? "", "master");
@@ -385,7 +389,12 @@ export function RenderJobs() {
                     />
                   </p>
                 )}
-                {attrErr && (
+                {attrErr && attrExplained?.known && (
+                  <div className="mt-1.5">
+                    <JobErrorText explained={attrExplained} />
+                  </div>
+                )}
+                {attrErr && !attrExplained?.known && (
                   <p className="mono mt-1.5 text-[11px] text-clip">
                     {attrErr.message}
                     {attrErr.code === "payment_confirmation_required" && (

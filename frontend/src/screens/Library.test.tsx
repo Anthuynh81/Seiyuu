@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { makeBook, makeEngine, makeJob, makeSystemProbe } from "../test/fixtures";
 import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
@@ -142,6 +142,120 @@ describe("Library", () => {
     expect(await screen.findByText(/new-book · 12 chapters, 340 blocks/)).toBeInTheDocument();
     const form = server.formBodyOf("POST", "/api/books");
     expect((form.get("file") as File).name).toBe("novel.epub");
+  });
+
+  describe("job line and failed-run banner", () => {
+    const failedRender = makeJob({
+      job_id: "f-123",
+      book_id: "b1",
+      kind: "render",
+      state: "failed",
+      is_terminal: true,
+      error: "GpuBusyError: cannot load kokoro: another seiyuu process holds the GPU (lock: data/gpu.lock).",
+      created_at: "2026-10-22T10:00:00Z",
+    });
+
+    it("the live job line is plain words, never the raw job id", async () => {
+      mockApi().get("/api/books", {
+        books: [makeBook({ book_id: "b1", active_job: { job_id: "job-abc123", kind: "attribute", state: "queued" } })],
+      });
+      renderWithProviders(<Library />);
+      expect(await screen.findByText("Finding the speakers — waiting its turn")).toBeInTheDocument();
+      expect(screen.queryByText(/job-abc123/)).not.toBeInTheDocument();
+    });
+
+    it("shows the latest failure with the plain fix; Dismiss hides it and is remembered by job id", async () => {
+      const user = userEvent.setup();
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Failing Book" })] })
+        .get("/api/jobs?limit=200", { jobs: [failedRender] });
+      const first = renderWithProviders(<Library />);
+
+      const banner = await screen.findByRole("group", { name: "The last recording failed" });
+      expect(within(banner).getByText(/Another Seiyuu program .* is using the graphics card/)).toBeInTheDocument();
+      expect(within(banner).getByText("Details")).toBeInTheDocument(); // raw message disclosed, not primary
+      expect(screen.queryByText(/f-123/)).not.toBeInTheDocument();
+
+      await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("group", { name: "The last recording failed" })).not.toBeInTheDocument();
+      expect(localStorage.getItem("seiyuu.dismissedFailure.f-123")).toBe("1");
+      // keyboard users keep their place: focus moves to the card's first action, not <body>
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement?.closest(".bookcard .acts")).not.toBeNull();
+
+      // a fresh mount (page reload) keeps it dismissed
+      first.unmount();
+      renderWithProviders(<Library />);
+      expect(await screen.findByText("Failing Book")).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: "The last recording failed" })).not.toBeInTheDocument();
+    });
+
+    it("a newer job of the same kind supersedes the failure; a different kind does not", async () => {
+      const retry = makeJob({ job_id: "r2", book_id: "b1", kind: "render", state: "succeeded", is_terminal: true, created_at: "2026-10-22T11:00:00Z" });
+      const server = mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Retried Book" })] })
+        .get("/api/jobs?limit=200", { jobs: [retry, failedRender] });
+      const { queryClient } = renderWithProviders(<Library />);
+      expect(await screen.findByText("Retried Book")).toBeInTheDocument();
+      await waitFor(() => expect(queryClient.getQueryData(["jobs", "shelf"])).toBeDefined());
+      expect(screen.queryByRole("group", { name: "The last recording failed" })).not.toBeInTheDocument();
+
+      // only a later ATTRIBUTE run: the render failure still stands
+      const attr = makeJob({ job_id: "a3", book_id: "b1", kind: "attribute", state: "succeeded", is_terminal: true, created_at: "2026-10-22T11:00:00Z" });
+      server.get("/api/jobs?limit=200", { jobs: [attr, failedRender] });
+      await queryClient.refetchQueries({ queryKey: ["jobs", "shelf"] });
+      expect(await screen.findByRole("group", { name: "The last recording failed" })).toBeInTheDocument();
+    });
+
+    it("a retry running right now hides the banner before it reaches the shelf window", async () => {
+      mockApi()
+        .get("/api/books", {
+          books: [
+            makeBook({
+              book_id: "b1",
+              title: "Retrying Book",
+              active_job: { job_id: "r9", kind: "render", state: "running" },
+            }),
+          ],
+        })
+        .get("/api/jobs?limit=200", { jobs: [failedRender] }); // only the old failure
+      const { queryClient } = renderWithProviders(<Library />);
+      expect(await screen.findByText("Retrying Book")).toBeInTheDocument();
+      await waitFor(() => expect(queryClient.getQueryData(["jobs", "shelf"])).toBeDefined());
+      expect(screen.queryByRole("group", { name: "The last recording failed" })).not.toBeInTheDocument();
+    });
+
+    it("dismissal survives blocked storage for the current page", async () => {
+      const user = userEvent.setup();
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b1", title: "Private Window" })] })
+        .get("/api/jobs?limit=200", { jobs: [failedRender] });
+      // only the banner's keys throw: other per-viewer conveniences are not under test here
+      const realGet = Storage.prototype.getItem;
+      const realSet = Storage.prototype.setItem;
+      const blocked = (key: string) => key.startsWith("seiyuu.dismissedFailure.");
+      const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key: string) {
+        if (blocked(key)) throw new Error("SecurityError");
+        return realGet.call(this, key);
+      });
+      const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+        this: Storage,
+        key: string,
+        value: string,
+      ) {
+        if (blocked(key)) throw new Error("SecurityError");
+        realSet.call(this, key, value);
+      });
+      try {
+        renderWithProviders(<Library />);
+        const banner = await screen.findByRole("group", { name: "The last recording failed" });
+        await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
+        expect(screen.queryByRole("group", { name: "The last recording failed" })).not.toBeInTheDocument();
+      } finally {
+        get.mockRestore();
+        set.mockRestore();
+      }
+    });
   });
 
   describe("empty state", () => {

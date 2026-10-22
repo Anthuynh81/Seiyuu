@@ -3,11 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ApiError, isBackendDown } from "../api/client";
-import { useBooks, useDeleteBook, useIngest } from "../api/hooks";
+import { useBooks, useDeleteBook, useIngest, useShelfJobs } from "../api/hooks";
 import type { BookCard as BookCardT, JobOut, PaidArtifacts } from "../api/types";
 import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
+import { JobErrorText } from "../components/JobErrorText";
 import { SetupChecklist } from "../components/SetupChecklist";
+import { failedStepLine, liveJobLine } from "../lib/jobCopy";
+import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
 
 function SignalPath({ book }: { book: BookCardT }) {
   const activeStage = book.active_job ? KIND_STAGE[book.active_job.kind] : undefined;
@@ -29,12 +32,62 @@ function SignalPath({ book }: { book: BookCardT }) {
 
 function JobLine({ book }: { book: BookCardT }) {
   const job = book.active_job;
-  if (!job) return <div className="jobline text-ink-3">no job active</div>;
+  if (!job) return <div className="jobline text-ink-3">Nothing running</div>;
   return (
     <div className="jobline">
       <i className={`led ${job.state === "running" ? "run" : "q"}`} />
-      {job.kind} {job.job_id} — {job.state}
-      {job.state === "queued" && " · waiting for the worker"}
+      {liveJobLine(job)}
+    </div>
+  );
+}
+
+/** Per-viewer convenience only: which failure banners this browser has dismissed. The
+    failure itself is server truth (the job row); storage that throws or is empty just means
+    the banner shows again. */
+const DISMISS_PREFIX = "seiyuu.dismissedFailure.";
+
+function readDismissed(jobId: string): boolean {
+  try {
+    return localStorage.getItem(DISMISS_PREFIX + jobId) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDismissed(jobId: string): void {
+  try {
+    localStorage.setItem(DISMISS_PREFIX + jobId, "1");
+  } catch {
+    // private window / blocked storage: the dismissal lasts for this page only
+  }
+}
+
+/** The book's latest failed run, in plain words, until it is dismissed or a newer job of the
+    same kind replaces it (the user retried). */
+function FailBanner({ failed }: { failed: JobOut }) {
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  if (dismissed.has(failed.job_id) || readDismissed(failed.job_id)) return null;
+  const headline = failedStepLine(failed.kind);
+  return (
+    <div className="failbanner" role="group" aria-label={headline}>
+      <div className="failbanner-top">
+        <i className="led err" aria-hidden />
+        <b>{headline}</b>
+        <button
+          className="key quiet"
+          onClick={(e) => {
+            // the button is about to vanish: hand focus to the card's first action so a
+            // keyboard user keeps their place instead of landing on <body>
+            const next = e.currentTarget.closest(".bookcard")?.querySelector<HTMLElement>(".acts button");
+            writeDismissed(failed.job_id);
+            setDismissed((prev) => new Set(prev).add(failed.job_id));
+            next?.focus();
+          }}
+        >
+          Dismiss
+        </button>
+      </div>
+      <JobErrorText explained={explainJobError(failed.error)} />
     </div>
   );
 }
@@ -120,7 +173,7 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
   );
 }
 
-function Card({ book }: { book: BookCardT }) {
+function Card({ book, failed }: { book: BookCardT; failed: JobOut | null }) {
   const nav = useNavigate();
   const go = (screen: string) => nav(`/${screen}?book=${encodeURIComponent(book.book_id)}`);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -131,6 +184,7 @@ function Card({ book }: { book: BookCardT }) {
       <div className="by">{book.authors.join(", ") || "—"}</div>
       <SignalPath book={book} />
       <JobLine book={book} />
+      {failed && book.active_job?.kind !== failed.kind && <FailBanner failed={failed} />}
       <div className="acts">
         {book.rendered && (
           <button className="key" onClick={() => go("listen")}>
@@ -207,6 +261,7 @@ function UploadSlot() {
 export function Library() {
   const qc = useQueryClient();
   const books = useBooks();
+  const shelfJobs = useShelfJobs();
   const empty = books.data?.books.length === 0;
   // the backend row of the checklist already says "not running" and how to start it
   const backendDown = isBackendDown(books.error);
@@ -242,7 +297,9 @@ export function Library() {
       )}
       <div className="grid2">
         <UploadSlot />
-        {books.data?.books.map((b) => <Card key={b.book_id} book={b} />)}
+        {books.data?.books.map((b) => (
+          <Card key={b.book_id} book={b} failed={unresolvedFailure(shelfJobs.data?.jobs, b.book_id)} />
+        ))}
       </div>
     </section>
   );
