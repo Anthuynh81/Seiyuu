@@ -319,6 +319,11 @@ class IndexTTS2Engine(TTSEngine):
         self._transport: WorkerTransport | None = None
         self._loaded = False  # has the resident transport been sent `load`?
         self._model_version: str | None = None
+        # Observability (read by the engine benchmark): how many times a synth attempt killed the
+        # worker after an OOM/death/timeout (each costs a full reboot + reload on the retry), and
+        # how many of those were flagged OOM. Monotonic over the instance's life.
+        self.worker_restarts = 0
+        self.worker_ooms = 0
 
     # -- catalog facts ------------------------------------------------------------------------
 
@@ -462,6 +467,8 @@ class IndexTTS2Engine(TTSEngine):
                 return samples, int(sample_rate)
             except WorkerError as exc:
                 last_error = exc
+                self.worker_restarts += 1
+                self.worker_ooms += int(exc.oom)
                 self._close_transport()  # kill the (possibly OOM/hung) worker before retrying
             finally:
                 Path(out_path).unlink(missing_ok=True)
