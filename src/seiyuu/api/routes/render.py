@@ -48,6 +48,7 @@ from seiyuu.render.gate import (
     verify_quote,
 )
 from seiyuu.render.models import RenderManifest
+from seiyuu.render.preflight import is_cloud_preset
 from seiyuu.repository import BookStatus, JobKind, JobState
 from seiyuu.repository.books import MANIFEST_NAME
 from seiyuu.services import ServiceError
@@ -60,7 +61,7 @@ from seiyuu.services.render_mode import (
 from seiyuu.settings import Settings
 from seiyuu.validate import SegmentWords
 from seiyuu.validate import ValidationError as ValidationErrorType
-from seiyuu.voices import VoiceLibraryError
+from seiyuu.voices import VoiceLibraryError, VoiceMeta
 
 router = APIRouter(tags=["render"])
 
@@ -130,7 +131,7 @@ def _preflight_renderability(cfg: Settings, mode: str, single, est_ctx, book_id:
 
     library = VoiceLibrary(cfg.voices_dir)
 
-    def check_consent(voice_id: str) -> str:
+    def check_consent(voice_id: str) -> VoiceMeta:
         try:
             meta = library.load(voice_id)
         except VoiceLibraryError as exc:
@@ -139,29 +140,30 @@ def _preflight_renderability(cfg: Settings, mode: str, single, est_ctx, book_id:
             library.verify_consent(meta)
         except VoiceLibraryError as exc:
             raise ApiError(409, "consent_invalid", str(exc)) from exc
-        return meta.engine
+        return meta
 
     if mode == "single":
         paid_engine = single.engine_id == "elevenlabs"
         if library.meta_path(single.voice_id).is_file():
-            engine_of_meta = check_consent(single.voice_id)
-            if engine_of_meta == "elevenlabs":
-                # render_book passes the voice id VERBATIM to the engine — it never
-                # resolves a library meta to its cloud handle (unlike multivoice and
-                # audition). Refusing here beats burning the token on a doomed job.
+            meta = check_consent(single.voice_id)
+            if meta.engine == "elevenlabs" and not is_cloud_preset(meta):
+                # render_book resolves a preset to its real cloud id (preset_id), but a
+                # cloned or blend voice reaches the engine under its library voice_id,
+                # which ElevenLabs doesn't know. Refusing here beats burning the token
+                # on a doomed job.
                 raise ApiError(
                     422,
                     "invalid",
-                    f"voice {single.voice_id!r} is an ElevenLabs library voice; the "
-                    "single-voice path takes a raw cloud voice id — use multivoice "
-                    "for library-managed ElevenLabs voices",
+                    f"voice {single.voice_id!r} is a {meta.kind.value} ElevenLabs library "
+                    "voice; the single-voice path only addresses cloud presets — use "
+                    "multivoice for cloned ElevenLabs voices",
                 )
     else:
         assignment = load_assignment(cfg.output_dir, book_id)
         voice_ids = {assignment.narrator_voice_id, *assignment.assignments.values()}
         if assignment.thought_voice_id:
             voice_ids.add(assignment.thought_voice_id)
-        engines = {check_consent(voice_id) for voice_id in sorted(voice_ids)}
+        engines = {check_consent(voice_id).engine for voice_id in sorted(voice_ids)}
         paid_engine = "elevenlabs" in engines
     if paid_engine and est_ctx.est.total_usd > 0 and not cfg.elevenlabs_api_key:
         raise ApiError(

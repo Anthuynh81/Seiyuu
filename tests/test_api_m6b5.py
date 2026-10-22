@@ -596,6 +596,45 @@ def test_consent_preflight_refuses_before_token(client, monkeypatch) -> None:
     assert _error(resp)["code"] == "consent_invalid"
 
 
+def _write_elevenlabs_voice(cfg, voice_id: str, **fields) -> None:
+    import json as jsonlib
+
+    voice_dir = cfg.voices_dir / voice_id
+    voice_dir.mkdir(parents=True)
+    meta = {"voice_id": voice_id, "name": voice_id, "engine": "elevenlabs", **fields}
+    (voice_dir / "meta.json").write_text(jsonlib.dumps(meta), encoding="utf-8")
+
+
+def test_single_elevenlabs_preset_library_voice_is_quotable(client, monkeypatch) -> None:
+    # A `voice add-cloud` preset reaches the engine under its real cloud id (preset_id), so
+    # the single-voice pre-flight must not refuse it the way it refuses a cloned voice.
+    _patch_engines(monkeypatch, PaidFakeEngine())
+    cfg = client.app.state.settings
+    monkeypatch.setattr(cfg, "elevenlabs_api_key", "test-key")
+    _write_elevenlabs_voice(cfg, "el_preset", kind="preset", preset_id="EXAVITQu")
+    body = {"mode": "single", "single": {"engine": "elevenlabs", "voice": "el_preset"}}
+    quote = client.post(f"/api/books/{client.book_id}/quotes", json=body)
+    assert quote.status_code == 201, quote.text
+
+
+def test_single_elevenlabs_cloned_library_voice_refused(client, monkeypatch) -> None:
+    _patch_engines(monkeypatch, PaidFakeEngine())
+    cfg = client.app.state.settings
+    monkeypatch.setattr(cfg, "elevenlabs_api_key", "test-key")
+    _write_elevenlabs_voice(
+        cfg,
+        "el_clone",
+        kind="cloned",
+        reference_audio="reference.wav",
+        consent_attested=False,
+    )
+    monkeypatch.setattr("seiyuu.voices.VoiceLibrary.verify_consent", lambda self, meta: None)
+    body = {"mode": "single", "single": {"engine": "elevenlabs", "voice": "el_clone"}}
+    resp = client.post(f"/api/books/{client.book_id}/quotes", json=body)
+    assert resp.status_code == 422
+    assert "multivoice" in _error(resp)["message"]
+
+
 def test_segment_audio_addresses_multivoice_segments(client) -> None:
     # Finding: only a block's FIRST wav was reachable — a failing dialogue span behind a
     # passing narration span could never be auditioned.
