@@ -400,6 +400,9 @@ export interface AssignmentDraftResponse {
 
 export type CastStrategy = "hash" | "smart";
 
+/** Kokoro accent family for voices the caster makes: "a" American, "b" British English. */
+export type CastAccent = "a" | "b";
+
 export interface SuggestCastResponse {
   assignment: VoiceAssignment;
   would_create_voice_ids: string[];

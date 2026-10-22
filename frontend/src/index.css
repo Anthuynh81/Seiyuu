@@ -310,6 +310,17 @@ details.fine summary:hover { color: var(--tungsten); }
 .roster .mask { letter-spacing: 1px; color: var(--ink-3); }
 .roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
 .caststrip { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); }
+.caststrip details.fine { margin-top: 0; }
+/* suggest-a-cast preview: a raised block over the roster; status + trait chips are hairline
+   labels (square, mono), colored only by the signal tokens */
+.castprev { background: var(--console-hi); border-bottom: 1px solid var(--hairline-strong); }
+.roster .castprev tr:hover td { background: none; }
+.castst { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.04em; border: 1px solid var(--hairline); padding: 0 5px; white-space: nowrap; color: var(--ink-2); }
+.castst.new { color: var(--rolling); border-color: var(--rolling); }
+.castst.change { color: var(--caution); border-color: var(--caution-edge); }
+.castst.kept { color: var(--ok); border-color: var(--ok); }
+.castst.same { color: var(--ink-3); }
+.castchip { font-family: var(--mono); font-size: 9.5px; font-weight: 400; color: var(--ink-3); border: 1px solid var(--hairline); padding: 0 4px; }
 .vcell { min-width: 130px; }
 .vpick { width: 100%; max-width: 150px; background: var(--booth-0); border: 1px solid var(--hairline); color: var(--ink); font-family: var(--mono); font-size: 10.5px; padding: 3px 4px; }
 .vpick:hover { border-color: var(--tungsten-dim); }

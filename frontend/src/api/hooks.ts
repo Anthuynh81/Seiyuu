@@ -8,6 +8,7 @@ import type {
   AssignmentWrite,
   AttributionOut,
   AuditionOut,
+  CastAccent,
   CastStrategy,
   BookDeletedOut,
   BookDetail,
@@ -581,12 +582,24 @@ function invalidateCasting(qc: ReturnType<typeof useQueryClient>, bookId: string
   qc.invalidateQueries({ queryKey: ["render-summary", bookId] });
 }
 
-export interface DraftInput {
+/** The inputs a smart-cast PREVIEW is computed from — and that its apply must repeat, so the
+    applied cast is the one the user saw. Omitted narrator = the server keeps the saved one
+    (keep_existing) or uses the default; `accent` steers the voices the caster makes; `overrides`
+    are character_id -> voice_id picks from the preview table (they win over the caster and over
+    saved picks). `stage` is sent so a preview/apply never silently demotes a "final" cast. */
+export interface SuggestInput {
+  narrator_voice_id?: string;
+  accent?: CastAccent;
+  overrides?: Record<string, string>;
+  stage?: "draft" | "final";
+}
+
+export interface DraftInput extends SuggestInput {
   strategy?: CastStrategy; // "hash" (legacy) | "smart" (collision-free book cast)
   recast?: boolean; // smart only: overwrite existing auto voices (re-renders them)
-  // F5: character_id -> voice_id inherited from a series; wins over the auto-cast pick. The
-  // smart caster reserves these so a new character is never cast onto a series-pinned voice.
-  overrides?: Record<string, string>;
+  // (overrides, from SuggestInput) F5: character_id -> voice_id inherited from a series or picked
+  // in the preview; wins over the auto-cast pick. The smart caster reserves these so a new
+  // character is never cast onto a pinned voice.
   // F4 (v1.1): smart only. Run the opt-in Layer-2 LLM caster for per-character voice-trait
   // preferences that bias the tie-breaker. cast_book still enforces distinctness/determinism, so
   // this can only change WHICH distinct voice a character takes. A 402 means the resolved cast
@@ -614,8 +627,8 @@ export function useDraftAssignment(bookId: string) {
     calling useDraftAssignment with strategy:"smart". */
 export function useSuggestCast(bookId: string) {
   return useMutation({
-    mutationFn: () =>
-      postJson<SuggestCastResponse>(`/api/books/${bookId}/assignment/suggest`, { strategy: "smart" }),
+    mutationFn: (input: SuggestInput = {}) =>
+      postJson<SuggestCastResponse>(`/api/books/${bookId}/assignment/suggest`, { strategy: "smart", ...input }),
   });
 }
 

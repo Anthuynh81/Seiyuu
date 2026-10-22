@@ -6,6 +6,8 @@ import {
   castingFromServer,
   castingVoicesDiffer,
   autoNarratorId,
+  castRowStatus,
+  proposalMatchesSaved,
   isManualPick,
   manualPicks,
   resetLosses,
@@ -142,5 +144,60 @@ describe("manual picks (what keep_existing protects / a reset loses)", () => {
       narrator: "my_narrator",
       thought: "inner_voice",
     });
+  });
+});
+
+describe("suggest-a-cast row status", () => {
+  const saved: VoiceAssignment = {
+    ...server,
+    assignments: { mrs_bennet: "af_nicole", mr_bennet: "mr_bennet_auto" },
+  };
+  const ctx = { saved, wouldCreate: ["lydia_auto"], wouldRecast: ["mr_bennet_auto"], recast: false };
+
+  it("a voice that must be made is new", () => {
+    expect(castRowStatus("lydia", "lydia_auto", ctx)).toBe("new");
+  });
+
+  it("a saved hand pick that stays is 'keeps your pick'", () => {
+    expect(castRowStatus("mrs_bennet", "af_nicole", ctx)).toBe("keeps your pick");
+  });
+
+  it("an existing auto voice is unchanged — until re-cast rebuilds it", () => {
+    expect(castRowStatus("mr_bennet", "mr_bennet_auto", ctx)).toBe("unchanged");
+    expect(castRowStatus("mr_bennet", "mr_bennet_auto", { ...ctx, recast: true })).toBe("will change");
+  });
+
+  it("a different voice than the saved one will change", () => {
+    expect(castRowStatus("mr_bennet", "am_adam", ctx)).toBe("will change");
+  });
+
+  it("no saved voice in this book is 'new', even when its auto voice already exists elsewhere", () => {
+    // a series sibling / leftover kitty_auto: the server lists it in would_recast, not would_create
+    const reuse = { saved: null, wouldCreate: [], wouldRecast: ["kitty_auto"], recast: false };
+    expect(castRowStatus("kitty", "kitty_auto", reuse)).toBe("new");
+    expect(castRowStatus("kitty", "kitty_auto", { ...reuse, recast: true })).toBe("new");
+    // a newly found character in a book that already has a cast
+    expect(castRowStatus("kitty", "kitty_auto", { ...ctx, wouldRecast: ["kitty_auto"] })).toBe("new");
+  });
+
+  it("a hand pick with nothing saved for that character is 'your pick'", () => {
+    expect(castRowStatus("kitty", "am_adam", ctx)).toBe("your pick");
+    expect(castRowStatus("kitty", "am_adam", { ...ctx, saved: null })).toBe("your pick");
+  });
+});
+
+describe("proposalMatchesSaved", () => {
+  const opts = { wouldCreate: [] as string[], recast: false };
+
+  it("is true only when the proposal writes exactly the saved voices", () => {
+    expect(proposalMatchesSaved({ ...server, stage: "final" }, server, opts)).toBe(true);
+    const moved = { ...server, assignments: { ...server.assignments, mr_bennet: "am_adam" } };
+    expect(proposalMatchesSaved(moved, server, opts)).toBe(false);
+  });
+
+  it("never a no-op with nothing saved, a voice to make, or re-cast on", () => {
+    expect(proposalMatchesSaved(server, null, opts)).toBe(false);
+    expect(proposalMatchesSaved(server, server, { ...opts, wouldCreate: ["x_auto"] })).toBe(false);
+    expect(proposalMatchesSaved(server, server, { ...opts, recast: true })).toBe(false);
   });
 });

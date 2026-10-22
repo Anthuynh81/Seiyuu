@@ -11,6 +11,7 @@ import {
   useDeleteVoice,
   useEngines,
   useSaveLexicon,
+  useSuggestCast,
   useSegmentWords,
   useSwitchRenderMode,
   useSystemProbe,
@@ -222,5 +223,46 @@ describe("health hooks", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["books"] });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["book"] });
+  });
+});
+
+describe("useSuggestCast", () => {
+  it("POSTs strategy=smart plus the narrator, accent, overrides and stage — and writes no cache", async () => {
+    const server = mockApi();
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: {
+        schema_version: 1,
+        book_id: "b1",
+        stage: "final",
+        narrator_voice_id: "v-narr",
+        assignments: { alice: "af_nicole" },
+        thought_voice_id: null,
+        created_at: "2026-07-11T00:00:00Z",
+      },
+      would_create_voice_ids: [],
+      would_recast_voice_ids: [],
+      edit_warnings: [],
+    });
+    const { queryClient, Wrapper } = createWrapper();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useSuggestCast("b1"), { wrapper: Wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        narrator_voice_id: "v-narr",
+        accent: "b",
+        overrides: { alice: "af_nicole" },
+        stage: "final",
+      });
+    });
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toEqual({
+      strategy: "smart",
+      narrator_voice_id: "v-narr",
+      accent: "b",
+      overrides: { alice: "af_nicole" },
+      stage: "final",
+    });
+    // a preview writes nothing, so it refreshes nothing — least of all [books]/[book]
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });
