@@ -724,7 +724,7 @@ class SettingsView(BaseModel):
     render_max_usd: float
     cost_quote_ttl_seconds: int
     elevenlabs_model_id: str
-    elevenlabs_price_per_1k_chars: float
+    elevenlabs_price_per_1k_chars: float  # EFFECTIVE rate: override, else model list rate
     elevenlabs_max_voice_slots: int
     anthropic_key_configured: bool
     elevenlabs_key_configured: bool

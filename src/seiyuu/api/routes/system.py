@@ -115,7 +115,7 @@ def settings_view(cfg: SettingsDep) -> SettingsView:
         render_max_usd=cfg.render_max_usd,
         cost_quote_ttl_seconds=cfg.cost_quote_ttl_seconds,
         elevenlabs_model_id=cfg.elevenlabs_model_id,
-        elevenlabs_price_per_1k_chars=cfg.elevenlabs_price_per_1k_chars,
+        elevenlabs_price_per_1k_chars=cfg.elevenlabs_effective_price_per_1k_chars,
         elevenlabs_max_voice_slots=cfg.elevenlabs_max_voice_slots,
         anthropic_key_configured=bool(cfg.anthropic_api_key),
         elevenlabs_key_configured=bool(cfg.elevenlabs_api_key),
