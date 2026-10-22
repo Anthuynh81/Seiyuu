@@ -25,17 +25,27 @@ from seiyuu.voices import (
 )
 
 
-def _reserved_presets(library: VoiceLibrary, overrides: dict[str, str] | None) -> set[str]:
-    """Presets consumed by the override voices, to reserve out of the smart caster's
-    distinct-voice budget (``cast_book(taken=...)``) so an auto voice can never be cast onto
-    a preset an override already uses — otherwise two characters render identical audio.
+def _reserved_presets(
+    library: VoiceLibrary,
+    overrides: dict[str, str] | None,
+    *,
+    narrator_voice_id: str | None = None,
+    thought_voice_id: str | None = None,
+) -> set[str]:
+    """Presets consumed by the override voices (and the narrator / thought voice), to reserve
+    out of the smart caster's distinct-voice budget (``cast_book(taken=...)``) so an auto voice
+    can never be cast onto a preset an override already uses — otherwise two characters render
+    identical audio. The narrator/thought voice is reserved the same way: ``cast_book`` only
+    knows ``default_preset``, so a hand-picked (or kept) narrator on another preset would
+    otherwise be free for a character to share.
 
-    Only Kokoro preset/blend voices contribute presets; cloned/cloud overrides have none.
-    Missing override voices are skipped here (the override-validation loop reports them with a
-    clean ServiceError)."""
+    Only Kokoro preset/blend voices contribute presets; cloned/cloud voices have none.
+    Missing voices are skipped here (the validation paths report them with a clean
+    ServiceError, or the auto narrator is not created yet in a read-only preview)."""
     taken: set[str] = set()
-    for voice_id in (overrides or {}).values():
-        if not library.meta_path(voice_id).is_file():
+    voice_ids = [*(overrides or {}).values(), narrator_voice_id, thought_voice_id]
+    for voice_id in voice_ids:
+        if voice_id is None or not library.meta_path(voice_id).is_file():
             continue
         meta = library.load(voice_id)
         if meta.kind is VoiceKind.PRESET and meta.preset_id:
@@ -69,6 +79,63 @@ def _auto_voice_meta(
     )
 
 
+class KeptCast(NamedTuple):
+    """The draft arguments after folding a saved assignment in (:func:`merge_existing_cast`)."""
+
+    narrator_voice_id: str | None
+    thought_voice_id: str | None
+    overrides: dict[str, str]
+
+
+def merge_existing_cast(
+    existing: VoiceAssignment | None,
+    report: AttributionReport,
+    library: VoiceLibrary,
+    *,
+    narrator_voice_id: str | None,
+    thought_voice_id: str | None,
+    overrides: dict[str, str] | None,
+) -> KeptCast:
+    """Fold the SAVED assignment's manual picks into a draft request so re-drafting never
+    silently discards a hand-picked voice. Read-only (only checks voice existence).
+
+    - narrator / thought voice: the saved one is kept when the request leaves it ``None``.
+    - characters: every saved MANUAL pick (``voice != f"{char_id}_auto"``) is added to the
+      overrides. Request overrides always win over a saved pick.
+    - Auto picks are NOT folded: the caster recomputes them, so hash/smart/``recast``
+      semantics are unchanged for auto voices.
+    - A saved pick is dropped (no error) when its character is no longer in
+      ``report.registry`` (re-attribution / merge) or its voice was deleted from the library —
+      the caster then drafts that character like any other.
+
+    ``existing=None`` (no assignments.json yet) returns the request unchanged.
+    """
+    merged: dict[str, str] = dict(overrides or {})
+    if existing is None:
+        return KeptCast(narrator_voice_id, thought_voice_id, merged)
+
+    def _exists(voice_id: str) -> bool:
+        return library.meta_path(voice_id).is_file()
+
+    if narrator_voice_id is None and _exists(existing.narrator_voice_id):
+        narrator_voice_id = existing.narrator_voice_id
+    if (
+        thought_voice_id is None
+        and existing.thought_voice_id is not None
+        and _exists(existing.thought_voice_id)
+    ):
+        thought_voice_id = existing.thought_voice_id
+
+    known_ids = {c.id for c in report.registry.characters}
+    for char_id, voice_id in existing.assignments.items():
+        if char_id in merged or char_id not in known_ids:
+            continue
+        if voice_id == f"{char_id}_auto" or not _exists(voice_id):
+            continue
+        merged[char_id] = voice_id
+    return KeptCast(narrator_voice_id, thought_voice_id, merged)
+
+
 def draft_assignment(
     report: AttributionReport,
     library: VoiceLibrary,
@@ -83,11 +150,17 @@ def draft_assignment(
     recast: bool = False,
     trait_hints: dict[str, set[str]] | None = None,
 ) -> VoiceAssignment:
-    """Build a VoiceAssignment, creating any missing draft voices in ``library``.
+    """Build a VoiceAssignment FROM SCRATCH, creating any missing draft voices in ``library``.
 
     Narrator is an explicit existing voice or an auto preset for ``default_preset``;
     ``overrides`` maps character ids to explicit voice ids (e.g. cloud voices for the
     final stage) and is validated against the report and the library.
+
+    This function never reads the saved assignments.json: anything not passed in is reset
+    (narrator -> auto preset, thought voice -> None, every non-overridden character ->
+    ``{char_id}_auto``). Callers that must preserve the user's manual picks (the API draft/
+    suggest routes, ``seiyuu assign`` without ``--reset``, ``convert --multivoice``) fold the
+    saved assignment into the arguments first via :func:`merge_existing_cast`.
 
     ``strategy`` selects the auto-caster: ``"hash"`` (legacy) draws each character's blend
     from its own ``name|gender`` hash in isolation; ``"smart"`` runs the book-level
@@ -128,7 +201,12 @@ def draft_assignment(
         # The smart caster reserves overridden characters out of its distinct-voice budget
         # (F5 seam): overrides win below anyway, so casting them would waste voices.
         castable = [c for c in report.registry.characters if c.id not in override_ids]
-        taken = _reserved_presets(library, overrides)
+        taken = _reserved_presets(
+            library,
+            overrides,
+            narrator_voice_id=narrator_voice_id,
+            thought_voice_id=thought_voice_id,
+        )
         cast = cast_book(
             castable,
             narrator_preset=default_preset,
@@ -223,7 +301,9 @@ def suggest_assignment(
     known_ids = {c.id for c in report.registry.characters}
     override_ids = set(overrides or {})
     castable = [c for c in report.registry.characters if c.id not in override_ids]
-    taken = _reserved_presets(library, overrides)
+    taken = _reserved_presets(
+        library, overrides, narrator_voice_id=narrator_voice_id, thought_voice_id=thought_voice_id
+    )
     cast_book(  # validates pool budget
         castable, narrator_preset=default_preset, accent=accent, taken=taken
     )
@@ -260,6 +340,15 @@ def save_assignment(assignment: VoiceAssignment, output_dir: Path) -> Path:
     return atomic_write_text(
         assignment_path(output_dir, assignment.book_id), assignment.model_dump_json(indent=2)
     )
+
+
+def load_existing_assignment(output_dir: Path, book_id: str) -> VoiceAssignment | None:
+    """The saved assignment, or None when there is none yet (nothing to keep). A corrupt
+    file raises (pydantic ``ValidationError`` / ``OSError`` / ``ValueError`` for bad UTF-8) —
+    callers decide how to surface it, never silently treat it as absent."""
+    if not assignment_path(output_dir, book_id).is_file():
+        return None
+    return load_assignment(output_dir, book_id)
 
 
 def load_assignment(output_dir: Path, book_id: str) -> VoiceAssignment:

@@ -325,8 +325,11 @@ EditRequest = Annotated[
 
 
 class AssignmentDraftRequest(BaseModel):
-    narrator_voice_id: str | None = None  # None -> auto preset narrator
-    thought_voice_id: str | None = None  # None -> thoughts use the speaker's own voice
+    # None -> keep the saved narrator (keep_existing), else the auto preset narrator.
+    narrator_voice_id: str | None = None
+    # None -> keep the saved thought voice (keep_existing), else thoughts use the speaker's own
+    # voice. null does NOT clear a saved one: clear via PUT /assignment or keep_existing=false.
+    thought_voice_id: str | None = None
     accent: Literal["a", "b"] = "a"
     stage: Literal["draft", "final"] = "draft"
     overrides: dict[str, str] = Field(default_factory=dict)  # character_id -> voice_id
@@ -343,6 +346,11 @@ class AssignmentDraftRequest(BaseModel):
     cast_provider: str | None = None
     # Required literal true when the resolved cast provider is anthropic (PAID). Local is free.
     confirm_paid: bool = False
+    # Fold the saved assignments.json into this request first (merge_existing_cast): a None
+    # narrator/thought keeps the saved one, and saved MANUAL character picks stay unless
+    # ``overrides`` names that character (request wins). Auto picks are recomputed as before.
+    # false = the legacy full reset (everything not in this request goes back to auto).
+    keep_existing: bool = True
 
 
 class AssignmentDraftResponse(BaseModel):

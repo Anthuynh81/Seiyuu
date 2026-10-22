@@ -7,9 +7,12 @@ callers map it to their boundary (ClickException, HTTP status)."""
 
 from seiyuu.services.assignment import (
     CastPreview,
+    KeptCast,
     assignment_path,
     draft_assignment,
     load_assignment,
+    load_existing_assignment,
+    merge_existing_cast,
     save_assignment,
     suggest_assignment,
 )
@@ -48,6 +51,7 @@ __all__ = [
     "CharactersOverview",
     "EditLog",
     "EditOp",
+    "KeptCast",
     "MergeCharacters",
     "ReassignSegment",
     "RenameCharacter",
@@ -65,7 +69,9 @@ __all__ = [
     "draft_assignment",
     "load_assignment",
     "load_edits",
+    "load_existing_assignment",
     "load_report",
+    "merge_existing_cast",
     "pop_edit",
     "record_edit",
     "run_adjudication",

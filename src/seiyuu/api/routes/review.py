@@ -29,6 +29,7 @@ from seiyuu.api.schemas import (
 )
 from seiyuu.services import (
     EditLog,
+    KeptCast,
     MergeCharacters,
     ReassignSegment,
     RenameCharacter,
@@ -37,6 +38,8 @@ from seiyuu.services import (
     draft_assignment,
     load_assignment,
     load_edits,
+    load_existing_assignment,
+    merge_existing_cast,
     record_edit,
     save_assignment,
     suggest_assignment,
@@ -50,7 +53,7 @@ router = APIRouter(tags=["review"])
 
 
 def _cast_trait_hints(
-    cfg: Settings, body: AssignmentDraftRequest, report
+    cfg: Settings, body: AssignmentDraftRequest, report, overrides: dict[str, str]
 ) -> dict[str, set[str]] | None:
     """F4: when ``use_llm`` is set on a SMART cast, run the opt-in Layer-2 LLM caster and return
     its per-character trait hints. Off (or on the hash path) it returns None so the deterministic
@@ -72,8 +75,9 @@ def _cast_trait_hints(
             raise ApiError(
                 503, "not_ready", "ANTHROPIC_API_KEY not set; required for the anthropic LLM caster"
             )
-    override_ids = set(body.overrides or {})
-    castable = [c for c in report.registry.characters if c.id not in override_ids]
+    # ``overrides`` is the request's AFTER folding kept picks in: those characters are not cast,
+    # so asking the (possibly paid) LLM about them would be wasted.
+    castable = [c for c in report.registry.characters if c.id not in overrides]
     try:
         return run_cast_hints(cfg, resolved, castable)
     except Exception as exc:  # a provider/transport failure must not 500 the whole draft
@@ -171,6 +175,32 @@ def read_assignment(book_id: str, cfg: SettingsDep) -> VoiceAssignment:
         raise ApiError(500, "corrupt_artifact", f"corrupt assignment under {path}: {exc}") from exc
 
 
+def _kept_cast(
+    cfg: Settings, book_id: str, body: AssignmentDraftRequest, report, library: VoiceLibrary
+) -> KeptCast:
+    """The request's narrator/thought/overrides with the saved assignment's manual picks
+    folded in (``keep_existing``, the default). No saved assignment = nothing to keep; a
+    corrupt one is a 500 corrupt_artifact (same mapping as GET /assignment), never silently
+    treated as absent — that would quietly discard the picks this flag exists to protect."""
+    existing = None
+    if body.keep_existing:
+        try:
+            existing = load_existing_assignment(cfg.output_dir, book_id)
+        except (ValidationError, OSError, ValueError) as exc:
+            path = cfg.output_dir / book_id
+            raise ApiError(
+                500, "corrupt_artifact", f"corrupt assignment under {path}: {exc}"
+            ) from exc
+    return merge_existing_cast(
+        existing,
+        report,
+        library,
+        narrator_voice_id=body.narrator_voice_id,
+        thought_voice_id=body.thought_voice_id,
+        overrides=body.overrides,
+    )
+
+
 def _existing_voice_ids(cfg: Settings) -> set[str]:
     if not cfg.voices_dir.is_dir():
         return set()
@@ -188,30 +218,41 @@ def draft(
     cfg: SettingsDep,
     store: StoreDep,
 ) -> AssignmentDraftResponse:
-    response.headers["Location"] = f"/api/books/{book_id}/assignment"
     """Generate-and-save the deterministic draft. Not a pure read: missing auto voices
     get meta.json files (deterministic, so re-POSTing is idempotent — same voice ids,
-    same SegmentKeys)."""
+    same SegmentKeys).
+
+    With ``keep_existing`` (the default) the saved assignment's manual picks, narrator and
+    thought voice survive a re-draft unless the request names a replacement (request wins);
+    only auto picks are recomputed. ``keep_existing=false`` is the full reset."""
+    response.headers["Location"] = f"/api/books/{book_id}/assignment"
     status = status_or_404(cfg, book_id)
     report, warnings = effective_report(cfg, book_id, status)
     guard_render_active(store, book_id)
+    library = VoiceLibrary(cfg.voices_dir)
 
     # F4: resolve the LLM trait hints (with the paid gate) BEFORE taking the voices mutex, so a
     # network-bound LLM call never holds the lock. Off/hash -> None (deterministic bias unchanged).
-    trait_hints = _cast_trait_hints(cfg, body, report)
+    # This pre-lock fold only decides which characters the LLM is asked about.
+    trait_hints = _cast_trait_hints(
+        cfg, body, report, _kept_cast(cfg, book_id, body, report, library).overrides
+    )
 
     with _voices_mutex(request):
+        # Re-fold under the lock: a kept voice deleted since the pre-lock fold is dropped here
+        # instead of surfacing as an "override voice not in the library" 422.
+        kept = _kept_cast(cfg, book_id, body, report, library)
         before = _existing_voice_ids(cfg)
         try:
             assignment = draft_assignment(
                 report,
-                VoiceLibrary(cfg.voices_dir),
+                library,
                 default_preset=cfg.kokoro_default_voice,
-                narrator_voice_id=body.narrator_voice_id,
-                thought_voice_id=body.thought_voice_id,
+                narrator_voice_id=kept.narrator_voice_id,
+                thought_voice_id=kept.thought_voice_id,
                 accent=body.accent,
                 stage=AssignmentStage(body.stage),
-                overrides=body.overrides,
+                overrides=kept.overrides,
                 strategy=body.strategy,
                 recast=body.recast,
                 trait_hints=trait_hints,
@@ -234,19 +275,24 @@ def suggest(
     """PREVIEW the smart cast without saving: the proposed distinct-voice assignment plus
     which auto voices it would create vs (with recast) overwrite. The user commits it via
     POST /assignment/draft with strategy=smart — this endpoint writes nothing, so it is safe
-    to call repeatedly and never touches the render cache."""
+    to call repeatedly and never touches the render cache.
+
+    Folds the saved assignment exactly like the draft route (``keep_existing``), so the
+    preview shows the manual picks an apply would keep."""
     status = status_or_404(cfg, book_id)
     report, warnings = effective_report(cfg, book_id, status)
+    library = VoiceLibrary(cfg.voices_dir)
+    kept = _kept_cast(cfg, book_id, body, report, library)
     try:
         preview = suggest_assignment(
             report,
-            VoiceLibrary(cfg.voices_dir),
+            library,
             default_preset=cfg.kokoro_default_voice,
-            narrator_voice_id=body.narrator_voice_id,
-            thought_voice_id=body.thought_voice_id,
+            narrator_voice_id=kept.narrator_voice_id,
+            thought_voice_id=kept.thought_voice_id,
             accent=body.accent,
             stage=AssignmentStage(body.stage),
-            overrides=body.overrides,
+            overrides=kept.overrides,
         )
     except (ServiceError, ValueError) as exc:
         raise ApiError(422, "invalid", str(exc)) from exc
