@@ -660,6 +660,8 @@ class CloudSlotsOut(BaseModel):
 class OllamaStatus(BaseModel):
     base_url: str
     reachable: bool | None  # None = not probed (the default poll stays network-free)
+    # probe-only: is settings.attribution_model pulled? None = not probed / unreachable
+    model_installed: bool | None = None
 
 
 class KeyStatus(BaseModel):
