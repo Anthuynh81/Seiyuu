@@ -21,6 +21,9 @@ dependencies = [
     "pydantic-settings>=2.0",
     "click>=8.4",
     "soundfile>=0.14",
+    # Resampling to the canonical 24 kHz (engines/audio.py); replaces torchaudio,
+    # which is in maintenance mode.
+    "soxr>=1.1.0",
     "num2words>=0.5.14",
     "elevenlabs>=2.55.0",
     "fastapi>=0.136.3",

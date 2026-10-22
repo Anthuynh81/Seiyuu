@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+import soxr
 import torch
-import torchaudio
 
 CANONICAL_SAMPLE_RATE = 24_000
 CANONICAL_SUBTYPE = "PCM_16"
@@ -55,8 +55,10 @@ def to_canonical(samples: np.ndarray | torch.Tensor, sample_rate: int) -> AudioF
     else:
         raise ValueError(f"expected 1-D or 2-D audio, got shape {tuple(tensor.shape)}")
 
-    mono = tensor.mean(dim=0)
+    mono = tensor.mean(dim=0).numpy().astype(np.float32)
     if sample_rate != CANONICAL_SAMPLE_RATE:
-        mono = torchaudio.functional.resample(mono, sample_rate, CANONICAL_SAMPLE_RATE)
-    mono = mono.clamp(-1.0, 1.0)
-    return AudioFile(samples=mono.numpy().astype(np.float32), sample_rate=CANONICAL_SAMPLE_RATE)
+        # soxr (libsoxr, high quality) rather than torchaudio, which is in
+        # maintenance mode; float32 in -> float32 out, 1-D shape preserved.
+        mono = soxr.resample(mono, sample_rate, CANONICAL_SAMPLE_RATE, quality="HQ")
+    mono = np.clip(mono, -1.0, 1.0).astype(np.float32)
+    return AudioFile(samples=mono, sample_rate=CANONICAL_SAMPLE_RATE)
