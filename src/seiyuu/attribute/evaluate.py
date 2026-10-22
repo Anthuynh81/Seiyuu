@@ -20,6 +20,7 @@ breakdown reports an ``unlabeled`` bucket for rows without one.
 
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError, computed_field, field_va
 from seiyuu.attribute.models import AttributionReport, Segment, SegmentType
 from seiyuu.attribute.spans import (
     DialogueConvention,
+    Span,
     detect_dialogue_convention,
     is_quoted_span,
     quoted_ordinals,
@@ -463,6 +465,46 @@ def splitter_convention(book: NormalizedBook) -> DialogueConvention:
     return DialogueConvention.DOUBLE
 
 
+@dataclass(frozen=True)
+class BookQuote:
+    """One quoted span of the book exactly as the pipeline splits it: the shared quote
+    enumeration behind every gold source (``export_gold``, the PDNC import), so their
+    ``block_id`` / ``quote_index`` line up with what ``score_report`` aligns."""
+
+    chapter_index: int  # 1-based
+    block_id: str
+    quote_index: int  # ordinal among the block's quoted spans (``quoted_ordinals``)
+    span: Span
+
+
+def check_chapters(book: NormalizedBook, chapters: tuple[int, ...]) -> None:
+    unknown = set(chapters) - set(range(1, len(book.chapters) + 1))
+    if unknown:
+        raise ValueError(
+            f"{book.book_meta.book_id}: no such chapter(s) {sorted(unknown)} "
+            f"(book has {len(book.chapters)})"
+        )
+
+
+def book_quotes(book: NormalizedBook, chapters: tuple[int, ...] = ()) -> list[BookQuote]:
+    """Every quoted span in book order (optionally only ``chapters``), split with the
+    full-book dialogue convention exactly as ``attribute_book`` splits it."""
+    check_chapters(book, chapters)
+    wanted = set(chapters)
+    convention = splitter_convention(book)
+    out: list[BookQuote] = []
+    for ci, chapter in enumerate(book.chapters, start=1):
+        if wanted and ci not in wanted:
+            continue
+        for block in chapter.blocks:
+            if block.type is not BlockType.PARAGRAPH:
+                continue
+            spans = thought_candidate_spans(block.id, block.text, [], convention)
+            for ordinal, span in quoted_ordinals(spans):
+                out.append(BookQuote(ci, block.id, ordinal, span))
+    return out
+
+
 class GoldExport(BaseModel):
     rows: list[GoldQuote]
     skipped_unattributed: int  # quotes left as narration in the effective report
@@ -480,50 +522,36 @@ def export_gold(
     (canonical + aliases). Quotes still unattributed are skipped — there is no gold speaker
     to record, and silently guessing one would poison the benchmark.
     """
-    wanted = set(chapters)
-    unknown = wanted - set(range(1, len(book.chapters) + 1))
-    if unknown:
-        raise ValueError(
-            f"{book.book_meta.book_id}: no such chapter(s) {sorted(unknown)} "
-            f"(book has {len(book.chapters)})"
-        )
-    convention = splitter_convention(book)
     by_block = _segments_by_block(report)
     rows: list[GoldQuote] = []
     skipped_unattributed = skipped_unaligned = 0
-    for ci, chapter in enumerate(book.chapters, start=1):
-        if wanted and ci not in wanted:
+    seen: Counter[tuple[str, str]] = Counter()
+    for q in book_quotes(book, chapters):
+        span = q.span
+        occurrence = seen[(q.block_id, span.text.strip())]
+        seen[(q.block_id, span.text.strip())] += 1
+        seg = align_quote(by_block.get(q.block_id, []), q.quote_index, span.text, occurrence)
+        if seg is None:
+            skipped_unaligned += 1
             continue
-        for block in chapter.blocks:
-            if block.type is not BlockType.PARAGRAPH:
-                continue
-            spans = thought_candidate_spans(block.id, block.text, [], convention)
-            seen: Counter[str] = Counter()
-            for ordinal, span in quoted_ordinals(spans):
-                occurrence = seen[span.text.strip()]
-                seen[span.text.strip()] += 1
-                seg = align_quote(by_block.get(block.id, []), ordinal, span.text, occurrence)
-                if seg is None:
-                    skipped_unaligned += 1
-                    continue
-                if seg.type is SegmentType.NARRATION or seg.speaker is None:
-                    skipped_unattributed += 1
-                    continue
-                char = report.registry.get(seg.speaker)
-                name = char.canonical_name if char else seg.speaker
-                rows.append(
-                    GoldQuote(
-                        book_id=book.book_meta.book_id,
-                        chapter_index=ci,
-                        block_id=block.id,
-                        quote_index=ordinal,
-                        char_start=span.start,
-                        char_end=span.start + len(span.text),
-                        text=span.text,
-                        speaker=name,
-                        aliases=list(char.aliases) if char else [],
-                    )
-                )
+        if seg.type is SegmentType.NARRATION or seg.speaker is None:
+            skipped_unattributed += 1
+            continue
+        char = report.registry.get(seg.speaker)
+        name = char.canonical_name if char else seg.speaker
+        rows.append(
+            GoldQuote(
+                book_id=book.book_meta.book_id,
+                chapter_index=q.chapter_index,
+                block_id=q.block_id,
+                quote_index=q.quote_index,
+                char_start=span.start,
+                char_end=span.start + len(span.text),
+                text=span.text,
+                speaker=name,
+                aliases=list(char.aliases) if char else [],
+            )
+        )
     return GoldExport(
         rows=rows,
         skipped_unattributed=skipped_unattributed,

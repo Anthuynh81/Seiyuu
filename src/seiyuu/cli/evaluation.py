@@ -101,6 +101,91 @@ def gold_export(
     click.echo(f"wrote: {output}")
 
 
+@eval_group.command("gold-import-pdnc")
+@click.argument("book_id")
+@click.option(
+    "--quotes",
+    "quotes_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="PDNC quotation_info.csv for this novel.",
+)
+@click.option(
+    "--characters",
+    "characters_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="PDNC character_info.csv for this novel.",
+)
+@click.option("--chapters", "chapters_spec", default=None, help="1-based chapters, e.g. 1-5,8.")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    required=True,
+    help="Gold JSONL to write.",
+)
+@_books_dir_option
+def gold_import_pdnc(
+    book_id: str,
+    quotes_path: Path,
+    characters_path: Path,
+    chapters_spec: str | None,
+    output: Path,
+    books_dir: Path | None,
+) -> None:
+    """Build gold quote labels from PDNC annotations (Project Dialogism Novel Corpus).
+
+    Each PDNC quotation is matched by TEXT to the book's own quoted spans (the pipeline's
+    split), in reading order; only confident matches become gold rows, labeled with the PDNC
+    speaker, its character_info aliases and the quote type. The coverage report goes to
+    stderr. PDNC is CC-BY 4.0: cite Vishnubhotla et al., LREC 2022.
+    """
+    from seiyuu.attribute.evaluate import describe_conflict, dump_gold
+    from seiyuu.attribute.pdnc import (
+        coverage_report,
+        import_pdnc,
+        load_pdnc_characters,
+        load_pdnc_quotes,
+    )
+    from seiyuu.ingest.models import NormalizedBook
+    from seiyuu.repository import atomic_write_text
+    from seiyuu.settings import get_settings
+
+    root = books_dir or get_settings().books_dir
+    book_dir = _resolve_book_dir(root, book_id, "normalized.json", "Run `seiyuu ingest` first.")
+    book = NormalizedBook.model_validate_json(
+        (book_dir / "normalized.json").read_text(encoding="utf-8")
+    )
+    try:
+        quotes = load_pdnc_quotes(quotes_path)
+        characters = load_pdnc_characters(characters_path)
+        result = import_pdnc(book, quotes, characters, parse_chapters(chapters_spec))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for line in coverage_report(result):
+        click.echo(line, err=True)
+    for conflict in result.conflicts:
+        click.echo(f"WARNING: {describe_conflict(conflict)}", err=True)
+    if result.conflicts:
+        click.echo(
+            "  (from PDNC character_info aliases, e.g. a bare surname; an exact name still "
+            "maps to one speaker, only the shared name itself scores as ambiguous)",
+            err=True,
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(output, dump_gold(result.rows))
+    speakers = len({r.speaker for r in result.rows})
+    scope = "chosen chapters" if result.chapters_chosen else "all chapters"
+    click.echo(
+        f"gold: {len(result.rows)} quotes, {speakers} speakers "
+        f"({result.spans_labeled}/{result.spans} spans labeled in {scope}; "
+        f"{result.pdnc_quotes_matched}/{result.pdnc_quotes} PDNC quotes matched in the "
+        "whole book)"
+    )
+    click.echo(f"wrote: {output}")
+
+
 @eval_group.command("run")
 @click.argument("book_id")
 @click.option(
