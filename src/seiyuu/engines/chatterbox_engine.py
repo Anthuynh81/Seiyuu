@@ -46,6 +46,10 @@ class ChatterboxEngine(TTSEngine):
         self._voices_dir = Path(voices_dir)
         self._model = model
         self._ref_hashes: dict[str, str] = {}  # voice_id -> reference.wav sha256 (per run)
+        # The conds identity currently ON the model (its path embeds voice_id, model
+        # version, and reference hash), so consecutive same-voice segments skip the
+        # per-segment disk read + host-to-device transfer. Reset on unload.
+        self._loaded_conds: Path | None = None
 
     @property
     def model_version(self) -> str:
@@ -105,13 +109,16 @@ class ChatterboxEngine(TTSEngine):
 
     def _ensure_conds(self, model: Any, voice_id: str, exaggeration: float) -> None:
         path = self.conds_path(voice_id)  # raises if reference.wav is missing
+        if path == self._loaded_conds:
+            return  # same voice as the previous segment: the model already carries it
         if path.is_file():
             model.conds = self._load_conds(path)  # cheap voice switch
-            return
-        reference = self._voices_dir / voice_id / "reference.wav"
-        model.prepare_conditionals(str(reference), exaggeration=exaggeration)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        model.conds.save(str(path))
+        else:
+            reference = self._voices_dir / voice_id / "reference.wav"
+            model.prepare_conditionals(str(reference), exaggeration=exaggeration)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            model.conds.save(str(path))
+        self._loaded_conds = path
 
     def prepare_voice(self, voice_id: str) -> None:  # type: ignore[override]
         """Precompute + cache conds for a voice (curation/audition warm-up)."""
@@ -135,6 +142,7 @@ class ChatterboxEngine(TTSEngine):
 
     def unload(self) -> None:
         self._model = None  # drops t3/s3gen/ve/tokenizer/watermarker refs
+        self._loaded_conds = None  # the next load gets a fresh model with no conds
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.synchronize()

@@ -3,7 +3,12 @@ against normalized text. Mandatory for LLM-style TTS (Chatterbox/Fish) before as
 """
 
 from seiyuu.validate.models import SegmentWords, ValidationResult, WordTiming
-from seiyuu.validate.validator import ValidationError, Validator, match_ratio
+from seiyuu.validate.validator import (
+    ValidationError,
+    Validator,
+    match_ratio,
+    resample_to_whisper,
+)
 
 __all__ = [
     "SegmentWords",
@@ -12,4 +17,5 @@ __all__ = [
     "Validator",
     "WordTiming",
     "match_ratio",
+    "resample_to_whisper",
 ]

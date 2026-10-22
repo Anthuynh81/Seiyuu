@@ -18,10 +18,47 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from seiyuu.validate.models import ValidationResult, WordTiming
 
 _WS = re.compile(r"\s+")
 _NON_WORD = re.compile(r"[^\w\s]")
+
+WHISPER_SAMPLE_RATE = 16_000
+
+# What Validator methods take as audio: a wav path, or an in-memory float32 waveform
+# ALREADY at WHISPER_SAMPLE_RATE (use resample_to_whisper) — faster-whisper ingests both.
+AudioSource = Path | str | np.ndarray
+
+
+def resample_to_whisper(samples: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Mono float32 audio at any rate → the 16 kHz float32 waveform faster-whisper ingests.
+
+    The render loop hands canonical 24 kHz segment audio straight to the validator with
+    this, skipping the tmp-wav write + decode round trip a path input would pay."""
+    if sample_rate == WHISPER_SAMPLE_RATE:
+        return np.asarray(samples, dtype=np.float32)
+    import torch  # lazy like faster_whisper below: keep `import seiyuu.validate` light
+    import torchaudio
+
+    tensor = torch.from_numpy(np.ascontiguousarray(samples, dtype=np.float32))
+    return (
+        torchaudio.functional.resample(tensor, sample_rate, WHISPER_SAMPLE_RATE)
+        .numpy()
+        .astype(np.float32)
+    )
+
+
+def _source(wav_path: AudioSource) -> Any:
+    # faster-whisper takes a filename or a waveform; never str() an array
+    return wav_path if isinstance(wav_path, np.ndarray) else str(wav_path)
+
+
+def _describe(wav_path: AudioSource) -> str:
+    if isinstance(wav_path, np.ndarray):
+        return f"<in-memory audio, {wav_path.size} samples>"
+    return str(wav_path)
 
 
 class ValidationError(Exception):
@@ -41,6 +78,11 @@ def match_ratio(expected: str, transcript: str) -> float:
 class Validator:
     """Transcribe-and-compare validator. Inject `model` (a faster-whisper-like object exposing
     `transcribe(path, ...) -> (segments, info)`) in tests; otherwise it lazy-loads WhisperModel."""
+
+    # Capability marker the render loop sniffs (like validate_with_words): this validator
+    # accepts an in-memory 16 kHz waveform instead of a wav path. Duck-typed test
+    # validators without it keep receiving paths.
+    accepts_arrays = True
 
     def __init__(
         self,
@@ -70,16 +112,20 @@ class Validator:
             )
         return self._model
 
-    def transcribe(self, wav_path: Path) -> str:
+    def transcribe(self, wav_path: AudioSource) -> str:
         try:
-            segments, _info = self._get_model().transcribe(str(wav_path), language=self.language)
+            segments, _info = self._get_model().transcribe(
+                _source(wav_path), language=self.language
+            )
             return " ".join(seg.text for seg in segments).strip()
         except ValidationError:
             raise
         except Exception as exc:  # surface a loud, contextual failure
-            raise ValidationError(f"whisper transcription failed for {wav_path}: {exc}") from exc
+            raise ValidationError(
+                f"whisper transcription failed for {_describe(wav_path)}: {exc}"
+            ) from exc
 
-    def validate(self, wav_path: Path, expected_text: str) -> ValidationResult:
+    def validate(self, wav_path: AudioSource, expected_text: str) -> ValidationResult:
         transcript = self.transcribe(wav_path)
         return self._score(expected_text, transcript)
 
@@ -92,7 +138,7 @@ class Validator:
             expected=expected_text,
         )
 
-    def transcribe_words(self, wav_path: Path) -> list[WordTiming]:
+    def transcribe_words(self, wav_path: AudioSource) -> list[WordTiming]:
         """Per-word (start, end, word) spans for forced alignment (F2).
 
         One `word_timestamps=True` pass, flattening every segment's `.words` in spoken order.
@@ -100,16 +146,18 @@ class Validator:
         becomes a second resident GPU model."""
         try:
             segments, _info = self._get_model().transcribe(
-                str(wav_path), language=self.language, word_timestamps=True
+                _source(wav_path), language=self.language, word_timestamps=True
             )
             return self._flatten_words(segments)
         except ValidationError:
             raise
         except Exception as exc:  # surface a loud, contextual failure
-            raise ValidationError(f"whisper word alignment failed for {wav_path}: {exc}") from exc
+            raise ValidationError(
+                f"whisper word alignment failed for {_describe(wav_path)}: {exc}"
+            ) from exc
 
     def validate_with_words(
-        self, wav_path: Path, expected_text: str
+        self, wav_path: AudioSource, expected_text: str
     ) -> tuple[ValidationResult, list[WordTiming]]:
         """Score AND align in ONE transcription pass — the render-loop piggyback for
         `requires_validation` engines, so a Chatterbox/Fish segment yields word timings at
@@ -117,7 +165,7 @@ class Validator:
         words come from, so the verdict matches `validate()` for the same audio."""
         try:
             segments, _info = self._get_model().transcribe(
-                str(wav_path), language=self.language, word_timestamps=True
+                _source(wav_path), language=self.language, word_timestamps=True
             )
             segments = list(segments)  # the generator is consumed twice below
             transcript = " ".join(seg.text for seg in segments).strip()
@@ -125,7 +173,9 @@ class Validator:
         except ValidationError:
             raise
         except Exception as exc:  # surface a loud, contextual failure
-            raise ValidationError(f"whisper transcription failed for {wav_path}: {exc}") from exc
+            raise ValidationError(
+                f"whisper transcription failed for {_describe(wav_path)}: {exc}"
+            ) from exc
         return self._score(expected_text, transcript), words
 
     @staticmethod
