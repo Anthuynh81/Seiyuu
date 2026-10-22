@@ -39,6 +39,7 @@ import type {
   Series,
   SeriesListOut,
   SuggestCastResponse,
+  SettingsOut,
   SystemStatusOut,
   ValidationReportOut,
   VoiceAssignment,
@@ -293,6 +294,16 @@ export function useSystem() {
   });
 }
 
+/** Redacted server config. Settings freeze at server start, so one fetch per session is
+    plenty. Only mounted by screens that need it (the cast-reset dialog). */
+export function useSettings() {
+  return useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api<SettingsOut>("/api/settings"),
+    staleTime: Infinity,
+  });
+}
+
 // -- character review ----------------------------------------------------------------------
 
 export function useCharacters(bookId: string | null, attributed: boolean) {
@@ -502,6 +513,10 @@ export interface DraftInput {
   use_llm?: boolean;
   cast_provider?: string; // override the configured cast provider ("local" | "anthropic")
   confirm_paid?: boolean; // required when the resolved cast provider is anthropic (paid)
+  // Omitted/true (the server default): KEEP the saved narrator, thought voice and every manual
+  // pick (a voice that is not "<char_id>_auto") — a re-draft only fills newly-discovered
+  // characters. false is a full reset that discards them; the UI gates it behind a confirm.
+  keep_existing?: boolean;
 }
 
 export function useDraftAssignment(bookId: string) {

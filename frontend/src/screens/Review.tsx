@@ -25,6 +25,7 @@ import { buildEmotionMap, emotionKey } from "../lib/emotion";
 import { CharacterEditor } from "./review/CharacterEditor";
 import { isReviewable, useFrontier } from "./review/helpers";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
+import { ResetCastDialog } from "./review/ResetCastDialog";
 import { RosterRow } from "./review/RosterRow";
 import { SegmentPair } from "./review/SegmentPair";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
@@ -75,6 +76,9 @@ export function Review() {
   // book switch (the ?book= param), since staleness is per-book.
   const [staleAfterSave, setStaleAfterSave] = useState(false);
   useEffect(() => setStaleAfterSave(false), [bookId]);
+  // the "reset cast…" confirm (a keep_existing:false draft) — the only path that drops hand picks
+  const [resetOpen, setResetOpen] = useState(false);
+  useEffect(() => setResetOpen(false), [bookId]);
 
   // tag filter for the voice pickers: AND semantics, narrows every picker in the roster.
   // The assigned voice always stays visible (VoicePicker falls back to the full pool).
@@ -304,13 +308,23 @@ export function Review() {
                         {suggestCast.isPending ? "thinking…" : "suggest cast"}
                       </button>
                     </Tip>
-                    <Tip content="re-run the deterministic draft — fills newly-discovered characters, keeps existing voices">
+                    {/* server default keep_existing=true: re-draft never clobbers a hand pick */}
+                    <Tip content="re-run the deterministic draft — fills newly-discovered characters, keeps your picks and narrator">
                       <button
                         className="key quiet px-[9px] py-[3px]"
                         disabled={draftCast.isPending}
                         onClick={() => draftCast.mutate({})}
                       >
                         re-draft
+                      </button>
+                    </Tip>
+                    <Tip content="start over: re-cast everyone with auto voices, discarding your picks (asks first)">
+                      <button
+                        className="key quiet px-[7px] py-[3px] text-[10.5px] text-ink-3"
+                        disabled={draftCast.isPending || !assignment.data}
+                        onClick={() => setResetOpen(true)}
+                      >
+                        reset cast…
                       </button>
                     </Tip>
                     <button
@@ -559,6 +573,24 @@ export function Review() {
           others={cast.filter((c) => c.id !== editingChar.id && !isMasked(c))}
           onClose={() => setEditingChar(null)}
           bookId={bookId}
+        />
+      )}
+      {resetOpen && assignment.data && (
+        <ResetCastDialog
+          assignment={assignment.data}
+          characterName={(id) => {
+            const c = cast.find((x) => x.id === id);
+            // spoiler-safe: a pick for a not-yet-met character is counted, never named
+            return c ? (isMasked(c) ? "a hidden character" : c.name) : id;
+          }}
+          voiceName={(id) => allVoices.find((v) => v.voice_id === id)?.name ?? id}
+          unsavedEdits={castingDirty}
+          resetting={draftCast.isPending}
+          onConfirm={() => {
+            setResetOpen(false);
+            draftCast.mutate({ keep_existing: false });
+          }}
+          onClose={() => setResetOpen(false)}
         />
       )}
     </section>

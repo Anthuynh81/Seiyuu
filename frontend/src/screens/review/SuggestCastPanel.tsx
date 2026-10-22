@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { ApiError } from "../../api/client";
 import type { SuggestCastResponse } from "../../api/types";
+import { manualPicks } from "../../lib/casting";
 
 /* -------------------------------------------------- casting */
 
@@ -29,6 +30,8 @@ export function SuggestCastPanel({
   const create = preview.would_create_voice_ids.length;
   const existing = preview.would_recast_voice_ids.length;
   const noop = create === 0 && !recast; // every character already cast, recast off
+  // hand picks survive the apply (server keep_existing default) — say so, so nobody fears a clobber
+  const kept = manualPicks(preview.assignment.assignments).length;
   return (
     <div className="caststrip flex-wrap gap-2 bg-console-hi">
       <span className="tag">smart cast</span>
@@ -36,6 +39,11 @@ export function SuggestCastPanel({
         every character a distinct voice · {create} new
         {existing > 0 ? ` · ${existing} already cast` : ""}
       </span>
+      {kept > 0 && (
+        <span className="mono text-[11px] text-ok">
+          Your {kept} pick{kept === 1 ? " is" : "s are"} kept
+        </span>
+      )}
       {existing > 0 && (
         <label className="mono flex items-center gap-[5px] text-[11px]">
           <input type="checkbox" checked={recast} onChange={(e) => setRecast(e.target.checked)} />

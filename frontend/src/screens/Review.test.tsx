@@ -602,3 +602,127 @@ describe("Review", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------------ cast reset (keep_existing) */
+
+/** Alice stays on her auto voice; Bob is a hand pick (Lily); the narrator is hand-chosen. */
+const MIXED: VoiceAssignment = {
+  ...ASSIGNMENT,
+  narrator_voice_id: "v-narr",
+  assignments: { alice: "alice_auto", bob: "v-lily" },
+};
+
+function setupCast(assignment: VoiceAssignment): MockApi {
+  const server = setupReview();
+  server.get("/api/books/b1/assignment", assignment).get("/api/voices", {
+    voices: [
+      voice("v-narr", "Narrator"),
+      voice("alice_auto", "auto:Alice"),
+      voice("v-lily", "Lily"),
+      voice("narrator_af_heart", "Default Narrator"),
+      voice("narrator_ab12", "Narrator"), // a USER voice named "Narrator": slugify(name)_<hex>
+    ],
+    unreadable: [],
+  });
+  // the reset dialog predicts the narrator a reset writes: narrator_{slugify(default preset)}
+  server.get("/api/settings", { kokoro_default_voice: "af_heart" });
+  server.post("/api/books/b1/assignment/draft", {
+    assignment: { ...assignment, assignments: { alice: "alice_auto", bob: "bob_auto" } },
+    created_voice_ids: [],
+    edit_warnings: [],
+  });
+  return server;
+}
+
+const draftPosts = (server: MockApi) =>
+  server.calls.filter((c) => c.method === "POST" && c.url.includes("/assignment/draft"));
+
+describe("Review cast reset", () => {
+  it("re-draft posts the default body — the server keeps picks and narrator", async () => {
+    const user = userEvent.setup();
+    const server = setupCast(MIXED);
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "re-draft" }));
+    await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({});
+  });
+
+  it("reset cast… lists the manual picks and a hand-chosen narrator; cancel posts nothing", async () => {
+    const user = userEvent.setup();
+    const server = setupCast(MIXED);
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "reset cast…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reset cast" });
+    const losses = await within(dialog).findByRole("list", { name: "what a reset discards" });
+    // only Bob is a hand pick — Alice is on alice_auto and is not listed
+    expect(within(losses).getByText("1 manual pick: Bob → Lily")).toBeInTheDocument();
+    expect(within(losses).getByText("narrator: Narrator")).toBeInTheDocument();
+    expect(within(losses).queryByText(/Alice/)).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(draftPosts(server)).toHaveLength(0);
+  });
+
+  it("confirming the reset posts keep_existing:false and closes the dialog", async () => {
+    const user = userEvent.setup();
+    const server = setupCast(MIXED);
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "reset cast…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reset cast" });
+    const confirm = within(dialog).getByRole("button", { name: "reset cast" });
+    await waitFor(() => expect(confirm).toBeEnabled()); // waits for the settings check
+    await user.click(confirm);
+
+    await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
+    expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({ keep_existing: false });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("an all-auto casting says there is nothing manual to lose", async () => {
+    const user = userEvent.setup();
+    setupCast({
+      ...ASSIGNMENT,
+      narrator_voice_id: "narrator_af_heart",
+      assignments: { alice: "alice_auto" },
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "reset cast…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reset cast" });
+    expect(await within(dialog).findByText(/nothing manual to lose/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("list")).not.toBeInTheDocument();
+  });
+
+  it("a user voice named Narrator (narrator_<hex>) is listed as lost, not mistaken for auto", async () => {
+    const user = userEvent.setup();
+    setupCast({ ...ASSIGNMENT, narrator_voice_id: "narrator_ab12", assignments: { alice: "alice_auto" } });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "reset cast…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reset cast" });
+    const losses = await within(dialog).findByRole("list", { name: "what a reset discards" });
+    expect(within(losses).getByText("narrator: Narrator")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/nothing manual to lose/)).not.toBeInTheDocument();
+  });
+
+  it("suggest cast tells you your hand picks survive the apply", async () => {
+    const user = userEvent.setup();
+    const server = setupCast(MIXED);
+    server.post("/api/books/b1/assignment/suggest", {
+      assignment: MIXED,
+      would_create_voice_ids: [],
+      would_recast_voice_ids: ["alice_auto"],
+      edit_warnings: [],
+    });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "suggest cast" }));
+    expect(await screen.findByText("Your 1 pick is kept")).toBeInTheDocument();
+    // the existing create/recast summary is unchanged
+    expect(screen.getByText(/0 new · 1 already cast/)).toBeInTheDocument();
+  });
+});
