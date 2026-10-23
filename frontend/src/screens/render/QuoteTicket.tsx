@@ -25,12 +25,15 @@ export function QuoteTicket({
   onRemint,
   onExpired,
   busy,
+  bookTitle,
 }: {
   state: TicketState;
   onConfirm: () => void;
   onRemint: () => void;
   onExpired: () => void;
   busy: boolean;
+  /** the book's title, shown instead of its internal id */
+  bookTitle?: string | null;
 }) {
   const now = useNow(state.kind === "live");
   const quote = state.kind === "none" ? null : state.quote;
@@ -54,7 +57,7 @@ export function QuoteTicket({
             {dead ? "refused" : `expires ${mmss}`}
           </span>
         </div>
-        <div className="line"><span>book</span><span>{quote.book_id}</span></div>
+        <div className="line"><span>book</span><span>{bookTitle ?? quote.book_id}</span></div>
         <div className="line"><span>chapters</span><span>{quote.chapters.length ? quote.chapters.join(", ") : "all"}</span></div>
         <div className="line"><span>paid segments</span><span>{quote.paid_segments}</span></div>
         <div className="line"><span>ceiling</span><span>${quote.max_usd_ceiling.toFixed(2)} ok</span></div>

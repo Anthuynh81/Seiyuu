@@ -1,7 +1,11 @@
 import { useState } from "react";
 
 import type { JobOut } from "../../api/types";
+import { useJobProgress } from "../../app/useJobProgress";
+import { stepName } from "../../lib/jobCopy";
 import { explainJobError } from "../../lib/jobErrors";
+import { progressLabel } from "../../lib/progress";
+import { MODE_LABEL } from "../../lib/render";
 
 /* -------------------------------------------------- jobs + validation */
 
@@ -11,6 +15,7 @@ export function JobRow({ job }: { job: JobOut }) {
   const [open, setOpen] = useState(false);
   const canceling = job.state === "running" && job.cancel_requested;
   const detail = job.error;
+  const progress = useJobProgress(job.state === "running" ? job : null);
   return (
     <div className={`job ${open ? "open" : ""}`} onClick={() => detail && setOpen(!open)}>
       <div className="jobtop">
@@ -19,17 +24,27 @@ export function JobRow({ job }: { job: JobOut }) {
           {canceling ? "canceling" : job.state}
         </span>
         <span className="what">
-          {job.kind}
+          {stepName(job.kind)}
           {typeof job.params?.mode === "string" && (
-            <span className="mono ml-1.5 text-[10.5px] text-ink-3">{job.params.mode}</span>
+            <span className="mono ml-1.5 text-[10.5px] text-ink-3">
+              {MODE_LABEL[job.params.mode as keyof typeof MODE_LABEL] ?? job.params.mode}
+            </span>
           )}
           {detail && <span className="more">why? ▸</span>}
         </span>
         <span className="id">{job.job_id}</span>
         <span className="when">{new Date(job.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
-      {job.state === "running" && job.progress_text && (
-        <div className="mono mt-1.5 text-[11px] text-ink-2">{job.progress_text}</div>
+      {job.state === "running" && progress && (
+        <div className="jobmeter" role="progressbar" aria-label={`${stepName(job.kind)} progress`}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress.fraction * 100)}>
+          <i style={{ width: `${progress.fraction * 100}%` }} />
+        </div>
+      )}
+      {job.state === "running" && (progress || job.progress_text) && (
+        <div className="mono mt-1.5 text-[11px] text-ink-2">
+          {progress ? `${progressLabel(progress)}${progress.title ? ` · ${progress.title}` : ""}` : job.progress_text}
+        </div>
       )}
       {detail && (
         // clicks inside (selecting the fix command to copy it) must not collapse the row

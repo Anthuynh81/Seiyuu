@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { makeBook } from "../test/fixtures";
-import { engineSubject, finishedHeadline, liveJobLine, subjectName } from "./jobCopy";
+import { engineSubject, finishedHeadline, liveJobLine, stepName, subjectName } from "./jobCopy";
 
 describe("jobCopy", () => {
   const books = [makeBook({ book_id: "b1", title: "The Hollow Crown" }), makeBook({ book_id: "b2", title: null })];
@@ -30,5 +30,7 @@ describe("jobCopy", () => {
   it("describes a live job in plain words", () => {
     expect(liveJobLine({ kind: "render", state: "running" })).toBe("Recording…");
     expect(liveJobLine({ kind: "attribute", state: "queued" })).toBe("Finding the speakers — waiting its turn");
+    expect(stepName("master")).toBe("Building the .m4b audiobook");
+    expect(stepName("render")).toBe("Recording");
   });
 });

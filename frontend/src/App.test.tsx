@@ -153,8 +153,9 @@ describe("App", () => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     renderWithProviders(<App />, { queryClient });
 
-    // the first poll lands: the transport bar shows the running job
-    expect(await screen.findByText("render · demo")).toBeInTheDocument();
+    // the first poll lands: the transport bar shows the running job (book title + plain step;
+    // this shelf is empty, so the book reads as "your book", never its id)
+    expect(await screen.findByText("your book · Recording")).toBeInTheDocument();
     // "characters": a finished speaker re-run changes the roster and its provenance
     const families = ["segments", "render-summary", "validation", "estimate", "assignment", "voices", "characters"];
     for (const key of families) {
@@ -188,7 +189,7 @@ describe("App", () => {
     const queryClient = makeQueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     renderWithProviders(<App />, { queryClient });
-    expect(await screen.findByText("render · b1")).toBeInTheDocument();
+    expect(await screen.findByText("Night Train · Recording")).toBeInTheDocument();
     await waitFor(() => expect(queryClient.getQueryData(["jobs", "recent"])).toBeDefined());
     const recentCalls = () => server.calls.filter((c) => c.url === "/api/jobs?limit=10").length;
     const before = recentCalls();
@@ -220,7 +221,7 @@ describe("App", () => {
 
     const queryClient = makeQueryClient();
     renderWithProviders(<App />, { queryClient });
-    expect(await screen.findByText("attribute · b1")).toBeInTheDocument();
+    expect(await screen.findByText("Night Train · Finding the speakers")).toBeInTheDocument();
     await waitFor(() => expect(queryClient.getQueryData(["jobs", "recent"])).toBeDefined());
     const recentCalls = () => server.calls.filter((c) => c.url === "/api/jobs?limit=10").length;
     const before = recentCalls();

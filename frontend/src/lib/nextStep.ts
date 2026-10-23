@@ -54,7 +54,9 @@ export type StepId = "attribute" | "assign" | "render" | "build" | "listen";
 const RETRIES: Partial<Record<StepId, JobKind[]>> = {
   attribute: ["attribute"],
   render: ["render"],
-  build: ["assemble", "master"],
+  // the .m4b is built from the recording alone; chapter MP3s are optional, so a failed MP3
+  // run never turns "Build the .m4b" into a retry
+  build: ["master"],
 };
 
 function plainStep(id: StepId, bookId: string): NextStep {

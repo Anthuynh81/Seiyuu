@@ -5,6 +5,9 @@ import { nextStep } from "../../lib/nextStep";
 
 /* -------------------------------------------------- pipeline rail */
 
+/** Stages the audiobook doesn't need: master builds the .m4b from the render alone. */
+const OPTIONAL: ReadonlySet<string> = new Set(["assembled"]);
+
 /** The whole signal path in one glance — which stages are done, which one is running —
     and the ONE next step as a real button (lib/nextStep.ts), so "what do I click after
     recording?" never needs the order memorized. */
@@ -23,13 +26,18 @@ export function StageRail({
     <div className="scoperow" role="group" aria-label="pipeline">
       <span className="tag">steps</span>
       <span role="list" aria-label="steps" className="contents">
-        {STAGES.map(([flag, label], i) => (
-          <span key={flag} role="listitem" className="state mono text-[11px]">
-            <i className={`led ${runningStage === flag ? "run" : status?.[flag] ? "ok" : "off"}`} />
-            {label}
-            {i < STAGES.length - 1 && <span aria-hidden className="text-ink-3">›</span>}
-          </span>
-        ))}
+        {STAGES.map(([flag, label], i) => {
+          // chapter MP3s are an extra: the .m4b builds straight from the recording
+          const optional = OPTIONAL.has(flag);
+          return (
+            <span key={flag} role="listitem" className={`state mono text-[11px] ${optional ? "text-ink-3" : ""}`}>
+              <i className={`led ${runningStage === flag ? "run" : status?.[flag] ? "ok" : "off"}`} />
+              {label}
+              {optional && " (optional)"}
+              {i < STAGES.length - 1 && <span aria-hidden className="text-ink-3">›</span>}
+            </span>
+          );
+        })}
       </span>
       {status && <NextStep step={nextStep({ status, activeJob, failed })} />}
     </div>

@@ -67,7 +67,6 @@ describe("nextStep", () => {
       /Close it or wait/,
     ],
     ["master", { rendered: true }, "Build the .m4b again", "RuntimeError: ffmpeg not found on PATH", /Install ffmpeg/],
-    ["assemble", { rendered: true }, "Build the .m4b again", "ValueError: nobody knows", /Something went wrong/],
   ] as const)("a failed %s job turns the step into a retry with the plain fix", (kind, o, label, error, reason) => {
     const failed = makeJob({ kind: kind as JobKind, state: "failed", is_terminal: true, error });
     const step = nextStep({ status: flags(o), failed });
@@ -75,6 +74,13 @@ describe("nextStep", () => {
     expect(step.reason).toMatch(reason);
     expect(step.disabled).toBeFalsy();
     expect(step.retryOf).toBe(kind);
+  });
+
+  it("a failed chapter-MP3 run (optional) leaves Build the .m4b alone — the .m4b doesn't need them", () => {
+    const failed = makeJob({ kind: "assemble", state: "failed", is_terminal: true, error: "ValueError: nobody knows" });
+    const step = nextStep({ status: flags({ rendered: true }), failed });
+    expect(step.label).toBe("Build the .m4b");
+    expect(step.retryOf).toBeUndefined();
   });
 
   it("a failure of another kind leaves the step alone", () => {

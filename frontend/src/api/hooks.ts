@@ -52,6 +52,7 @@ import type {
   VoiceOut,
   VoiceReferencesOut,
 } from "./types";
+import { singleParams, type SingleSpec } from "../lib/render";
 
 /** Polling discipline: this is THE live poll — book payloads deliberately carry no
     progress, so everything watching a job watches this one query. */
@@ -217,14 +218,16 @@ export function useEstimate(
   ready: boolean,
   applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
   force = false, // re-render: price cached in-scope segments as billable work (parity with render)
+  single?: SingleSpec, // one narrator: the voice/speed priced; must match the quote and render
 ) {
   const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
   const frc = force ? "&force=true" : "";
+  const one = mode === "single" ? singleParams(single) : "";
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force, one],
     queryFn: () =>
       api<CostEstimateOut>(
-        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}`,
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}${one}`,
       ),
     enabled: bookId !== null && ready,
   });
@@ -275,16 +278,18 @@ export function useMintQuote(bookId: string) {
       chapters,
       applyEmotion,
       force,
+      single,
     }: {
       mode: RenderMode;
       chapters: number[];
       applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
       force?: boolean; // re-render: quote must be minted force=True to authorize a forced render
+      single?: SingleSpec; // one narrator: the same spec the estimate priced and the render sends
     }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
-        ...(mode === "single" ? { single: {} } : {}),
+        ...(mode === "single" ? { single: single ?? {} } : {}),
         ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
         ...(force ? { force: true } : {}),
       }),
@@ -781,18 +786,19 @@ export function useUnlinkSeries(seriesId: string) {
 
 // -- voice studio --------------------------------------------------------------------------
 
-export function useVoices() {
-  return useQuery({ queryKey: ["voices"], queryFn: () => api<VoiceListOut>("/api/voices") });
+export function useVoices({ enabled = true }: { enabled?: boolean } = {}) {
+  return useQuery({ queryKey: ["voices"], queryFn: () => api<VoiceListOut>("/api/voices"), enabled });
 }
 
 export function useCloudSlots() {
   return useQuery({ queryKey: ["cloud-slots"], queryFn: () => api<CloudSlotsOut>("/api/cloud-slots") });
 }
 
-export function useKokoroPresets() {
+export function useKokoroPresets({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["engine-voices", "kokoro"],
     queryFn: () => api<EngineVoicesOut>("/api/engines/kokoro/voices"),
+    enabled,
     staleTime: Infinity, // hardcoded preset catalog
   });
 }

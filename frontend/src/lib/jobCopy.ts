@@ -27,9 +27,14 @@ const DOING: Record<JobKind, string> = {
   warmup: "Getting the voice engine ready",
 };
 
+/** The plain step name for a job kind ("Recording", "Building the .m4b audiobook"). */
+export function stepName(kind: JobKind): string {
+  return DOING[kind] ?? "Working";
+}
+
 /** "Recording…" / "Recording — waiting its turn" for the live line on a card. */
 export function liveJobLine(job: Pick<JobOut, "kind" | "state">): string {
-  const doing = DOING[job.kind] ?? "Working";
+  const doing = stepName(job.kind);
   return job.state === "queued" ? `${doing} — waiting its turn` : `${doing}…`;
 }
 

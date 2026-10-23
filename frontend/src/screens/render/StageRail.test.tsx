@@ -18,11 +18,14 @@ describe("StageRail", () => {
       "speakers",
       "voices",
       "record",
-      "mp3s",
+      "mp3s (optional)",
       "audiobook",
     ]);
     expect(items[1].querySelector(".led")).toHaveClass("ok");
     expect(items[2].querySelector(".led")).toHaveClass("off");
+    // the chapter MP3s are an extra, drawn quieter than the steps the audiobook needs
+    expect(items[4]).toHaveClass("text-ink-3");
+    expect(items[5]).not.toHaveClass("text-ink-3");
   });
 
   it("replaces the old 'next: …' hint with a real next-step button", () => {
