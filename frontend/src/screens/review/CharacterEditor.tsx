@@ -5,6 +5,7 @@ import { useRecordEdit } from "../../api/hooks";
 import type { CharacterSummary } from "../../api/types";
 import { TalkDialog } from "../../components/Dialog";
 import { TalkSelect } from "../../components/Select";
+import { mergePreview } from "../../lib/reviewTools";
 import { NONE } from "./helpers";
 
 export function CharacterEditor({
@@ -21,6 +22,7 @@ export function CharacterEditor({
   const record = useRecordEdit(bookId);
   const [name, setName] = useState(char.name);
   const [mergeInto, setMergeInto] = useState(NONE);
+  const winner = others.find((o) => o.id === mergeInto);
   const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
   return (
     <TalkDialog title={`Edit character — ${char.name}`} onClose={onClose}>
@@ -61,6 +63,7 @@ export function CharacterEditor({
           merge
         </button>
       </div>
+      {winner && <p className="mono mt-1.5 text-[11px] text-ink-2">{mergePreview(char, winner.name)}</p>}
       {error && <div className="errline mt-3">{error}</div>}
     </TalkDialog>
   );

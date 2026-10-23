@@ -12,16 +12,17 @@ import {
   useCharacters,
   useDraftAssignment,
   useEditLog,
+  useRecordEdit,
   useSaveAssignment,
   useSegments,
   useSuggestCast,
-  useUndoEdit,
   useVoices,
   type SuggestInput,
 } from "../api/hooks";
 import type { CharacterSummary, SegmentRow, SuggestCastResponse } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
+import { usePlayer } from "../app/usePlayer";
 import { NextStep } from "../components/NextStep";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
@@ -34,10 +35,14 @@ import {
   type CastingState,
 } from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
+import { explainJobError } from "../lib/jobErrors";
 import { nextStep } from "../lib/nextStep";
 import { findLine, matchesSpeaker, readLocation, walkToNextCheck } from "../lib/reviewNav";
+import { canPlay, describeEditWarning, mergeSuggestions, type LineTarget } from "../lib/reviewTools";
 import { CharacterEditor } from "./review/CharacterEditor";
 import { isReviewable, useFrontier, useSpoilerSafe } from "./review/helpers";
+import { HistoryDrawer } from "./review/HistoryDrawer";
+import { MergeSuggestions } from "./review/MergeSuggestions";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
 import { ResetCastDialog } from "./review/ResetCastDialog";
 import { RosterRow } from "./review/RosterRow";
@@ -60,6 +65,11 @@ type Walk =
 const IDLE: Walk = { state: "idle" };
 
 /* -------------------------------------------------- the screen */
+
+/** The shared player's title suffix for Review's one-line playlist (▶ on a line). */
+const ONE_LINE = " · one line";
+const isOneLine = (p: { bookId: string | null; clips: readonly unknown[]; chapterTitle: string }, bookId: string | null) =>
+  p.bookId === bookId && p.clips.length === 1 && p.chapterTitle.endsWith(ONE_LINE);
 
 export function Review() {
   const [params, setParams] = useSearchParams();
@@ -116,7 +126,8 @@ export function Review() {
     [attribution.data, chapter],
   );
   const editLog = useEditLog(attributed ? bookId : null);
-  const undo = useUndoEdit(bookId ?? "");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => setHistoryOpen(false), [bookId]);
 
   // casting: server truth + a local editable copy
   const assignment = useAssignment(bookId, attributed);
@@ -264,6 +275,108 @@ export function Review() {
     setEmoAt((cur) => (cur === key ? null : key));
   }, []);
 
+  // "Looks right ✓": a same-speaker reassign. The server records it at confidence 1.0, so the
+  // line leaves the queue on the refetch. One shared mutation: `variables` says which line, so
+  // every line's button waits while one saves (a refusal always lands under its own line).
+  const confirmLine = useRecordEdit(bookId ?? "");
+  const { mutate: recordConfirm, reset: resetConfirm } = confirmLine;
+  useEffect(() => resetConfirm(), [bookId, resetConfirm]);
+  // the button leaves with the line's "to check" state: keyboard focus moves to that line's
+  // speaker chip instead of falling to the page
+  const [focusChipOf, setFocusChipOf] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusChipOf) return;
+    const line = [...(pageRef.current?.querySelectorAll<HTMLElement>("[data-seg]") ?? [])].find(
+      (n) => n.dataset.seg === focusChipOf,
+    );
+    line?.nextElementSibling?.querySelector<HTMLElement>(".chip")?.focus();
+    setFocusChipOf(null);
+  }, [focusChipOf]);
+  const handleConfirm = useCallback(
+    (row: SegmentRow) =>
+      recordConfirm(
+        {
+          op: "reassign",
+          block_id: row.block_id,
+          segment_index: row.segment_index,
+          speaker: row.speaker,
+        },
+        { onSuccess: () => setFocusChipOf(`${row.block_id}:${row.segment_index}`) },
+      ),
+    [recordConfirm],
+  );
+  const confirmVars = confirmLine.variables;
+  const confirmKey =
+    confirmVars && confirmVars.op === "reassign" ? `${confirmVars.block_id}:${confirmVars.segment_index}` : null;
+  const confirmError = confirmLine.error;
+  const confirmNote = useMemo(() => {
+    if (!confirmError) return null;
+    const why = explainJobError(
+      confirmError instanceof ApiError
+        ? { code: confirmError.code, message: confirmError.message }
+        : confirmError.message,
+    );
+    return (
+      <span className="linenote" role="alert">
+        {why.known ? `${why.summary} ${why.fix ?? ""}` : `Couldn't save that: ${confirmError.message}`}
+      </span>
+    );
+  }, [confirmError]);
+
+  // ▶ on a recorded line: the shared player plays that one wav (file serving, no GPU). The
+  // player object changes as it plays, so the stable handler reads it through a ref.
+  const player = usePlayer();
+  const playerRef = useRef(player);
+  useEffect(() => {
+    playerRef.current = player;
+  });
+  const chapterTitle = segments.data?.title || `Chapter ${chapter}`;
+  // ▶ pauses and replays only Review's own one-line playlist, never, say, a Listen chapter
+  // that happens to sit on the same line (that would run on through the chapter)
+  const playingKey =
+    player && player.playing && isOneLine(player, bookId) ? (player.clips[0]?.key ?? null) : null;
+  // spoiler-safe: the transport bar shows the clip's speaker, so a hidden one stays hidden there
+  const maskedRef = useRef<Set<string>>(new Set());
+  const handlePlay = useCallback(
+    (row: SegmentRow) => {
+      const p = playerRef.current;
+      if (!p || !bookId || row.audio_segment === null) return;
+      const key = `${row.block_id}:${row.audio_segment}`;
+      const buster = row.audio_key ? `&v=${row.audio_key}` : "";
+      const src = `/api/books/${bookId}/segments/${row.block_id}/audio?segment=${row.audio_segment}${buster}`;
+      if (isOneLine(p, bookId) && p.clips[0].src === src) {
+        if (p.playing) p.toggle(); // the same line again pauses it
+        else p.seekClip(0, 0); // ...and once more plays it from the top
+        return;
+      }
+      const speaker =
+        row.speaker === null
+          ? "narrator"
+          : maskedRef.current.has(row.speaker)
+            ? "a hidden character"
+            : (row.speaker_name ?? "a character");
+      p.load(
+        bookId,
+        `${chapterTitle}${ONE_LINE}`,
+        [
+          {
+            src,
+            duration: row.duration_seconds ?? 0,
+            key,
+            speaker,
+            words: [],
+          },
+        ],
+        { autoplay: true },
+      );
+    },
+    [bookId, chapterTitle],
+  );
+
+  useEffect(() => {
+    maskedRef.current = maskedIds;
+  }, [maskedIds]);
+
   // spoiler-safe: the reassign list offers only the characters met so far (the merge list in
   // CharacterEditor filters the same way)
   const visibleCast = useMemo(() => cast.filter((c) => !maskedIds.has(c.id)), [cast, maskedIds]);
@@ -276,6 +389,9 @@ export function Review() {
   );
   const targetKey = targetRow ? `${targetRow.block_id}:${targetRow.segment_index}` : null;
   const landedOn = useRef<string | null>(null);
+  // bumped by every "Go to line": arriving on the line the page is already on still scrolls
+  // there and moves focus (after the one-character filter is cleared, say)
+  const [goNonce, setGoNonce] = useState(0);
   // A landing "Next to check" asked for: scroll there but leave focus on the button, so the
   // press-check-press loop never needs a long Shift+Tab back past the roster.
   const quietArrival = useRef<string | null>(null);
@@ -284,7 +400,7 @@ export function Review() {
       landedOn.current = null; // left the line: arriving on it again later scrolls again
       return;
     }
-    const arrival = `${bookId}|${chapter}|${targetKey}`;
+    const arrival = `${bookId}|${chapter}|${targetKey}|${speakerFilter}|${goNonce}`;
     // a live refetch (job ticks, an edit) re-renders the page; only a NEW target scrolls
     if (landedOn.current === arrival) return;
     const el = [...(pageRef.current?.querySelectorAll<HTMLElement>("[data-seg]") ?? [])].find(
@@ -296,7 +412,7 @@ export function Review() {
     // only a real deep-link arrival (a first load, a link from another screen) moves focus
     if (quietArrival.current !== arrival) el.focus({ preventScroll: true });
     quietArrival.current = null;
-  }, [targetKey, bookId, chapter]);
+  }, [targetKey, bookId, chapter, speakerFilter, goNonce]);
 
   /* ---- Next to check: forward through the lines worth a look, across chapters */
   const [walk, setWalk] = useState<Walk>(IDLE);
@@ -344,7 +460,7 @@ export function Review() {
           excerpt.length > 80 ? `${excerpt.slice(0, 79)}…` : excerpt
         }`,
       });
-      quietArrival.current = `${bookId}|${result.chapter}|${result.row.block_id}:${result.row.segment_index}`;
+      quietArrival.current = `${bookId}|${result.chapter}|${result.row.block_id}:${result.row.segment_index}|${speakerFilter}|${goNonce}`;
       patchParams({
         ch: String(result.chapter),
         block: result.row.block_id,
@@ -360,6 +476,16 @@ export function Review() {
     walkRun.current += 1;
     setWalk(IDLE);
     patchParams({ ch: String(n), block: null, seg: null });
+  };
+  /** "Go to line" (flagged paragraphs, edit warnings, History): open the line's chapter with
+      the one-character filter off, scroll to it and move focus there. Asking again for the line
+      the page is already on scrolls back to it (the nonce makes every press a new arrival). */
+  const goToLine = (t: LineTarget) => {
+    walkRun.current += 1;
+    setWalk(IDLE);
+    quietArrival.current = null;
+    setGoNonce((n) => n + 1);
+    patchParams({ ch: String(t.chapter), block: t.block, seg: t.seg === null ? null : String(t.seg), speaker: null });
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
@@ -410,11 +536,12 @@ export function Review() {
   // aria-disabled (still focusable), not `disabled`: a keyboard press must not push focus to
   // <body> while the walk looks ahead or the landed chapter loads
   const nextBusy = walk.state === "looking" || segments.isPending;
-  // nothing in the whole book needs a look: the walk would only report the end
+  // nothing in the whole book needs a look: the walk would only report the end. The server's
+  // low-confidence count already holds the unattributed quotes still to check; its unattributed
+  // count also keeps the ones confirmed as narration, so it can't decide this.
   const nothingToCheck =
     !!overview.data &&
     overview.data.low_confidence_segments === 0 &&
-    overview.data.unattributed_quote_segments === 0 &&
     lowConfInChapter.length === 0;
   const chapterOptions = (() => {
     const opts = (book.data?.chapters ?? []).map((c) => ({
@@ -475,7 +602,7 @@ export function Review() {
             <span className="mono text-[11.5px] text-ink-2">
               {overview.data?.low_confidence_segments ?? "…"} low-confidence in the book ·{" "}
               {overview.data && overview.data.unattributed_quote_segments > 0
-                ? `${overview.data.unattributed_quote_segments} unattributed quote(s) · `
+                ? `${overview.data.unattributed_quote_segments} quote(s) with no speaker set · `
                 : ""}
               {lowConfInChapter.length} in this chapter
             </span>
@@ -500,16 +627,11 @@ export function Review() {
               </button>
             </Tip>
             <span className="flex-1" />
-            <span className="tag">edits</span>
-            <span className="mono text-[11.5px] text-ink-2">{editLog.data?.ops.length ?? 0}</span>
-            <button
-              className="key quiet"
-              disabled={undo.isPending || (editLog.data?.ops.length ?? 0) === 0}
-              onClick={() => undo.mutate()}
-            >
-              undo last
-            </button>
-            {undo.error && <span className="mono text-[11px] text-clip">{undo.error.message}</span>}
+            <Tip content="every fix you made to this book, with undo for the newest">
+              <button className="key quiet" onClick={() => setHistoryOpen(true)}>
+                History · {editLog.data?.ops.length ?? 0}
+              </button>
+            </Tip>
           </div>
 
           {/* "Next to check" speaks here. Always mounted, so screen readers hear the end, a
@@ -825,6 +947,14 @@ export function Review() {
                   ))}
                 </tbody>
               </table>
+              <MergeSuggestions
+                key={bookId}
+                bookId={bookId}
+                // spoiler-safe: a pair naming a character not met yet stays out of sight
+                suggestions={mergeSuggestions(overview.data?.notes ?? [], cast).filter(
+                  (m) => !maskedIds.has(m.loser.id) && !maskedIds.has(m.winner.id),
+                )}
+              />
             </div>
 
             <div className="page-wrap" ref={pageRef}>
@@ -851,12 +981,32 @@ export function Review() {
                   </span>
                 )}
               </div>
-              {warnings.map((w) => (
-                <div className="mwarn mb-2.5" key={w}>edit overlay — {w}</div>
-              ))}
+              {warnings.map((w) => {
+                const d = describeEditWarning(w);
+                const to = d.target;
+                return (
+                  <div className="mwarn mb-2.5" key={w}>
+                    {d.text}
+                    {to && (
+                      <button className="link goto" onClick={() => goToLine(to)}>
+                        Go to line
+                      </button>
+                    )}
+                    <span className="raw">{d.raw}</span>
+                  </div>
+                );
+              })}
               {flaggedHere.map((f) => (
                 <div className="mwarn mb-2.5" key={f.block_id}>
-                  flagged {f.block_id} — {f.reason}
+                  Seiyuu couldn't work out who speaks in a paragraph here, so the narrator reads all of it for now. Check
+                  it and set the speakers by hand.
+                  <button
+                    className="link goto"
+                    onClick={() => goToLine({ chapter: f.chapter_index, block: f.block_id, seg: null })}
+                  >
+                    Go to line
+                  </button>
+                  <span className="raw">{f.reason}</span>
                 </div>
               ))}
               {speakerFilter !== null && (
@@ -917,6 +1067,12 @@ export function Review() {
                         }
                         emoOpen={emoAt === key}
                         onEmotion={handleEmotion}
+                        onConfirm={handleConfirm}
+                        confirming={confirmLine.isPending && confirmKey === key}
+                        confirmLocked={confirmLine.isPending}
+                        note={confirmKey === key ? confirmNote : null}
+                        onPlay={handlePlay}
+                        playing={canPlay(s) && playingKey === `${s.block_id}:${s.audio_segment}`}
                         emotionPopover={
                           emoAt === key ? (
                             <EmotionPopover row={s} current={emotion} bookId={bookId} onClose={() => setEmoAt(null)} />
@@ -930,6 +1086,22 @@ export function Review() {
             </div>
           </div>
         </>
+      )}
+      {historyOpen && bookId && (
+        <HistoryDrawer
+          bookId={bookId}
+          log={editLog.data}
+          nameOf={(id) => {
+            const c = cast.find((x) => x.id === id);
+            return c ? (maskedIds.has(c.id) ? "a hidden character" : c.name) : null;
+          }}
+          isHidden={(id) => maskedIds.has(id)}
+          onGoTo={(t) => {
+            setHistoryOpen(false);
+            goToLine(t);
+          }}
+          onClose={() => setHistoryOpen(false)}
+        />
       )}
       {editingChar && (
         <CharacterEditor

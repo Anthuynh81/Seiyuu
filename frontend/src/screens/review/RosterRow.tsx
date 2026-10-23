@@ -2,6 +2,7 @@ import type { CharacterSummary, VoiceOut } from "../../api/types";
 import { chapterOfBlock } from "../../api/types";
 import { Tip } from "../../components/Tooltip";
 import { auditionLine } from "../../lib/audition";
+import { characterHints, genderWarning } from "../../lib/reviewTools";
 import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- roster */
@@ -92,6 +93,7 @@ export function RosterRow({
                 ✎
               </button>
             </Tip>
+            <CharacterHints char={char} />
             {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
           </td>
           <td>{char.line_count.toLocaleString()}</td>
@@ -99,5 +101,21 @@ export function RosterRow({
       }
       picker={voiceCell}
     />
+  );
+}
+
+/** What the book told Seiyuu about a character (gender, age) as small chips, plus the plain
+    warning when automatic casting has to guess the voice family. Display only. */
+function CharacterHints({ char }: { char: CharacterSummary }) {
+  const hints = characterHints(char);
+  const warning = genderWarning(char.gender);
+  return (
+    <>
+      <span className="hintchips">
+        <span className={`hintchip ${hints.genderKnown ? "" : "unknown"}`}>{hints.gender}</span>
+        {hints.age && <span className="hintchip">{hints.age}</span>}
+      </span>
+      {warning && <span className="hintwarn">{warning}</span>}
+    </>
   );
 }

@@ -628,4 +628,33 @@ details.fine.attr-adv { margin-top: 0; padding: 8px 14px; }
 .rowname { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
 .rowname:hover, .rowname[aria-pressed="true"] { color: var(--tungsten); }
 
+/* Character Review power tools (1.10 part B): line actions in the paper margin, the thought
+   style, character hint chips, merge cards and the History drawer. Paper tokens on the page,
+   console tokens on the roster and drawer; hairlines, square corners. (The speaker and emotion
+   chips are react-aria buttons now; preflight already resets their button chrome.) */
+.margin .chip[data-focus-visible], .margin .emochip[data-focus-visible] { outline: 1px solid var(--paper-ink); outline-offset: 1px; }
+.seg.thought { font-style: italic; }
+.thoughttag { display: inline-block; margin-left: 6px; padding: 0 5px; border: 1px dashed var(--paper-ink-2); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; font-style: italic; }
+.lineacts { display: flex; gap: 4px; margin-top: 4px; }
+.linekey { background: none; border: 1px solid var(--paper-ink-2); color: var(--paper-ink); font-family: var(--mono); font-size: 10px; padding: 1px 6px; cursor: pointer; }
+.linekey:hover { border-color: var(--paper-ink); background: var(--paper-seam); }
+.linekey[aria-disabled="true"] { opacity: 0.6; cursor: progress; }
+.linenote { display: block; margin-top: 4px; color: var(--paper-ink); font-family: var(--sans); font-size: 11px; line-height: 1.4; }
+.hintchips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.hintchip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; color: var(--ink-2); border: 1px solid var(--hairline); padding: 0 5px; }
+.hintchip.unknown { color: var(--caution); border-color: var(--caution-edge); }
+.hintwarn { display: block; margin-top: 2px; font-family: var(--mono); font-size: 10px; color: var(--caution); font-weight: 400; }
+.mwarn .goto { margin-left: 8px; color: inherit; text-decoration: underline; font-weight: 600; }
+.mwarn .raw { display: block; margin-top: 3px; opacity: 0.75; }
+.mergecards { border-top: 1px solid var(--hairline); padding: 10px 12px; }
+.mergecard { border: 1px solid var(--hairline); border-left: 3px solid var(--caution); background: var(--booth-0); padding: 8px 10px; margin-top: 8px; font-size: 12.5px; }
+.mergecard p { margin: 3px 0 0; color: var(--ink-2); font-size: 12px; }
+.mergecard .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.histlist { list-style: none; margin: 0; padding: 0; }
+.histlist li { border-bottom: 1px solid var(--hairline); padding: 8px 0; font-size: 12.5px; }
+.histlist .when { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.histlist .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.undoconfirm { border: 1px solid var(--hairline-strong); background: var(--booth-0); padding: 8px 10px; margin-top: 6px; }
+.undoconfirm p { margin: 0 0 6px; color: var(--ink-2); font-size: 12px; }
+
 } /* @layer components */

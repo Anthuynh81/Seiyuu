@@ -14,6 +14,7 @@ import type {
   VoiceAssignment,
   VoiceOut,
 } from "../api/types";
+import { usePlayer } from "../app/usePlayer";
 import { makeBook, makeJob } from "../test/fixtures";
 import type { MockApi } from "../test/utils";
 import { errorResponse, jsonResponse, mockApi, renderWithProviders } from "../test/utils";
@@ -422,20 +423,32 @@ describe("Review", () => {
     );
   });
 
-  it("undo last DELETEs /edits/last and the drained log disables further undo", async () => {
+  it("History lists the fixes and undoes the newest after saying exactly what it removes", async () => {
     const user = userEvent.setup();
     const server = setupReview();
-    server.delete("/api/books/b1/edits/last", { removed: { op: "rename" } });
+    const renameOp = { op: "rename", character_id: "alice", new_name: "Alicia", expected_name: "Alice" };
+    let undone = false;
+    server.on("GET", "/api/books/b1/edits", () => ({ version: 1, ops: undone ? [] : [renameOp] }));
+    server.on("DELETE", "/api/books/b1/edits/last", () => {
+      undone = true;
+      return { removed: renameOp };
+    });
     renderWithProviders(<Review />);
 
-    const undoBtn = await screen.findByRole("button", { name: "undo last" });
-    await waitFor(() => expect(undoBtn).toBeEnabled());
+    await user.click(await screen.findByRole("button", { name: "History · 1" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    expect(within(drawer).getByText('Renamed "Alice" to "Alicia"')).toBeInTheDocument();
 
-    server.get("/api/books/b1/edits", { version: 1, ops: [] }); // the refetch after the undo
-    await user.click(undoBtn);
+    await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
+    // asks first, naming exactly the change it removes; nothing is deleted yet
+    const confirm = within(drawer).getByRole("group", { name: "confirm undo" });
+    expect(confirm).toHaveTextContent('Undo removes this change: Renamed "Alice" to "Alicia".');
+    expect(server.lastCall("DELETE", "/api/books/b1/edits/last")).toBeUndefined();
 
-    expect(server.lastCall("DELETE", "/api/books/b1/edits/last")).toBeDefined();
-    await waitFor(() => expect(screen.getByRole("button", { name: "undo last" })).toBeDisabled());
+    await user.click(within(confirm).getByRole("button", { name: "Undo it" }));
+    await waitFor(() => expect(server.lastCall("DELETE", "/api/books/b1/edits/last")).toBeDefined());
+    expect(await within(drawer).findByText('Undone: Renamed "Alice" to "Alicia"')).toBeInTheDocument();
+    expect(await within(drawer).findByText("No fixes yet.")).toBeInTheDocument();
   });
 
   it("chapter arrows page the segment browser: › fetches and shows chapter 2", async () => {
@@ -489,7 +502,7 @@ describe("Review", () => {
     // distinguishable chip: "unattributed", never passed off as plain narration
     const chip = await screen.findByRole("button", { name: "unattributed" });
     // the drainstrip counts it: the book-level stat AND the chapter queue (0.0 + the 0.55 dialogue)
-    expect(screen.getByText(/1 unattributed quote\(s\) · 2 in this chapter/)).toBeInTheDocument();
+    expect(screen.getByText(/1 quote\(s\) with no speaker set · 2 in this chapter/)).toBeInTheDocument();
     // it wears the in-review marker like any low-confidence attribution
     expect(screen.getAllByText(/in review/)).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Next to check ▸" })).toBeEnabled();
@@ -1452,6 +1465,26 @@ function LocationProbe() {
 }
 const urlParams = () => new URLSearchParams(screen.getByTestId("loc").textContent ?? "");
 
+/** The shared player's playlist, read out ("clips|title|speaker"); `preload` loads a chapter
+    first, as Listen would, paused. */
+function PlayerProbe({
+  preload,
+}: {
+  preload?: { title: string; clips: { src: string; duration: number; key: string; speaker: string; words: [] }[] };
+}) {
+  const p = usePlayer();
+  if (!p) return null;
+  const clip = p.clips[p.index];
+  return (
+    <>
+      <output data-testid="player">{`${p.clips.length}|${p.chapterTitle}|${clip?.speaker ?? ""}`}</output>
+      {preload && (
+        <button onClick={() => p.load("b1", preload.title, preload.clips, { autoplay: false })}>preload</button>
+      )}
+    </>
+  );
+}
+
 function mallory(): CharacterSummary {
   return { ...bob(), id: "mallory", name: "Mallory", sample_lines: [], first_appearance: "ch005_b0010" };
 }
@@ -2021,5 +2054,561 @@ describe("Review front matter", () => {
     await waitFor(() => expect(server.lastCall("GET", "/api/books/b2/chapters/2/segments")).toBeDefined());
     expect(urlParams().get("book")).toBe("b2");
     expect(urlParams().get("ch")).toBe("2");
+  });
+});
+
+/* ------------------------------------------------------------------ power tools (1.10 B) */
+
+describe("Review power tools", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("Looks right ✓ keeps the speaker (a same-speaker reassign) and the line leaves the queue", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    renderWithProviders(<Review />);
+
+    const keep = await screen.findByRole("button", { name: "Looks right: keep Alice" });
+    // only the line to check offers it
+    expect(screen.getAllByRole("button", { name: /^Looks right/ })).toHaveLength(1);
+
+    const confirmed = chapterOneSegments();
+    confirmed.segments[1] = { ...confirmed.segments[1], confidence: 1 };
+    server.get("/api/books/b1/chapters/1/segments", confirmed); // the refetch after the edit
+    await user.click(keep);
+
+    expect(server.jsonBodyOf("POST", "/api/books/b1/edits")).toEqual({
+      op: "reassign",
+      block_id: "ch001_b0001",
+      segment_index: 1,
+      speaker: "alice",
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Looks right/ })).not.toBeInTheDocument());
+    expect(screen.queryByText(/in review/)).not.toBeInTheDocument();
+    // the button left with the line's "to check" state: focus is on that line's speaker chip
+    await waitFor(() => expect(screen.getByRole("button", { name: "ALICE" })).toHaveFocus());
+  });
+
+  it("while one Looks right saves, the others wait, so a refusal lands under its own line", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const base = chapterOneSegments();
+    base.segments.push(
+      seg({
+        block_id: "ch001_b0002",
+        type: "dialogue",
+        speaker: "bob",
+        speaker_name: "Bob",
+        text: '"Who\'s there?" asked Bob.',
+        confidence: 0.4,
+      }),
+    );
+    server.get("/api/books/b1/chapters/1/segments", base);
+    let release: () => void = () => undefined;
+    server.on(
+      "POST",
+      "/api/books/b1/edits",
+      () => new Promise((resolve) => (release = () => resolve(errorResponse(409, "render_active", "busy")))),
+    );
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Looks right: keep Alice" }));
+    const bobKey = screen.getByRole("button", { name: "Looks right: keep Bob" });
+    await waitFor(() => expect(bobKey).toHaveAttribute("aria-disabled", "true"));
+    await user.click(bobKey);
+    expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/books/b1/edits")).toHaveLength(1);
+
+    release();
+    // the refusal is Alice's line's, shown under it
+    const alert = await screen.findByRole("alert");
+    expect(alert.closest(".margin")).toHaveTextContent("ALICE");
+    expect(bobKey).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("a refused Looks right says why in plain words and is not retried", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.error("POST", "/api/books/b1/edits", 409, "render_active", "a render job for 'b1' is running");
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Looks right: keep Alice" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A recording is running for this book, so the change was refused.",
+    );
+    expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/books/b1/edits")).toHaveLength(1);
+  });
+
+  it("a confirmed unattributed quote reads as narration: no 'unattributed', no Looks right", async () => {
+    const server = setupReview();
+    const base = chapterOneSegments();
+    server.get("/api/books/b1/chapters/1/segments", {
+      ...base,
+      segments: [
+        seg({ block_id: "ch001_b0002", text: '"Who goes there?"', confidence: 1, unattributed_quote: true }),
+        seg({ block_id: "ch001_b0003", text: '"Halt!"', confidence: 0, unattributed_quote: true }),
+      ],
+    } satisfies SegmentBrowserOut);
+    renderWithProviders(<Review />);
+
+    // the unconfirmed one keeps its marker and its Looks right (the narrator reads it)
+    expect(await screen.findByRole("button", { name: "unattributed" })).toBeInTheDocument();
+    // ...worded as what it records: the narrator reads this quote
+    const keep = screen.getAllByRole("button", { name: "Narrator reads it: keep the narrator for this quote" });
+    expect(keep).toHaveLength(1);
+    expect(keep[0]).toHaveTextContent("Narrator reads it ✓");
+    // the confirmed one is narration now
+    expect(screen.getByRole("button", { name: "narration" })).toBeInTheDocument();
+  });
+
+  it("▶ on a recorded line plays its wav in the shared player; pressing it again pauses", async () => {
+    const user = userEvent.setup();
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play");
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause");
+    const server = setupReview();
+    const base = chapterOneSegments();
+    base.segments[1] = { ...base.segments[1], has_audio: true, audio_segment: 2, duration_seconds: 1.5, audio_key: "k9" };
+    server.get("/api/books/b1/chapters/1/segments", base);
+    renderWithProviders(<Review />);
+
+    await screen.findByText('"Hello there," said Alice.');
+    // only the line with audio gets a ▶
+    const keys = screen.getAllByRole("button", { name: "play this line's recording" });
+    expect(keys).toHaveLength(1);
+    await user.click(keys[0]);
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    const el = play.mock.contexts.at(-1) as HTMLAudioElement;
+    expect(el.src).toContain("/api/books/b1/segments/ch001_b0001/audio?segment=2&v=k9");
+
+    // jsdom never flips `paused` on play(); a real element would be playing now
+    vi.spyOn(HTMLMediaElement.prototype, "paused", "get").mockReturnValue(false);
+    await user.click(await screen.findByRole("button", { name: "pause this line's recording" }));
+    expect(pause).toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "play this line's recording" })).toBeInTheDocument();
+  });
+
+  it("▶ on a line plays just that line even when a Listen chapter sits paused on it", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const server = setupReview();
+    const base = chapterOneSegments();
+    base.segments[1] = { ...base.segments[1], has_audio: true, audio_segment: 2, duration_seconds: 1.5, audio_key: "k9" };
+    server.get("/api/books/b1/chapters/1/segments", base);
+    const src = "/api/books/b1/segments/ch001_b0001/audio?segment=2&v=k9";
+    renderWithProviders(
+      <>
+        <Review />
+        <PlayerProbe
+          preload={{
+            title: "The Beginning",
+            clips: [
+              { src, duration: 1.5, key: "ch001_b0001:2", speaker: "Alice", words: [] },
+              { src: "/next.wav", duration: 2, key: "ch001_b0002:0", speaker: "narrator", words: [] },
+            ],
+          }}
+        />
+      </>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "preload" }));
+    expect(screen.getByTestId("player")).toHaveTextContent("2|The Beginning|Alice");
+    await user.click(await screen.findByRole("button", { name: "play this line's recording" }));
+    // the one-line playlist replaced the chapter: nothing runs on into the next line
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveTextContent("1|The Beginning · one line|Alice"));
+  });
+
+  it("▶ on a line by a hidden character keeps the name out of the player", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const server = setupReview([alice(), bob(), mallory()]);
+    const base = chapterOneSegments();
+    base.segments[1] = {
+      ...base.segments[1],
+      speaker: "mallory",
+      speaker_name: "Mallory",
+      has_audio: true,
+      audio_segment: 1,
+      duration_seconds: 1.5,
+    };
+    server.get("/api/books/b1/chapters/1/segments", base);
+    renderWithProviders(
+      <>
+        <Review />
+        <PlayerProbe />
+      </>,
+    );
+    await screen.findByText("Mallory");
+    await turnOnSpoilerSafe(user);
+
+    expect(await screen.findByRole("button", { name: "▮▮▮▮▮" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "play this line's recording" }));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveTextContent("a hidden character"));
+    expect(screen.getByTestId("player")).not.toHaveTextContent("Mallory");
+  });
+
+  it("confirmed quotes are counted as quotes with no speaker set, and don't keep Next to check busy", async () => {
+    const server = setupReview();
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [alice(), bob()]),
+      low_confidence_segments: 0,
+      unattributed_quote_segments: 2,
+    });
+    server.get("/api/books/b1/chapters/1/segments", {
+      ...chapterOneSegments(),
+      segments: [
+        seg({ block_id: "ch001_b0002", text: '"Who goes there?"', confidence: 1, unattributed_quote: true }),
+        seg({ block_id: "ch001_b0003", text: '"Halt!"', confidence: 1, unattributed_quote: true }),
+      ],
+    } satisfies SegmentBrowserOut);
+    renderWithProviders(<Review />);
+
+    expect(await screen.findByText(/2 quote\(s\) with no speaker set · 0 in this chapter/)).toBeInTheDocument();
+    expect(screen.queryByText(/unattributed/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("thought lines are set in italics with a small thought tag", async () => {
+    const server = setupReview();
+    const base = chapterOneSegments();
+    base.segments.push(
+      seg({
+        block_id: "ch001_b0002",
+        type: "thought",
+        speaker: "alice",
+        speaker_name: "Alice",
+        text: "She can't know.",
+        confidence: 0.95,
+      }),
+    );
+    server.get("/api/books/b1/chapters/1/segments", base);
+    renderWithProviders(<Review />);
+
+    expect(await screen.findByText("She can't know.")).toHaveClass("thought");
+    expect(screen.getByText("thought")).toBeInTheDocument();
+    expect(screen.getByText("It was a dark night.")).not.toHaveClass("thought");
+  });
+
+  it("the speaker and emotion chips open with Enter and Space", async () => {
+    const user = userEvent.setup();
+    setupReview();
+    renderWithProviders(<Review />);
+
+    const chip = await screen.findByRole("button", { name: "ALICE" });
+    chip.focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText(/^reassign ·/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "cancel" }));
+
+    screen.getByRole("button", { name: "angry ••" }).focus();
+    await user.keyboard(" ");
+    expect(await screen.findByRole("button", { name: "set emotion" })).toBeInTheDocument();
+  });
+
+  it("characters carry gender/age chips, and unknown gender warns about the default female voice", async () => {
+    setupReview([
+      { ...alice(), age_hint: "young adult" },
+      { ...bob(), id: "pat", name: "Pat", gender: null },
+    ]);
+    renderWithProviders(<Review />);
+
+    const aliceRow = await screen.findByRole("row", { name: /Alice/ });
+    expect(within(aliceRow).getByText("female")).toBeInTheDocument();
+    expect(within(aliceRow).getByText("young adult")).toBeInTheDocument();
+    expect(within(aliceRow).queryByText(/automatic casting/)).not.toBeInTheDocument();
+
+    const patRow = screen.getByRole("row", { name: /Pat/ });
+    expect(within(patRow).getByText("gender unknown")).toBeInTheDocument();
+    expect(
+      within(patRow).getByText(
+        "Gender unknown, so automatic casting gives them a female voice. If that's wrong, pick a voice for them by hand.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("a merge suggestion from the registry notes says what moves and merges with the existing edit", async () => {
+    const user = userEvent.setup();
+    const bobNoGender = { ...bob(), gender: null };
+    const server = setupReview([alice(), bobNoGender]);
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [alice(), bobNoGender]),
+      notes: ["alias: adjudicator approved 'Bob' <-> 'Alice' at confidence 0.61 < 0.80 — flagged, not merged"],
+    });
+    renderWithProviders(<Review />);
+
+    const cards = await screen.findByRole("region", { name: "possible duplicates" });
+    expect(within(cards).getByText("Bob and Alice")).toBeInTheDocument();
+    expect(within(cards).getByText('Moves 17 lines from Bob to Alice. "Bob" stays as another name for Alice.')).toBeInTheDocument();
+
+    // flipping the direction updates the preview before anything is sent
+    await user.click(within(cards).getByRole("button", { name: "keep Bob instead" }));
+    expect(within(cards).getByText(/^Moves 42 lines from Alice to Bob/)).toBeInTheDocument();
+    await user.click(within(cards).getByRole("button", { name: "keep Alice instead" }));
+
+    server.get("/api/books/b1/characters", overviewFor("b1", [{ ...alice(), aliases: ["Ali", "Bob"], line_count: 59 }]));
+    await user.click(within(cards).getByRole("button", { name: "Merge into Alice" }));
+    expect(server.jsonBodyOf("POST", "/api/books/b1/edits")).toEqual({ op: "merge", loser_id: "bob", winner_id: "alice" });
+    // after the merge the pair is one character, so the card is gone; focus lands on what happened
+    const done = await within(cards).findByText("Merged Bob into Alice. No more suggestions.");
+    await waitFor(() => expect(done).toHaveFocus());
+    expect(within(cards).queryByText("Bob and Alice")).not.toBeInTheDocument();
+  });
+
+  it("a pair the server flagged as two different people (Mr. and Mrs.) never gets a merge card", async () => {
+    const mr = { ...bob(), id: "mr-smith", name: "Mr. Smith", gender: null };
+    const mrs = { ...alice(), id: "mrs-smith", name: "Mrs. Smith", gender: null };
+    const server = setupReview([mr, mrs]);
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [mr, mrs]),
+      notes: [
+        "alias: ambiguous 'smith' shared by ['Mr. Smith', 'Mrs. Smith'] — not merged, review",
+        "not merging 'Mrs. Smith' with existing ['Mr. Smith'] (flagged for review, not auto-applied)",
+      ],
+    });
+    renderWithProviders(<Review />);
+
+    expect(await screen.findByRole("row", { name: /Mrs\. Smith/ })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "possible duplicates" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Merge into/ })).not.toBeInTheDocument();
+  });
+
+  it("Not the same person hides the card for this viewer; spoiler-safe hides cards naming hidden characters", async () => {
+    const user = userEvent.setup();
+    const people = [alice(), { ...bob(), gender: null }, { ...mallory(), gender: null }];
+    const server = setupReview(people);
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", people),
+      notes: [
+        "alias: adjudicator approved 'Bob' <-> 'Alice' at confidence 0.61 < 0.80 — flagged, not merged",
+        "not merging 'Mallory' with existing ['Alice'] (flagged for review, not auto-applied)",
+      ],
+    });
+    renderWithProviders(<Review />);
+
+    const cards = await screen.findByRole("region", { name: "possible duplicates" });
+    expect(within(cards).getByText("Mallory and Alice")).toBeInTheDocument();
+    await turnOnSpoilerSafe(user);
+    expect(within(cards).queryByText(/Mallory/)).not.toBeInTheDocument();
+
+    await user.click(within(cards).getByRole("button", { name: "Not the same person" }));
+    expect(within(cards).queryByText("Bob and Alice")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(cards).getByText("Bob and Alice stay two people. No more suggestions.")).toHaveFocus(),
+    );
+    expect(JSON.parse(localStorage.getItem("seiyuu.review.notSame.b1") ?? "[]")).toEqual(["alice|bob"]);
+    expect(server.lastCall("POST", "/api/books/b1/edits")).toBeUndefined();
+  });
+
+  it("the character editor's merge says how many lines move", async () => {
+    const user = userEvent.setup();
+    setupReview();
+    renderWithProviders(<Review />);
+
+    const bobRow = await screen.findByRole("row", { name: /Bob/ });
+    await user.click(within(bobRow).getByRole("button", { name: "✎" }));
+    const dialog = await screen.findByRole("dialog", { name: /Edit character — Bob/ });
+    await user.click(within(dialog).getByRole("button", { name: /choose/ }));
+    await user.click(await screen.findByRole("option", { name: "Alice" }));
+    expect(within(dialog).getByText('Moves 17 lines from Bob to Alice. "Bob" stays as another name for Alice.')).toBeInTheDocument();
+  });
+
+  it("Go to line on a flagged paragraph opens and focuses it, in plain words", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [alice(), bob()]),
+      flagged: [{ block_id: "ch001_b0001", chapter_index: 1, reason: "reconstruction mismatch" }],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+
+    expect(await screen.findByText(/couldn't work out who speaks in a paragraph here/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to line" }));
+    const line = screen.getByText("It was a dark night.");
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(urlParams().get("block")).toBe("ch001_b0001");
+    expect(urlParams().get("ch")).toBe("1");
+  });
+
+  it("Go to line onto the line the link already names still moves focus there", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/characters", {
+      ...overviewFor("b1", [alice(), bob()]),
+      flagged: [{ block_id: "ch001_b0001", chapter_index: 1, reason: "reconstruction mismatch" }],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&ch=1&block=ch001_b0001&seg=0" },
+    );
+
+    const line = await screen.findByText("It was a dark night.");
+    await waitFor(() => expect(line).toHaveFocus());
+    const go = screen.getByRole("button", { name: "Go to line" });
+    go.focus();
+    await user.click(go);
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(urlParams().get("seg")).toBeNull();
+  });
+
+  it("an edit warning reads plainly and Go to line opens the line in its own chapter", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    server.get("/api/books/b1/chapters/1/segments", {
+      ...chapterOneSegments(),
+      edit_warnings: [
+        "reassign skipped: 'ch002_b0003'[0] is now different text than when the edit was recorded — re-record it if still wanted",
+      ],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&speaker=alice" },
+    );
+
+    expect(await screen.findByText(/A speaker fix no longer applies: the line changed since you made it/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to line" }));
+    const line = await screen.findByText('"Is anyone there?" Bob called.');
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(urlParams().get("ch")).toBe("2");
+    expect(urlParams().get("seg")).toBe("0");
+    // the one-character filter would hide the line: it is cleared
+    expect(urlParams().get("speaker")).toBeNull();
+  });
+
+  it("History links each line change to its line and names hidden characters as hidden", async () => {
+    const user = userEvent.setup();
+    const server = setupReview([alice(), bob(), mallory()]);
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    server.get("/api/books/b1/edits", {
+      version: 1,
+      ops: [
+        { op: "reassign", block_id: "ch002_b0003", segment_index: 0, speaker: "bob", text_anchor: '"Is anyone there?" Bob called.' },
+        { op: "reassign", block_id: "ch001_b0001", segment_index: 1, speaker: "mallory", text_anchor: '"Hello there," said Alice.' },
+      ],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+    await screen.findByText("Mallory");
+    await turnOnSpoilerSafe(user);
+
+    await user.click(await screen.findByRole("button", { name: "History · 2" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    expect(within(drawer).getByText('a hidden character says ""Hello there," said Alice."')).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Mallory/)).not.toBeInTheDocument();
+    expect(within(drawer).getByText(/Only the newest change can be undone/)).toBeInTheDocument();
+    // only the newest offers undo
+    expect(within(drawer).getAllByRole("button", { name: "Undo this…" })).toHaveLength(1);
+
+    const older = within(drawer).getByText('Bob says ""Is anyone there?" Bob called."').closest("li") as HTMLElement;
+    await user.click(within(older).getByRole("button", { name: "Go to line" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "History" })).not.toBeInTheDocument());
+    const line = await screen.findByText('"Is anyone there?" Bob called.');
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(urlParams().get("ch")).toBe("2");
+  });
+
+  it("with spoiler-safe on, History hides the names in a rename or merge of a hidden character", async () => {
+    const user = userEvent.setup();
+    const server = setupReview([alice(), bob(), mallory()]);
+    server.get("/api/books/b1/edits", {
+      version: 1,
+      ops: [
+        { op: "rename", character_id: "mallory", new_name: "Mal", expected_name: "Mallory" },
+        { op: "merge", loser_id: "mally", winner_id: "mallory", expected_loser_name: "Mally", expected_winner_name: "Mal" },
+      ],
+    });
+    renderWithProviders(<Review />);
+    await screen.findByText("Mallory");
+    await turnOnSpoilerSafe(user);
+
+    await user.click(await screen.findByRole("button", { name: "History · 2" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    expect(within(drawer).getByText("Renamed a hidden character")).toBeInTheDocument();
+    expect(within(drawer).getByText("Merged a name into a hidden character")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Mal/)).not.toBeInTheDocument();
+  });
+
+  it("the undo question is pinned: a refetch that changes the newest closes it, and focus follows", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const first = { op: "rename", character_id: "alice", new_name: "Alicia", expected_name: "Alice" };
+    server.get("/api/books/b1/edits", { version: 1, ops: [first] });
+    server.delete("/api/books/b1/edits/last", { removed: first });
+    const { queryClient } = renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "History · 1" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: "Undo it" })).toHaveFocus());
+    await user.click(within(drawer).getByRole("button", { name: "Keep it" }));
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: "Undo this…" })).toHaveFocus());
+
+    await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
+    // a background refetch brings in a newer change while the question is open
+    server.get("/api/books/b1/edits", {
+      version: 1,
+      ops: [first, { op: "rename", character_id: "bob", new_name: "Robert", expected_name: "Bob" }],
+    });
+    await queryClient.invalidateQueries({ queryKey: ["edits", "b1"] });
+
+    expect(await within(drawer).findByText(/The history changed since you opened it/)).toBeInTheDocument();
+    expect(within(drawer).queryByRole("group", { name: "confirm undo" })).not.toBeInTheDocument();
+    expect(server.lastCall("DELETE", "/api/books/b1/edits/last")).toBeUndefined();
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: "Undo this…" })).toHaveFocus());
+  });
+
+  it("undo refuses to remove a change it didn't show: a history that changed meanwhile is re-shown", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const first = { op: "rename", character_id: "alice", new_name: "Alicia", expected_name: "Alice" };
+    server.get("/api/books/b1/edits", { version: 1, ops: [first] });
+    server.delete("/api/books/b1/edits/last", { removed: first });
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "History · 1" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
+
+    // another tab recorded a newer change in the meantime
+    server.get("/api/books/b1/edits", {
+      version: 1,
+      ops: [first, { op: "rename", character_id: "bob", new_name: "Robert", expected_name: "Bob" }],
+    });
+    await user.click(within(drawer).getByRole("button", { name: "Undo it" }));
+
+    expect(await within(drawer).findByText(/The history changed since you opened it, so nothing was undone/)).toBeInTheDocument();
+    expect(server.lastCall("DELETE", "/api/books/b1/edits/last")).toBeUndefined();
+    expect(within(drawer).getByText('Renamed "Bob" to "Robert"')).toBeInTheDocument();
+  });
+
+  it("a refused undo is explained plainly and not retried", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const first = { op: "rename", character_id: "alice", new_name: "Alicia", expected_name: "Alice" };
+    server.get("/api/books/b1/edits", { version: 1, ops: [first] });
+    server.error("DELETE", "/api/books/b1/edits/last", 409, "render_active", "a render job for 'b1' is running");
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "History · 1" }));
+    const drawer = await screen.findByRole("dialog", { name: "History" });
+    await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
+    await user.click(within(drawer).getByRole("button", { name: "Undo it" }));
+
+    expect(await within(drawer).findByText("A recording is running for this book, so the change was refused.")).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
   });
 });
