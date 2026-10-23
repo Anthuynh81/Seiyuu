@@ -33,7 +33,17 @@ function JobCompletionWatcher() {
       qc.invalidateQueries({ queryKey: ["books"] });
       qc.invalidateQueries({ queryKey: ["book"] });
       if (count < prev.current) {
-        for (const key of ["segments", "render-summary", "validation", "estimate", "assignment", "voices"]) {
+        // "characters": a finished speaker re-run changes the roster and which model found it
+        const finished = [
+          "segments",
+          "render-summary",
+          "validation",
+          "estimate",
+          "assignment",
+          "voices",
+          "characters",
+        ];
+        for (const key of finished) {
           qc.invalidateQueries({ queryKey: [key] });
         }
         // a finished warm-up flips weights_cached/resident; any finish may follow a setup fix

@@ -21,8 +21,19 @@ jobs:
           cache-dependency-glob: uv.lock
       # test_assemble/test_master shell out to real ffmpeg; current ubuntu-latest
       # images no longer preinstall it.
+      # A hung apt mirror once held this step for 30+ minutes: cap each try and retry.
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        timeout-minutes: 8
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 150 sudo apt-get update -o Acquire::Retries=3 \
+              && timeout 150 sudo apt-get install -y --no-install-recommends ffmpeg; then
+              exit 0
+            fi
+            echo "ffmpeg install attempt $attempt failed; retrying"
+            sleep 10
+          done
+          exit 1
       # The locked torch is the cu126 build, but uv.lock (resolved on Windows) lacks
       # torch's Linux-only nvidia-* runtime deps — the pytorch index publishes
       # platform-inconsistent wheel metadata — so the cu126 build cannot even import

@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { useSetVoiceTags } from "../../api/hooks";
 import type { VoiceOut } from "../../api/types";
+import { PlainErrorLine } from "../../components/PlainError";
 
 /* -------------------------------------------------- tags */
 
@@ -49,7 +50,7 @@ export function TagEditor({ voice, titleFor }: { voice: VoiceOut; titleFor: (tag
       <button className="key quiet px-2 py-[2px]" disabled={setTags.isPending} onClick={save}>
         save
       </button>
-      {setTags.error && <span className="mono text-[10px] text-clip">{setTags.error.message}</span>}
+      <PlainErrorLine className="mono text-[10px] text-clip" error={setTags.error} fallback="Couldn't save the tags" />
     </div>
   );
 }

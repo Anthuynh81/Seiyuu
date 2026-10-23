@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -37,9 +37,10 @@ describe("Library", () => {
       await screen.findByText("Rendered One");
 
       const card = (title: string) => screen.getByText(title).closest<HTMLElement>(".bookcard")!;
-      expect(within(card("Fresh Ingest")).getByRole("link", { name: "Find the speakers" })).toHaveAttribute(
-        "href",
-        "/render?book=b2#find-speakers",
+      // finding the speakers happens on the card itself: the key opens its panel in place
+      expect(within(card("Fresh Ingest")).getByRole("button", { name: "Find the speakers" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
       );
       expect(within(card("Has Speakers")).getByRole("link", { name: "Cast the voices" })).toHaveAttribute(
         "href",
@@ -144,7 +145,7 @@ describe("Library", () => {
         });
       renderWithProviders(<Library />);
       expect(await screen.findByRole("group", { name: "The last recording failed" })).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Find the speakers" })).toHaveAccessibleDescription(
+      expect(screen.getByRole("button", { name: "Find the speakers" })).toHaveAccessibleDescription(
         /who says each line/,
       );
     });
@@ -190,7 +191,7 @@ describe("Library", () => {
 
     // the 402 escalates: the dialog re-titles and spells out the paid segments
     expect(await screen.findByRole("dialog", { name: "Discard paid renders?" })).toBeInTheDocument();
-    const discard = screen.getByRole("button", { name: /discard 7 paid segment\(s\) & delete/ });
+    const discard = screen.getByRole("button", { name: /discard 7 paid lines & delete/ });
     await user.click(discard);
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -216,8 +217,9 @@ describe("Library", () => {
     await user.click(within(dialog).getByRole("button", { name: "delete book" }));
 
     // the refusal names the live job; deleting is impossible until it's canceled
-    expect(await screen.findByText("conflicting_job")).toBeInTheDocument();
-    expect(screen.getByText(/a render job is running for this book/)).toBeInTheDocument();
+    // plain words: what is running, never the raw code
+    expect(await screen.findByText(/Recording is running for this book/)).toBeInTheDocument();
+    expect(screen.queryByText("conflicting_job")).not.toBeInTheDocument();
     // the danger key is GONE — no delete/retry/discard control remains, only close
     expect(screen.queryByRole("button", { name: "delete book" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry delete|discard/ })).not.toBeInTheDocument();
@@ -243,7 +245,8 @@ describe("Library", () => {
     await user.click(await screen.findByRole("button", { name: "delete book" }));
 
     // every surviving path is spelled out — the user must know what may need a manual sweep
-    expect(await screen.findByText("partial_delete")).toBeInTheDocument();
+    expect(await screen.findByText("partly deleted")).toBeInTheDocument();
+    expect(screen.queryByText("partial_delete")).not.toBeInTheDocument();
     expect(screen.getByText("books/b1/normalized.json")).toBeInTheDocument();
     expect(screen.getByText("output/b1/render")).toBeInTheDocument();
 
@@ -259,6 +262,90 @@ describe("Library", () => {
     });
     renderWithProviders(<Library />);
     expect(await screen.findByRole("button", { name: "delete" })).toBeDisabled();
+  });
+
+  describe("find the speakers on the card", () => {
+    it("the step's key opens the panel inside the card and starts the whole book from there", async () => {
+      const user = userEvent.setup();
+      const server = mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b2", title: "Fresh Ingest" })] })
+        .get("/api/system", makeSystemProbe());
+      server.post("/api/books/b2/attribute", makeJob({ book_id: "b2", kind: "attribute", state: "queued" }), 202);
+      renderWithProviders(<Library />);
+
+      const key = await screen.findByRole("button", { name: "Find the speakers" });
+      // collapsed: no panel, no extra fetches for it
+      expect(screen.queryByRole("region", { name: "Full cast: find the speakers" })).not.toBeInTheDocument();
+      expect(server.lastCall("GET", "/api/system")).toBeUndefined();
+
+      await user.click(key);
+      expect(key).toHaveAttribute("aria-expanded", "true");
+      const panel = await screen.findByRole("region", { name: "Full cast: find the speakers" });
+      expect(key).toHaveAttribute("aria-controls", panel.id);
+      expect(panel.closest(".bookcard")).toHaveTextContent("Fresh Ingest");
+      await within(panel).findByText(/qwen2.5:7b/);
+      await user.click(within(panel).getByRole("button", { name: "▶ find the speakers in the whole book" }));
+      await waitFor(() =>
+        expect(server.jsonBodyOf("POST", "/api/books/b2/attribute")).toEqual({
+          chapters: [],
+          provider: "local",
+          model: "qwen2.5:7b",
+        }),
+      );
+    });
+
+    it("once started, the open panel stays on the card as the running strip and holds the focus", async () => {
+      const user = userEvent.setup();
+      const server = mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b2", title: "Fresh Ingest" })] })
+        .get("/api/system", makeSystemProbe());
+      server.post("/api/books/b2/attribute", makeJob({ book_id: "b2", kind: "attribute", state: "queued" }), 202);
+      const { queryClient } = renderWithProviders(<Library />);
+
+      const key = await screen.findByRole("button", { name: "Find the speakers" });
+      const reason = /work out who says each line/;
+      await user.click(key);
+      const panel = await screen.findByRole("region", { name: "Full cast: find the speakers" });
+      // the open panel explains the step: the key's own reason isn't repeated beside it
+      expect(within(panel.closest(".bookcard") as HTMLElement).getAllByText(reason)).toHaveLength(1);
+      await within(panel).findByText(/qwen2.5:7b/);
+      await user.click(within(panel).getByRole("button", { name: "▶ find the speakers in the whole book" }));
+      await within(panel).findByRole("status");
+
+      // the watcher refetches the shelf: the book now carries the attribute job
+      server.get("/api/books", {
+        books: [makeBook({ book_id: "b2", title: "Fresh Ingest", active_job: { job_id: "j", kind: "attribute", state: "queued" } })],
+      });
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: ["books"] });
+      });
+      const strip = (await screen.findAllByText("finding the speakers")).map((el) => el.closest(".drainstrip")).find(Boolean);
+      expect(strip).toBeTruthy();
+      await waitFor(() => expect(document.activeElement).toBe(strip));
+    });
+
+    it("on the card too, a stopped Ollama disables the start with one reason and the command", async () => {
+      const user = userEvent.setup();
+      mockApi()
+        .get("/api/books", { books: [makeBook({ book_id: "b2", title: "Fresh Ingest" })] })
+        .get("/api/system", makeSystemProbe({ ollama: { base_url: "x", reachable: false, model_installed: null } }));
+      renderWithProviders(<Library />);
+      await user.click(await screen.findByRole("button", { name: "Find the speakers" }));
+      const panel = await screen.findByRole("region", { name: "Full cast: find the speakers" });
+      const start = within(panel).getByRole("button", { name: "▶ find the speakers in the whole book" });
+      await waitFor(() => expect(start).toBeDisabled());
+      expect(start).toHaveAccessibleDescription(/Ollama isn't running/);
+      expect(within(panel).getByText("ollama serve")).toBeInTheDocument();
+    });
+
+    it("books past this step keep their plain next-step link", async () => {
+      mockApi().get("/api/books", {
+        books: [makeBook({ book_id: "b3", title: "Has Speakers", attributed: true })],
+      });
+      renderWithProviders(<Library />);
+      expect(await screen.findByRole("link", { name: "Cast the voices" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Find the speakers/ })).not.toBeInTheDocument();
+    });
   });
 
   describe("upload result", () => {

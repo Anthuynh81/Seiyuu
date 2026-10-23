@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
+import { readStored, writeStored } from "../lib/storage";
 import { PlayerContext, PlayerTimeContext, type LoadOptions, type PlayClip, type PlayerApi } from "./usePlayer";
 
 interface PlayerState {
@@ -8,6 +9,16 @@ interface PlayerState {
   index: number; // current clip
   clips: PlayClip[];
   playing: boolean;
+}
+
+function storedVolume(raw: string | null): number {
+  const v = raw === null ? NaN : Number(raw);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.8;
+}
+
+function storedRate(raw: string | null): number {
+  const r = Number(raw);
+  return Number.isFinite(r) && r > 0 ? r : 1;
 }
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
@@ -29,8 +40,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // double-invokes updaters in dev, which would double-fire onEnded and double-play).
   const stateRef = useRef(state);
   stateRef.current = state;
-  const [volume, setVolumeState] = useState(() => Number(localStorage.getItem("seiyuu.volume") ?? "0.8"));
-  const [rate, setRateState] = useState(() => Number(localStorage.getItem("seiyuu.rate")) || 1);
+  // Volume and rate are per-viewer conveniences: blocked storage (private window, site data
+  // denied) must never crash the app on open, and a garbled value must never reach the
+  // audio element (setting volume to NaN throws).
+  const [volume, setVolumeState] = useState(() => storedVolume(readStored("seiyuu.volume")));
+  const [rate, setRateState] = useState(() => storedRate(readStored("seiyuu.rate")));
   const rateRef = useRef(rate);
   rateRef.current = rate;
 
@@ -158,13 +172,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       },
       setVolume: (v) => {
         setVolumeState(v);
-        localStorage.setItem("seiyuu.volume", String(v));
+        writeStored("seiyuu.volume", String(v));
         if (audioRef.current) audioRef.current.volume = v;
       },
       rate,
       setRate: (r) => {
         setRateState(r);
-        localStorage.setItem("seiyuu.rate", String(r));
+        writeStored("seiyuu.rate", String(r));
         if (audioRef.current) {
           audioRef.current.defaultPlaybackRate = r;
           audioRef.current.playbackRate = r;

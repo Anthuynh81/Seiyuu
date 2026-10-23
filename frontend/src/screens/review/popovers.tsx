@@ -1,9 +1,9 @@
 import { useState } from "react";
 
-import { ApiError } from "../../api/client";
 import { useRecordEdit } from "../../api/hooks";
 import type { EmotionLabel, EmotionVerdict } from "../../api/types";
 import type { CharacterSummary, SegmentRow } from "../../api/types";
+import { PlainErrorLine } from "../../components/PlainError";
 import { TalkSelect } from "../../components/Select";
 import { EMOTION_LABELS } from "../../lib/emotion";
 import { NONE } from "./helpers";
@@ -13,32 +13,52 @@ import { NONE } from "./helpers";
 export function ReassignPopover({
   row,
   cast,
+  speakerHidden = false,
   bookId,
   onClose,
 }: {
   row: SegmentRow;
+  /** the characters the speaker list offers (spoiler-safe leaves out the ones not met yet) */
   cast: CharacterSummary[];
+  /** spoiler-safe really masks this line's current speaker (not merely: missing from `cast`,
+      which is also true while the character list loads or after it failed) */
+  speakerHidden?: boolean;
   bookId: string;
   onClose: () => void;
 }) {
   const record = useRecordEdit(bookId);
   const [speaker, setSpeaker] = useState(row.speaker ?? NONE);
   const anchor = row.text.replace(/\s+/g, " ").trim().slice(0, 58);
-  const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
   return (
     <span className="popover" onClick={(e) => e.stopPropagation()}>
-      <span className="tag">reassign · {row.block_id} [{row.segment_index}]</span>
+      <span className="tag" title={`${row.block_id} [${row.segment_index}]`}>
+        who says this line?
+      </span>
       <span className="row">
         <TalkSelect
           className="flex-1"
           ariaLabel="speaker"
           value={speaker}
           onChange={setSpeaker}
-          options={[{ value: NONE, label: "— narration —" }, ...cast.map((c) => ({ value: c.id, label: c.name }))]}
+          options={[
+            { value: NONE, label: "— narration —" },
+            // spoiler-safe hands over only the characters met so far; a line already credited
+            // to a hidden one keeps that choice without naming it. A speaker missing for any
+            // other reason (the character list still loading, or failed) keeps their own name.
+            ...(row.speaker !== null && !cast.some((c) => c.id === row.speaker)
+              ? [
+                  {
+                    value: row.speaker,
+                    label: speakerHidden ? "a hidden character" : (row.speaker_name ?? row.speaker),
+                  },
+                ]
+              : []),
+            ...cast.map((c) => ({ value: c.id, label: c.name })),
+          ]}
         />
       </span>
-      <span className="mono block text-[10px] text-ink-3">anchor: {anchor}…</span>
-      {error && <span className="mono block mt-1.5 text-[10.5px] text-clip">{error}</span>}
+      <span className="mono block text-[10px] text-ink-3">“{anchor}…”</span>
+      <PlainErrorLine className="mono block mt-1.5 text-[10.5px] text-clip" error={record.error} fallback="Couldn't save that" />
       <span className="acts">
         <button className="key quiet" onClick={onClose}>cancel</button>
         <button
@@ -84,7 +104,6 @@ export function EmotionPopover({
     current && current.label !== "neutral" ? current.label : settable[0],
   );
   const [intensity, setIntensity] = useState(current?.intensity ?? 2);
-  const error = record.error instanceof ApiError ? record.error.message : record.error?.message;
   const save = (emotion: EmotionVerdict | null) =>
     record.mutate(
       { op: "set_emotion", block_id: row.block_id, segment_index: row.segment_index, emotion },
@@ -92,7 +111,9 @@ export function EmotionPopover({
     );
   return (
     <span className="popover" onClick={(e) => e.stopPropagation()}>
-      <span className="tag">emotion · {row.block_id} [{row.segment_index}]</span>
+      <span className="tag" title={`${row.block_id} [${row.segment_index}]`}>
+        how is this line said?
+      </span>
       <span className="row flex gap-1.5">
         <TalkSelect
           className="flex-1"
@@ -110,9 +131,9 @@ export function EmotionPopover({
         />
       </span>
       <span className="mono block text-[10px] text-ink-3">
-        voiced at render only when emotion rendering is on
+        voiced only when a recording has emotion turned on
       </span>
-      {error && <span className="mono block mt-1.5 text-[10.5px] text-clip">{error}</span>}
+      <PlainErrorLine className="mono block mt-1.5 text-[10.5px] text-clip" error={record.error} fallback="Couldn't save that" />
       <span className="acts">
         {current && (
           <button className="key quiet" disabled={record.isPending} onClick={() => save(null)}>

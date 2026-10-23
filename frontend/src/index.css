@@ -138,7 +138,7 @@
 
 /* shell */
 .shell { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 1fr 48px; height: 100vh; }
-.nav { grid-row: 1 / 3; background: var(--console); border-right: 1px solid var(--hairline); display: flex; flex-direction: column; padding: 16px 0; }
+.nav { grid-row: 1 / 3; background: var(--console); border-right: 1px solid var(--hairline); display: flex; flex-direction: column; padding: 16px 0; overflow-y: auto; }
 .brand { padding: 4px 20px 18px; border-bottom: 1px solid var(--hairline); }
 .brand b { font-size: 16px; font-weight: 650; letter-spacing: 0.02em; }
 .brand span { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.12em; margin-top: 2px; }
@@ -146,6 +146,14 @@
 .nav a:hover { color: var(--ink); background: var(--console-hi); }
 .nav a.on { color: var(--ink); border-left-color: var(--tungsten); background: var(--console-hi); }
 .nav .lamp { width: 6px; height: 6px; margin-left: auto; background: var(--rolling); animation: pulse 1.4s ease-in-out infinite; }
+/* workflow groups: the book's numbered steps read as a sequence; Tools sit quieter below */
+.navgroup { border-top: 1px solid var(--hairline); margin-top: 10px; padding-top: 8px; }
+.navcap { padding: 4px 20px 4px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+.navbook { padding: 0 20px 6px; font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav .stepn { display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--hairline-strong); font-family: var(--mono); font-size: 10px; color: var(--ink-3); flex: none; }
+.nav a.on .stepn { color: var(--tungsten); border-color: var(--tungsten-dim); }
+.navgroup.tools a { padding: 6px 20px; font-size: 12.5px; font-weight: 400; color: var(--ink-3); }
+.navgroup.tools a:hover, .navgroup.tools a.on { color: var(--ink); }
 .nav .foot { margin-top: auto; padding: 14px 20px; border-top: 1px solid var(--hairline); font-family: var(--mono); font-size: 10px; color: var(--ink-3); line-height: 1.7; }
 /* health pill: the footer's live status, a silkscreen key that opens the System drawer */
 .hpill { display: flex; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; padding: 5px 8px; border: 1px solid var(--hairline); font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); text-align: left; }
@@ -155,7 +163,7 @@
 .main { overflow-y: auto; padding: 24px 28px 40px; }
 .screen { max-width: 1200px; }
 
-/* theme switch (booth / daylight / system) — silkscreen buttons in the nav */
+/* theme switch (dark / light / auto) — silkscreen buttons in the nav */
 .themesw { display: flex; gap: 4px; padding: 12px 20px 0; align-items: center; }
 .themesw .cap { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); margin-right: auto; }
 .themesw button { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--hairline); padding: 2px 7px; }
@@ -167,6 +175,9 @@
 .transport .meter { flex: 1; max-width: 420px; height: 10px; border: 1px solid var(--hairline); background: var(--booth-0); position: relative; overflow: hidden; }
 .transport .meter.run::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(90deg, var(--rolling) 0 6px, transparent 6px 10px); animation: crawl 1s linear infinite; opacity: 0.85; }
 @keyframes crawl { to { transform: translateX(10px); } }
+/* a parsed "chapter N/M" fills the meter instead of the stripe (lib/progress.ts) */
+.transport .meter > i, .jobmeter > i { display: block; height: 100%; background: var(--rolling); }
+.jobmeter { height: 6px; margin-top: 6px; border: 1px solid var(--hairline); background: var(--booth-0); }
 .transport .cancel { font-family: var(--mono); font-size: 11px; color: var(--ink-2); border: 1px solid var(--hairline); padding: 3px 10px; }
 .transport .cancel:hover { color: var(--clip); border-color: var(--clip); }
 .transport .idle { color: var(--ink-3); }
@@ -184,6 +195,8 @@
 .key[disabled] { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
 .key.quiet { border-color: var(--hairline); color: var(--ink-2); }
 .key.quiet:hover { background: var(--console-hi); color: var(--ink); }
+.key[aria-disabled="true"], .key[aria-disabled="true"]:hover { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
+.key[aria-busy="true"] { cursor: progress; }
 .key.danger { border-color: var(--clip); color: var(--clip); }
 .key.danger:hover { background: var(--clip); color: var(--booth); border-color: var(--clip); }
 .link { color: var(--tungsten); text-decoration: none; background: none; border: none; cursor: pointer; padding: 0; font: inherit; }
@@ -309,6 +322,11 @@ details.fine summary:hover { color: var(--tungsten); }
 .roster tr.masked td { color: var(--ink-3); }
 .roster .mask { letter-spacing: 1px; color: var(--ink-3); }
 .roster tr.masked .sample { font-family: var(--mono); font-style: normal; font-size: 10.5px; }
+/* a casting ▶'s wait / refusal, on its own full-width row under the character */
+.roster tr.playnote td { text-align: left; padding-top: 0; font-weight: 400; }
+.roster tr.playnote:hover td { background: none; }
+.refusal.compact { padding: 4px 8px; }
+.refusal.compact p { font-size: 11.5px; }
 .caststrip { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); }
 .caststrip details.fine { margin-top: 0; }
 /* suggest-a-cast preview: a raised block over the roster; status + trait chips are hairline
@@ -372,6 +390,8 @@ details.fine summary:hover { color: var(--tungsten); }
 
 .provenance { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 7px 12px; background: var(--console); border: 1px solid var(--hairline); }
 .voicelabel { display: block; margin-top: 3px; font-size: 9.5px; color: var(--paper-ink-2); opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Listen: the line would get a different voice today (its speaker or that voice changed after recording) */
+.voicenote { display: block; margin-top: 3px; padding-left: 5px; border-left: 2px solid var(--tungsten-dim); font-size: 9.5px; font-style: italic; color: var(--paper-ink); }
 
 /* shelf: pick a book by cover */
 .shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; max-width: 900px; }
@@ -556,6 +576,24 @@ details.fine summary:hover { color: var(--tungsten); }
 .ingestres ul { margin: 4px 0 0; padding-left: 18px; }
 .ingestres li { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
 
+/* find the speakers: one step card (Render), a card's opened step (Library), Review's empty state */
+.attrpanel { margin-bottom: 14px; }
+.attrpanel:focus { outline: none; }
+.bookcard .attrpanel { margin: 10px 0 0; background: var(--booth-0); }
+.sub + .attrpanel { margin-top: 8px; }
+.attr-body { padding: 10px 14px 12px; }
+.attr-why { margin: 0 0 10px; color: var(--ink-2); font-size: 12px; max-width: 60ch; }
+.attr-reader { margin: 8px 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.attr-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.attr-block { margin-top: 8px; border: 1px solid var(--hairline); border-left: 2px solid var(--caution); background: var(--booth-0); padding: 7px 10px; }
+.attr-block p { margin: 0; color: var(--ink); font-size: 12px; }
+.attr-ok { margin: 8px 0 0; font-size: 12px; color: var(--ok); }
+details.fine.attr-adv { margin-top: 0; padding: 8px 14px; }
+.attr-adv .attr-body { padding: 6px 0 4px; }
+.attr-notes { margin: 0 0 8px; padding-left: 16px; color: var(--ink-2); font-size: 12px; max-width: 62ch; }
+.attr-notes li { margin-top: 2px; }
+.attr-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+
 /* ---- primitives (react-aria base, Talkback skin) ---- */
 
 /* select: trigger reads like a console control; the popover is ours, not the OS's */
@@ -583,5 +621,45 @@ details.fine summary:hover { color: var(--tungsten); }
 /* tooltip: a raised console chip, mono voice */
 .ttip { background: var(--raised); border: 1px solid var(--hairline-strong); color: var(--ink-2); font-family: var(--mono); font-size: 11px; line-height: 1.5; padding: 6px 9px; max-width: 340px; z-index: 70; }
 .ttip-arrow { display: block; width: 6px; height: 6px; background: var(--raised); border-left: 1px solid var(--hairline-strong); border-top: 1px solid var(--hairline-strong); transform: rotate(225deg) translate(2px, 2px); }
+
+/* Character Review navigation (1.10): the line a deep link / "Next to check" landed on, and
+   the one-character filter bar above the page. A tungsten bar outside the line's box (outer
+   box-shadow never paints under the text, so the dialogue hanging indent is untouched). */
+.seg.target { background: color-mix(in srgb, var(--tungsten) 12%, transparent); box-shadow: -4px 0 0 0 var(--tungsten); outline: none; }
+.seg.target:focus-visible { outline: 1px solid var(--tungsten-dim); outline-offset: 2px; }
+.filterbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--hairline); border-left: 3px solid var(--tungsten); background: var(--booth-0); padding: 6px 12px; margin-bottom: 12px; font-size: 12.5px; color: var(--ink-2); }
+.filterbar b { color: var(--ink); font-weight: 600; }
+.navnote { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.rowname { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.rowname:hover, .rowname[aria-pressed="true"] { color: var(--tungsten); }
+
+/* Character Review power tools (1.10 part B): line actions in the paper margin, the thought
+   style, character hint chips, merge cards and the History drawer. Paper tokens on the page,
+   console tokens on the roster and drawer; hairlines, square corners. (The speaker and emotion
+   chips are react-aria buttons now; preflight already resets their button chrome.) */
+.margin .chip[data-focus-visible], .margin .emochip[data-focus-visible] { outline: 1px solid var(--paper-ink); outline-offset: 1px; }
+.seg.thought { font-style: italic; }
+.thoughttag { display: inline-block; margin-left: 6px; padding: 0 5px; border: 1px dashed var(--paper-ink-2); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; font-style: italic; }
+.lineacts { display: flex; gap: 4px; margin-top: 4px; }
+.linekey { background: none; border: 1px solid var(--paper-ink-2); color: var(--paper-ink); font-family: var(--mono); font-size: 10px; padding: 1px 6px; cursor: pointer; }
+.linekey:hover { border-color: var(--paper-ink); background: var(--paper-seam); }
+.linekey[aria-disabled="true"] { opacity: 0.6; cursor: progress; }
+.linenote { display: block; margin-top: 4px; color: var(--paper-ink); font-family: var(--sans); font-size: 11px; line-height: 1.4; }
+.hintchips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.hintchip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; color: var(--ink-2); border: 1px solid var(--hairline); padding: 0 5px; }
+.hintchip.unknown { color: var(--caution); border-color: var(--caution-edge); }
+.hintwarn { display: block; margin-top: 2px; font-family: var(--mono); font-size: 10px; color: var(--caution); font-weight: 400; }
+.mwarn .goto { margin-left: 8px; color: inherit; text-decoration: underline; font-weight: 600; }
+.mwarn .raw { display: block; margin-top: 3px; opacity: 0.75; }
+.mergecards { border-top: 1px solid var(--hairline); padding: 10px 12px; }
+.mergecard { border: 1px solid var(--hairline); border-left: 3px solid var(--caution); background: var(--booth-0); padding: 8px 10px; margin-top: 8px; font-size: 12.5px; }
+.mergecard p { margin: 3px 0 0; color: var(--ink-2); font-size: 12px; }
+.mergecard .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.histlist { list-style: none; margin: 0; padding: 0; }
+.histlist li { border-bottom: 1px solid var(--hairline); padding: 8px 0; font-size: 12.5px; }
+.histlist .when { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.histlist .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.undoconfirm { border: 1px solid var(--hairline-strong); background: var(--booth-0); padding: 8px 10px; margin-top: 6px; }
+.undoconfirm p { margin: 0 0 6px; color: var(--ink-2); font-size: 12px; }
 
 } /* @layer components */

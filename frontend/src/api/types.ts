@@ -216,6 +216,9 @@ export interface RenderRequest {
 export interface RenderSummaryOut {
   book_id: string;
   mode: RenderMode;
+  // one-narrator recordings: the voice that read it (null for a full cast). Optional only so
+  // slim fixtures can omit it; the server always sends it.
+  voice_id?: string | null;
   chapters: { index: number; title: string; segments: number; duration_seconds: number }[];
   total_seconds: number;
   voices_used: Record<string, { engine: string; engine_model_version: string; kind: string }>;
@@ -539,6 +542,11 @@ export interface SystemStatusOut {
   attribution: AttributionDefaults;
   keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
+  // server limits; optional only so slim test fixtures can omit it (the server always sends it)
+  limits?: {
+    // a whole-book render over this many speakable paragraphs needs confirm_full=true
+    full_render_confirm_blocks: number;
+  };
 }
 
 export interface OllamaStatus {
@@ -578,6 +586,10 @@ export interface EnginesOut {
 /** Slim view of GET /api/settings (redacted config) — only what screens consume. */
 export interface SettingsOut {
   kokoro_default_voice: string; // the preset a full cast reset narrates with
+  attribution_provider: string;
+  // the LOCAL speaker-finding model (the one the system probe's ollama.model_installed checks),
+  // even when the default reader is Claude
+  attribution_model: string;
 }
 
 /** "ch013_b0042" -> 13; null when unparsable. */

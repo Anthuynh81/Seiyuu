@@ -1,4 +1,5 @@
 import type { LexiconEntry, RespellSuggestion } from "../api/types";
+import { auditionLine } from "./audition";
 
 /** A fresh, empty editor row. */
 export function blankEntry(term = ""): LexiconEntry {
@@ -63,4 +64,31 @@ export function applyRespellings(
     }
   }
   return next;
+}
+
+/* -------------------------------------------------- hear it in a sentence */
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The sentence a word is heard in when the book offers none of its own. */
+export const frameSentence = (word: string) => `This is how you say ${word}.`;
+
+/** The line the ▶ next to an entry speaks: the book's own sentence for that word (a
+    hard-name suggestion's sample) when there is one, else a short frame sentence, with every
+    whole-word occurrence of the term replaced by its respelling (respecting "match capitals
+    exactly"). This only APPROXIMATES the recording path (which applies the dictionary during
+    text normalization), so the UI labels it approximate. Undefined until the row has both a
+    word and a respelling. Trimmed to the audition endpoint's limit. */
+export function hearItLine(entry: LexiconEntry, sample?: string | null): string | undefined {
+  const word = entry.term.trim();
+  const say = entry.respelling.trim();
+  if (!word || !say) return undefined;
+  const re = new RegExp(
+    `(?<![\\p{L}\\p{N}])${escapeRe(word)}(?![\\p{L}\\p{N}])`,
+    `gu${entry.case_sensitive ? "" : "i"}`,
+  );
+  const own = (sample ?? "").replace(/\s+/g, " ").trim();
+  const base = own && re.test(own) ? own : frameSentence(word);
+  re.lastIndex = 0;
+  return auditionLine(base.replace(re, () => say));
 }

@@ -15,8 +15,8 @@ export function StaleAudioBanner({
     <div className="caststrip flex-wrap gap-2 text-[11px]">
       <span className="tag">audio predates a voice change</span>
       <span className="mono text-ink-2">
-        the assembled chapters/m4b still speak with the re-cloned voice&apos;s OLD reference —
-        re-render, then re-assemble to refresh them
+        the finished chapter files and audiobook still use the re-cloned voice&apos;s OLD recording —
+        record again, then build the audiobook again to refresh them
       </span>
     </div>
   );

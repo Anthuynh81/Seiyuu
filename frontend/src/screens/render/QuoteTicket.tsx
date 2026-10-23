@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { QuoteResponse } from "../../api/types";
+import { explainFailure } from "../../lib/glossary";
 
 /* -------------------------------------------------- quote ticket */
 
@@ -8,6 +9,13 @@ export type TicketState =
   | { kind: "none" }
   | { kind: "live"; quote: QuoteResponse }
   | { kind: "refused"; quote: QuoteResponse; stamp: "DRIFT" | "EXPIRED" | "USED"; message: string };
+
+/** Why a ticket was refused, in the glossary's words (the server's text stays in the tooltip). */
+const STAMP_WHY: Record<"DRIFT" | "EXPIRED" | "USED", string> = {
+  DRIFT: explainFailure({ code: "cost_drift" }).summary,
+  EXPIRED: explainFailure({ code: "quote_expired" }).summary,
+  USED: explainFailure({ code: "quote_used" }).summary,
+};
 
 function useNow(active: boolean) {
   const [now, setNow] = useState(() => Date.now() / 1000);
@@ -25,12 +33,15 @@ export function QuoteTicket({
   onRemint,
   onExpired,
   busy,
+  bookTitle,
 }: {
   state: TicketState;
   onConfirm: () => void;
   onRemint: () => void;
   onExpired: () => void;
   busy: boolean;
+  /** the book's title, shown instead of its internal id */
+  bookTitle?: string | null;
 }) {
   const now = useNow(state.kind === "live");
   const quote = state.kind === "none" ? null : state.quote;
@@ -54,11 +65,11 @@ export function QuoteTicket({
             {dead ? "refused" : `expires ${mmss}`}
           </span>
         </div>
-        <div className="line"><span>book</span><span>{quote.book_id}</span></div>
+        <div className="line"><span>book</span><span>{bookTitle ?? quote.book_id}</span></div>
         <div className="line"><span>chapters</span><span>{quote.chapters.length ? quote.chapters.join(", ") : "all"}</span></div>
         <div className="line"><span>paid segments</span><span>{quote.paid_segments}</span></div>
         <div className="line"><span>ceiling</span><span>${quote.max_usd_ceiling.toFixed(2)} ok</span></div>
-        {dead && <div className="line text-clip"><span>refusal</span><span>{state.message}</span></div>}
+        {dead && <div className="line text-clip"><span>refusal</span><span title={state.message}>{STAMP_WHY[state.stamp]}</span></div>}
         <div className="total">
           <span className="tag text-paper-ink-2">
             {dead ? "token intact — mint a fresh quote" : "the render never bills past this"}

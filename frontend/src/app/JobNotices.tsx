@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useBooks, useDepartedJobs, useRecentJobs } from "../api/hooks";
 import type { JobKind, JobOut } from "../api/types";
 import { JobErrorText } from "../components/JobErrorText";
+import { SCREENS } from "../lib/glossary";
 import { engineSubject, finishedHeadline, subjectName } from "../lib/jobCopy";
 import { explainJobError } from "../lib/jobErrors";
 
@@ -19,8 +20,8 @@ const LED: Record<string, string> = { succeeded: "ok", failed: "err", canceled: 
 const NEXT: Partial<Record<JobKind, [screen: string, label: string]>> = {
   attribute: ["review", "Review characters"],
   render: ["listen", "Listen"],
-  assemble: ["render", "Open Render & Jobs"],
-  master: ["render", "Open Render & Jobs"],
+  assemble: ["render", `Open ${SCREENS.render}`],
+  master: ["render", `Open ${SCREENS.render}`],
 };
 
 function Notice({ job, name, onDismiss: dismissId }: { job: JobOut; name: string; onDismiss: (id: string) => void }) {
@@ -42,7 +43,7 @@ function Notice({ job, name, onDismiss: dismissId }: { job: JobOut; name: string
 
   const headline = finishedHeadline(job, name);
   const isBook = engineSubject(job.book_id) === null;
-  const next = !isBook ? undefined : failed ? (["render", "Open Render & Jobs"] as const) : NEXT[job.kind];
+  const next = !isBook ? undefined : failed ? (["render", `Open ${SCREENS.render}`] as const) : NEXT[job.kind];
   const cls = failed ? "fail" : job.state === "canceled" ? "stop" : "";
   return (
     <div

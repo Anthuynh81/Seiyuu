@@ -1,44 +1,35 @@
 import { Link } from "react-router-dom";
 
-import { ApiError } from "../../api/client";
 import { useBooks, useCharacterNames, useDeleteVoice, useVoiceReferences } from "../../api/hooks";
 import type { VoiceOut, VoiceReferencesOut } from "../../api/types";
 import { TalkDialog } from "../../components/Dialog";
 import { JobErrorText } from "../../components/JobErrorText";
-import { explainJobError, type JobErrorExplanation } from "../../lib/jobErrors";
+import { explainFailure, failureOf, SCREENS, type JobErrorExplanation } from "../../lib/glossary";
 import { bookHref } from "../../lib/nextStep";
 
 /* -------------------------------------------------- delete-voice confirmation */
 
 const CHARACTER_PREFIX = "character:";
 
-/** The server's refusals for this action, in plain words. The raw message stays under Details.
+/** The server's refusals for this action, through the one glossary (lib/glossary), with the
+    wording sharpened for this dialog: what did or didn't happen to the voice. The recourse
+    (e.g. stop the job in the way) and the raw message under Details come from the glossary.
     `stage` says which call failed: loading the list happens before the user asked to delete
     anything, so its copy must not read as a failed delete. */
 function explainDeleteError(err: unknown, stage: "check" | "delete"): JobErrorExplanation {
-  if (!(err instanceof ApiError)) {
-    return explainJobError(err instanceof Error ? err.message : String(err));
-  }
-  const base = { details: err.message || null, known: true };
-  switch (err.code) {
-    case "voice_referenced":
+  const out = explainFailure(failureOf(err));
+  switch (out.id) {
+    case "voice_in_use":
       return {
-        ...base,
-        id: "unknown",
+        ...out,
         summary: "This voice is cast in a book, so it wasn't deleted.",
-        fix: "The list above is up to date now. Give those parts another voice in Character Review, then try again.",
+        fix: `The list above is up to date now. Give those parts another voice on ${SCREENS.review}, then try again.`,
       };
     case "render_active":
+      return stage === "delete" ? { ...out, summary: `${out.summary} Nothing was deleted.` } : out;
+    case "damaged_file":
       return {
-        ...base,
-        id: "render_active",
-        summary: "A recording or audiobook build is running, so nothing was deleted.",
-        fix: "Wait for it to finish, or cancel it in the bar at the bottom, then try again.",
-      };
-    case "corrupt_artifact":
-      return {
-        ...base,
-        id: "unknown",
+        ...out,
         summary:
           stage === "check"
             ? "Seiyuu couldn't check which books use this voice, so it can't be deleted right now."
@@ -46,9 +37,9 @@ function explainDeleteError(err: unknown, stage: "check" | "delete"): JobErrorEx
         fix: "One book's casting file can't be read (Details names it). Fix or remove that file, then try again.",
       };
     case "not_found":
-      return { ...base, id: "unknown", summary: "This voice was already deleted.", fix: null };
+      return { ...out, summary: "This voice was already deleted.", fix: null };
     default:
-      return explainJobError({ code: err.code, message: err.message });
+      return out;
   }
 }
 
@@ -146,7 +137,7 @@ export function DeleteVoiceDialog({ voice, onClose }: { voice: VoiceOut; onClose
             ))}
           </ul>
           <p className="mb-0 mt-2 text-ink-2">
-            A voice that's still cast can't be deleted. Give these parts another voice in Character Review
+            A voice that's still cast can't be deleted. Give these parts another voice on {SCREENS.review}
             first — click a book to open it there.
           </p>
         </>

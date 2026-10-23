@@ -137,3 +137,13 @@ export function proposalMatchesSaved(
   if (!saved || opts.recast || opts.wouldCreate.length > 0) return false;
   return !castingVoicesDiffer(saved, castingFromServer(proposed));
 }
+
+/** A character's gender hint in words ("f"/"female" → "female"); null when unknown/absent. */
+export function genderLabel(g: string | null | undefined): string | null {
+  if (!g) return null;
+  const k = g.trim().toLowerCase();
+  if (k === "f" || k === "female") return "female";
+  if (k === "m" || k === "male") return "male";
+  if (k === "unknown" || k === "u" || k === "") return null;
+  return k;
+}

@@ -99,18 +99,26 @@ describe("Series", () => {
     expect(server.jsonBodyOf("POST", "/api/series")).toEqual({ name: "Mistborn", book_id: "b1" });
   });
 
-  it("surfaces the backend rejection as readable text when creating a series fails", async () => {
+  it("surfaces the backend rejection in plain words when creating a series fails", async () => {
     const user = userEvent.setup();
     mockApi()
       .get("/api/books", { books: [castBook()] })
       .get("/api/series", { series: [] })
-      .error("POST", "/api/series", 409, "book_not_assigned", "book b1 has no cast — assign voices first");
+      // series.py _assignment(): the real refusal for a book with no saved cast
+      .error(
+        "POST",
+        "/api/series",
+        409,
+        "stage_prerequisite",
+        "no assignment at F:/data/output/b1/assignments.json; run `seiyuu assign b1` first",
+      );
     renderWithProviders(<Series />, { route: "/series?book=b1" });
 
     await user.type(await screen.findByRole("textbox", { name: "series name" }), "Mistborn");
     await user.click(screen.getByRole("button", { name: "create series" }));
 
-    expect(await screen.findByText("book b1 has no cast — assign voices first")).toBeInTheDocument();
+    expect(await screen.findByText(/The voices haven't been cast for this book yet\. Cast them on Speakers & cast first\./)).toBeInTheDocument();
+    expect(screen.queryByText(/seiyuu assign/)).not.toBeInTheDocument();
   });
 
   it("an unattributed, uncast book gates create and save-cast and never fetches suggestions", async () => {
@@ -123,7 +131,8 @@ describe("Series", () => {
     renderWithProviders(<Series />, { route: "/series?book=b1&series=s1" });
 
     // stage prerequisite refusal instead of a suggestions fetch
-    expect(await screen.findByText(/this book has no attribution yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/find the speakers in this book on Produce first/)).toBeInTheDocument();
+    expect(screen.queryByText("stage_prerequisite")).not.toBeInTheDocument();
     expect(server.lastCall("GET", "link-suggestions")).toBeUndefined();
 
     expect(screen.getByRole("button", { name: "save cast to series" })).toBeDisabled();

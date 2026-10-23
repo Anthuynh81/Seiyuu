@@ -52,6 +52,7 @@ import type {
   VoiceOut,
   VoiceReferencesOut,
 } from "./types";
+import { singleParams, type SingleSpec } from "../lib/render";
 
 /** Polling discipline: this is THE live poll — book payloads deliberately carry no
     progress, so everything watching a job watches this one query. */
@@ -66,12 +67,15 @@ export function useLiveJobs() {
   });
 }
 
-export function useBooks() {
+export function useBooks({ enabled = true }: { enabled?: boolean } = {}) {
   // Stable key: JobCompletionWatcher invalidates on job transitions, and a same-key
   // refetch keeps old data on screen — no undefined window, no derived-bookId flicker.
+  // `enabled` only gates THIS observer's fetch (the nav rail needs the shelf only when it
+  // has a book to check); the key and any cached data are shared with every other caller.
   return useQuery({
     queryKey: ["books"],
     queryFn: () => api<BooksOut>("/api/books"),
+    enabled,
   });
 }
 
@@ -116,6 +120,19 @@ export async function fetchDepartedJobs(qc: QueryClient, ids: string[]): Promise
   qc.setQueryData<JobOut[]>(departedJobsKey, (prev) =>
     [...(prev ?? []).filter((j) => !fresh.has(j.job_id)), ...got].slice(-DEPARTED_KEEP),
   );
+}
+
+/** One job followed by id until it finishes (GET /api/jobs/{id}), polling only while it is
+    live: for a recourse a row started itself and wants to see through (a voice sample's
+    "Download now"). null = nothing to follow. A new key under ["jobs"], so any ["jobs"]
+    invalidation refreshes it too. */
+export function useJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["jobs", "one", jobId],
+    queryFn: () => api<JobOut>(`/api/jobs/${encodeURIComponent(jobId ?? "")}`),
+    enabled: jobId !== null,
+    refetchInterval: (q) => (q.state.data?.is_terminal ? false : 2000),
+  });
 }
 
 /** A wider job window for the Library shelf: each card's latest unresolved failure. A
@@ -201,14 +218,16 @@ export function useEstimate(
   ready: boolean,
   applyEmotion?: boolean, // F2b: undefined -> server default; must match what's minted/rendered
   force = false, // re-render: price cached in-scope segments as billable work (parity with render)
+  single?: SingleSpec, // one narrator: the voice/speed priced; must match the quote and render
 ) {
   const emo = applyEmotion === undefined ? "" : `&apply_emotion=${applyEmotion}`;
   const frc = force ? "&force=true" : "";
+  const one = mode === "single" ? singleParams(single) : "";
   return useQuery({
-    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force],
+    queryKey: ["estimate", bookId, mode, chapters, applyEmotion ?? null, force, one],
     queryFn: () =>
       api<CostEstimateOut>(
-        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}`,
+        `/api/books/${bookId}/cost-estimate?mode=${mode}${chapterParams(chapters)}${emo}${frc}${one}`,
       ),
     enabled: bookId !== null && ready,
   });
@@ -259,16 +278,18 @@ export function useMintQuote(bookId: string) {
       chapters,
       applyEmotion,
       force,
+      single,
     }: {
       mode: RenderMode;
       chapters: number[];
       applyEmotion?: boolean; // F2b: bound into the quote fingerprint; must match the render
       force?: boolean; // re-render: quote must be minted force=True to authorize a forced render
+      single?: SingleSpec; // one narrator: the same spec the estimate priced and the render sends
     }) =>
       postJson<QuoteResponse>(`/api/books/${bookId}/quotes`, {
         mode,
         chapters,
-        ...(mode === "single" ? { single: {} } : {}),
+        ...(mode === "single" ? { single: single ?? {} } : {}),
         ...(applyEmotion === undefined ? {} : { apply_emotion: applyEmotion }),
         ...(force ? { force: true } : {}),
       }),
@@ -377,12 +398,14 @@ export function useEngines() {
 }
 
 /** Redacted server config. Settings freeze at server start, so one fetch per session is
-    plenty. Only mounted by screens that need it (the cast-reset dialog). */
-export function useSettings() {
+    plenty. Only mounted by screens that need it (the cast-reset dialog; the find-speakers
+    panel when the default reader is Claude, for the local model's name). */
+export function useSettings({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["settings"],
     queryFn: () => api<SettingsOut>("/api/settings"),
     staleTime: Infinity,
+    enabled,
   });
 }
 
@@ -421,13 +444,41 @@ export function useCharacterNames(bookIds: string[]): Map<string, Map<string, st
   });
 }
 
-export function useSegments(bookId: string | null, chapter: number, attributed: boolean) {
-  return useQuery({
-    queryKey: ["segments", bookId, chapter],
+/** The segment browser's server-side view filters (`?speaker=` / `?low_confidence=`). */
+export interface SegmentFilter {
+  /** a character id, or "narration" */
+  speaker?: string | null;
+  lowConfidence?: boolean;
+}
+
+/** One chapter's segment rows. The unfiltered view keeps its ["segments", book, chapter] key;
+    a filtered view adds its query string as a 4th part, so every invalidation of a book's (or
+    a chapter's) segments refreshes the filtered views too. */
+export function segmentsQuery(bookId: string | null, chapter: number, filter?: SegmentFilter) {
+  const qs = new URLSearchParams();
+  if (filter?.speaker) qs.set("speaker", filter.speaker);
+  if (filter?.lowConfidence) qs.set("low_confidence", "true");
+  const search = qs.toString();
+  return {
+    queryKey: search ? ["segments", bookId, chapter, search] : ["segments", bookId, chapter],
     // signal: rapid chapter paging aborts the superseded fetch instead of letting the
     // server finish a whole-chapter payload nobody will read
-    queryFn: ({ signal }) =>
-      api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`, { signal }),
+    queryFn: ({ signal }: { signal?: AbortSignal }) =>
+      api<SegmentBrowserOut>(
+        `/api/books/${bookId}/chapters/${chapter}/segments${search ? `?${search}` : ""}`,
+        { signal },
+      ),
+  };
+}
+
+export function useSegments(
+  bookId: string | null,
+  chapter: number,
+  attributed: boolean,
+  filter?: SegmentFilter,
+) {
+  return useQuery({
+    ...segmentsQuery(bookId, chapter, filter),
     enabled: bookId !== null && attributed,
   });
 }
@@ -735,18 +786,19 @@ export function useUnlinkSeries(seriesId: string) {
 
 // -- voice studio --------------------------------------------------------------------------
 
-export function useVoices() {
-  return useQuery({ queryKey: ["voices"], queryFn: () => api<VoiceListOut>("/api/voices") });
+export function useVoices({ enabled = true }: { enabled?: boolean } = {}) {
+  return useQuery({ queryKey: ["voices"], queryFn: () => api<VoiceListOut>("/api/voices"), enabled });
 }
 
 export function useCloudSlots() {
   return useQuery({ queryKey: ["cloud-slots"], queryFn: () => api<CloudSlotsOut>("/api/cloud-slots") });
 }
 
-export function useKokoroPresets() {
+export function useKokoroPresets({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["engine-voices", "kokoro"],
     queryFn: () => api<EngineVoicesOut>("/api/engines/kokoro/voices"),
+    enabled,
     staleTime: Infinity, // hardcoded preset catalog
   });
 }
@@ -776,11 +828,18 @@ export function useCloneVoice() {
   });
 }
 
-export function useAudition(voiceId: string) {
+/** Synthesize a voice sample. `text` (≤500 chars, the endpoint's limit — see
+    lib/audition.ts auditionLine) is what it speaks, e.g. a character's own line; omitted, the
+    server's default sentence plays. The mutation variable stays the explicit paid
+    confirmation, so no retry can silently upgrade an unpaid attempt. */
+export function useAudition(voiceId: string, text?: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (confirmPaid: boolean) =>
-      postJson<AuditionOut>(`/api/voices/${voiceId}/audition`, { confirm_paid: confirmPaid }),
+      postJson<AuditionOut>(`/api/voices/${voiceId}/audition`, {
+        confirm_paid: confirmPaid,
+        ...(text ? { text } : {}),
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["voices"] });
       qc.invalidateQueries({ queryKey: ["cloud-slots"] });

@@ -1,9 +1,10 @@
 import type { BookCard, JobKind, JobOut } from "../api/types";
+import { JOB_DOING, JOB_DONE, JOB_FAILED, JOB_FAILED_STEP, JOB_STOPPED } from "./glossary";
 import { engineName } from "./health";
 
-/** Plain-words copy for jobs: what a job is DOING (cards, while live) and what it DID (the
-    finish notice). Pure; the UI never shows a raw job id as the main text. One vocabulary
-    everywhere: assemble builds the "chapter MP3s", master builds the ".m4b audiobook". */
+/** Plain-words sentences for jobs: what a job is DOING (cards, while live) and what it DID (the
+    finish notice). Pure; the UI never shows a raw job id as the main text. The words come from
+    lib/glossary.ts (assemble builds the "chapter MP3s", master builds the ".m4b audiobook"). */
 
 /** Warm-up jobs use the documented `engine:<id>` subject in the book column. */
 export function engineSubject(bookId: string): string | null {
@@ -18,63 +19,24 @@ export function subjectName(job: Pick<JobOut, "book_id">, books: BookCard[] | un
   return books?.find((b) => b.book_id === job.book_id)?.title ?? "your book";
 }
 
-const DOING: Record<JobKind, string> = {
-  ingest: "Adding the book",
-  attribute: "Finding the speakers",
-  render: "Recording",
-  assemble: "Building the chapter MP3s",
-  master: "Building the .m4b audiobook",
-  warmup: "Getting the voice engine ready",
-};
+/** The plain step name for a job kind ("Recording", "Building the .m4b audiobook"). */
+export function stepName(kind: JobKind): string {
+  return JOB_DOING[kind] ?? "Working";
+}
 
 /** "Recording…" / "Recording — waiting its turn" for the live line on a card. */
 export function liveJobLine(job: Pick<JobOut, "kind" | "state">): string {
-  const doing = DOING[job.kind] ?? "Working";
+  const doing = stepName(job.kind);
   return job.state === "queued" ? `${doing} — waiting its turn` : `${doing}…`;
 }
 
-const DONE: Record<JobKind, (name: string) => string> = {
-  ingest: (t) => `Added ${t} to your library`,
-  attribute: (t) => `Found the speakers in ${t}`,
-  render: (t) => `Recorded ${t}`,
-  assemble: (t) => `Built the chapter MP3s for ${t}`,
-  master: (t) => `Built the .m4b audiobook for ${t}`,
-  warmup: (e) => `${e} is downloaded and ready`,
-};
-
-const FAILED: Record<JobKind, (name: string) => string> = {
-  ingest: (t) => `Couldn't add ${t}`,
-  attribute: (t) => `Couldn't find the speakers in ${t}`,
-  render: (t) => `Recording ${t} stopped with a problem`,
-  assemble: (t) => `Couldn't build the chapter MP3s for ${t}`,
-  master: (t) => `Couldn't build the .m4b audiobook for ${t}`,
-  warmup: (e) => `Couldn't get ${e} ready`,
-};
-
-const STOPPED: Record<JobKind, (name: string) => string> = {
-  ingest: (t) => `Stopped adding ${t}`,
-  attribute: (t) => `Stopped finding the speakers in ${t}`,
-  render: (t) => `Stopped recording ${t}`,
-  assemble: (t) => `Stopped building the chapter MP3s for ${t}`,
-  master: (t) => `Stopped building the .m4b audiobook for ${t}`,
-  warmup: (e) => `Stopped getting ${e} ready`,
-};
-
 /** The one-line headline for a finished job, naming its subject. */
 export function finishedHeadline(job: Pick<JobOut, "kind" | "state">, name: string): string {
-  const table = job.state === "failed" ? FAILED : job.state === "canceled" ? STOPPED : DONE;
+  const table = job.state === "failed" ? JOB_FAILED : job.state === "canceled" ? JOB_STOPPED : JOB_DONE;
   return (table[job.kind] ?? ((n: string) => `Finished a job for ${n}`))(name);
 }
 
 /** Card-level failure headline: the card already names the book. */
 export function failedStepLine(kind: JobKind): string {
-  const doing: Record<JobKind, string> = {
-    ingest: "Adding this book failed",
-    attribute: "Finding the speakers failed",
-    render: "The last recording failed",
-    assemble: "Building the chapter MP3s failed",
-    master: "Building the .m4b audiobook failed",
-    warmup: "Getting the voice engine ready failed",
-  };
-  return doing[kind] ?? "The last job failed";
+  return JOB_FAILED_STEP[kind] ?? "The last job failed";
 }

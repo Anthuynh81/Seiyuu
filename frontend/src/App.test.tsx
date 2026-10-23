@@ -1,4 +1,5 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
+import { useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import type { JobOut } from "./api/types";
@@ -34,15 +35,113 @@ describe("App", () => {
   it.each([
     ["/", "Library"],
     ["/listen", "Listen"],
-    ["/review", "Character Review"],
-    ["/lexicon", "Pronunciation"],
-    ["/voices", "Voice Studio"],
+    ["/review", "Speakers & cast"],
+    ["/lexicon", "Proof & names"],
+    ["/voices", "Voices"],
     ["/series", "Series"],
-    ["/render", "Render & Jobs"],
+    ["/render", "Produce"],
   ] as [string, string][])("route %s renders its screen heading %s", async (route, heading) => {
     mockEmptyBackend();
     renderWithProviders(<App />, { route });
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
+  });
+
+  it.each(["/", "/review", "/listen", "/render", "/lexicon"])(
+    "blocked storage doesn't crash the app on open (%s)",
+    async (route) => {
+      const deny = () => {
+        throw new DOMException("The operation is insecure.", "SecurityError");
+      };
+      mockEmptyBackend().get("/api/books", { books: [makeBook({ book_id: "b1", attributed: true })] });
+      vi.stubGlobal("localStorage", { getItem: deny, setItem: deny, removeItem: deny, clear: deny, key: deny });
+      renderWithProviders(<App />, { route });
+      expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
+      expect(screen.getByRole("navigation")).toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["/render", "/api/books/ghost"],
+    ["/review", "/api/books/ghost"],
+    ["/lexicon", "/api/books/ghost/lexicon"],
+  ] as [string, string][])(
+    "%s with no ?book= opens the remembered book, not the first on the shelf",
+    async (route, wanted) => {
+      const server = mockEmptyBackend().get("/api/books", {
+        books: [
+          makeBook({ book_id: "heart", attributed: true }),
+          makeBook({ book_id: "ghost", attributed: true }),
+        ],
+      });
+      localStorage.setItem("seiyuu.currentBook", "ghost");
+      renderWithProviders(<App />, { route });
+      await waitFor(() => expect(server.calls.some((c) => c.url.startsWith(wanted))).toBe(true));
+      expect(server.calls.some((c) => c.url.startsWith(wanted.replace("ghost", "heart")))).toBe(false);
+    },
+  );
+
+  it("/listen with no ?book= opens the remembered book", async () => {
+    const server = mockEmptyBackend().get("/api/books", {
+      books: [makeBook({ book_id: "heart", rendered: true }), makeBook({ book_id: "ghost", rendered: true })],
+    });
+    localStorage.setItem("seiyuu.currentBook", "ghost");
+    renderWithProviders(<App />, { route: "/listen" });
+    await waitFor(() => expect(server.calls.some((c) => c.url.startsWith("/api/books/ghost"))).toBe(true));
+    expect(server.calls.some((c) => c.url.startsWith("/api/books/heart"))).toBe(false);
+  });
+
+  it("a screen's own default book is pinned into the URL, so the nav names it and every step keeps it", async () => {
+    mockEmptyBackend().get("/api/books", {
+      books: [
+        makeBook({ book_id: "heart", title: "The Expired Heart", attributed: true }),
+        makeBook({ book_id: "ghost", title: "Ghost Story", attributed: true }),
+      ],
+    });
+    renderWithProviders(<App />, { route: "/render" }); // fresh browser: nothing remembered
+    const nav = screen.getByRole("navigation");
+    await waitFor(() =>
+      expect(within(nav).getByRole("link", { name: "4 Listen" })).toHaveAttribute("href", "/listen?book=heart"),
+    );
+    expect(within(nav).getByRole("link", { name: "2 Proof & names" })).toHaveAttribute("href", "/lexicon?book=heart");
+    expect(await within(nav).findByText("The Expired Heart")).toBeInTheDocument();
+    await waitFor(() => expect(localStorage.getItem("seiyuu.currentBook")).toBe("heart"));
+  });
+
+  it("a book picked in another tab doesn't move a screen that is already open", async () => {
+    const server = mockEmptyBackend().get("/api/books", {
+      books: [makeBook({ book_id: "heart", attributed: true }), makeBook({ book_id: "ghost", attributed: true })],
+    });
+    localStorage.setItem("seiyuu.currentBook", "ghost");
+    function Where() {
+      const location = useLocation();
+      return <output data-testid="where">{location.pathname + location.search}</output>;
+    }
+    renderWithProviders(
+      <>
+        <App />
+        <Where />
+      </>,
+      { route: "/render" },
+    );
+    // the screen has settled on the remembered book and pinned it into its URL
+    await waitFor(() => expect(screen.getByTestId("where").textContent).toBe("/render?book=ghost"));
+    const nav = screen.getByRole("navigation");
+
+    act(() => {
+      localStorage.setItem("seiyuu.currentBook", "heart");
+      window.dispatchEvent(new StorageEvent("storage", { key: "seiyuu.currentBook", newValue: "heart" }));
+    });
+    expect(screen.getByTestId("where").textContent).toBe("/render?book=ghost");
+    expect(within(nav).getByRole("link", { name: "4 Listen" })).toHaveAttribute("href", "/listen?book=ghost");
+    expect(server.calls.some((c) => c.url.startsWith("/api/books/heart"))).toBe(false);
+  });
+
+  it("a remembered book that was deleted falls back to the screen's usual default", async () => {
+    const server = mockEmptyBackend().get("/api/books", { books: [makeBook({ book_id: "heart" })] });
+    localStorage.setItem("seiyuu.currentBook", "gone");
+    renderWithProviders(<App />, { route: "/render" });
+    await waitFor(() => expect(server.calls.some((c) => c.url.startsWith("/api/books/heart"))).toBe(true));
+    expect(server.calls.some((c) => c.url.includes("/gone"))).toBe(false);
   });
 
   it("invalidates stage-artifact query families when the live job count drops", async () => {
@@ -54,9 +153,11 @@ describe("App", () => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     renderWithProviders(<App />, { queryClient });
 
-    // the first poll lands: the transport bar shows the running job
-    expect(await screen.findByText("render · demo")).toBeInTheDocument();
-    const families = ["segments", "render-summary", "validation", "estimate", "assignment", "voices"];
+    // the first poll lands: the transport bar shows the running job (book title + plain step;
+    // this shelf is empty, so the book reads as "your book", never its id)
+    expect(await screen.findByText("your book · Recording")).toBeInTheDocument();
+    // "characters": a finished speaker re-run changes the roster and its provenance
+    const families = ["segments", "render-summary", "validation", "estimate", "assignment", "voices", "characters"];
     for (const key of families) {
       expect(invalidate).not.toHaveBeenCalledWith({ queryKey: [key] });
     }
@@ -88,7 +189,7 @@ describe("App", () => {
     const queryClient = makeQueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     renderWithProviders(<App />, { queryClient });
-    expect(await screen.findByText("render · b1")).toBeInTheDocument();
+    expect(await screen.findByText("Night Train · Recording")).toBeInTheDocument();
     await waitFor(() => expect(queryClient.getQueryData(["jobs", "recent"])).toBeDefined());
     const recentCalls = () => server.calls.filter((c) => c.url === "/api/jobs?limit=10").length;
     const before = recentCalls();
@@ -120,7 +221,7 @@ describe("App", () => {
 
     const queryClient = makeQueryClient();
     renderWithProviders(<App />, { queryClient });
-    expect(await screen.findByText("attribute · b1")).toBeInTheDocument();
+    expect(await screen.findByText("Night Train · Finding the speakers")).toBeInTheDocument();
     await waitFor(() => expect(queryClient.getQueryData(["jobs", "recent"])).toBeDefined());
     const recentCalls = () => server.calls.filter((c) => c.url === "/api/jobs?limit=10").length;
     const before = recentCalls();

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
-import { makeEngine, makeJob, makeSystemProbe } from "../test/fixtures";
+import { makeBook, makeEngine, makeJob, makeSystemProbe } from "../test/fixtures";
 import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { NavRail } from "./NavRail";
 
@@ -13,15 +13,26 @@ function LocationProbe() {
   return <output data-testid="location">{location.pathname}</output>;
 }
 
+/** Workflow order: the shelf, the book's numbered steps, then the tools. */
 const screenLinks = [
   "Library",
-  "Listen",
-  "Character Review",
-  "Pronunciation",
-  "Voice Studio",
+  "1 Speakers & cast",
+  "2 Proof & names",
+  "3 Produce",
+  "4 Listen",
+  "Voices",
   "Series",
-  "Render & Jobs",
 ];
+
+const hrefOf = (name: string) => screen.getByRole("link", { name }).getAttribute("href");
+
+/** Blocked site data: every localStorage touch throws, like a locked-down browser. */
+function blockStorage() {
+  const deny = () => {
+    throw new DOMException("The operation is insecure.", "SecurityError");
+  };
+  vi.stubGlobal("localStorage", { getItem: deny, setItem: deny, removeItem: deny, clear: deny, key: deny });
+}
 
 describe("NavRail", () => {
   it("renders a navigation link for every screen (no running lamp while idle)", () => {
@@ -31,6 +42,23 @@ describe("NavRail", () => {
       expect(screen.getByRole("link", { name })).toBeInTheDocument();
     }
     expect(screen.queryByTitle("a job is running")).not.toBeInTheDocument();
+  });
+
+  it("lists the screens in workflow order: Library, the numbered book steps, then Tools", () => {
+    mockApi();
+    renderWithProviders(<NavRail />);
+    expect(screen.getAllByRole("link").map((a) => a.textContent?.trim())).toEqual(screenLinks);
+
+    const steps = screen.getByRole("group", { name: "Book steps" });
+    expect(within(steps).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual([
+      "/review",
+      "/lexicon",
+      "/render",
+      "/listen",
+    ]);
+    const tools = screen.getByRole("group", { name: "Tools" });
+    expect(within(tools).getAllByRole("link").map((a) => a.textContent)).toEqual(["Voices", "Series"]);
+    expect(within(tools).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual(["/voices", "/series"]);
   });
 
   it("clicking a nav link navigates the router to that screen's route", async () => {
@@ -44,7 +72,7 @@ describe("NavRail", () => {
       { route: "/render" },
     );
 
-    await user.click(screen.getByRole("link", { name: "Voice Studio" }));
+    await user.click(screen.getByRole("link", { name: "Voices" }));
     expect(screen.getByTestId("location").textContent).toBe("/voices");
 
     await user.click(screen.getByRole("link", { name: "Library" }));
@@ -56,19 +84,118 @@ describe("NavRail", () => {
     mockApi();
     renderWithProviders(<NavRail />);
 
-    await user.click(screen.getByRole("button", { name: "day" }));
+    expect(screen.getByRole("button", { name: "auto" })).toHaveClass("on");
+    await user.click(screen.getByRole("button", { name: "light" }));
     expect(document.documentElement.dataset.theme).toBe("light");
     expect(localStorage.getItem("seiyuu-theme")).toBe("daylight");
 
-    await user.click(screen.getByRole("button", { name: "booth" }));
+    await user.click(screen.getByRole("button", { name: "dark" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("seiyuu-theme")).toBe("booth");
   });
 
-  it("shows the running lamp on the Render & Jobs link while a job is running", async () => {
+  it("shows the running lamp on the Produce link while a job is running", async () => {
     mockApi().get("/api/jobs", { jobs: [makeJob({ state: "running" })] });
     renderWithProviders(<NavRail />);
-    expect(await screen.findByTitle("a job is running")).toBeInTheDocument();
+    const lamp = await screen.findByTitle("a job is running");
+    expect(lamp.closest("a")).toHaveAttribute("href", "/render");
+  });
+
+  describe("current book", () => {
+    const shelf = () =>
+      mockApi().get("/api/books", {
+        books: [
+          makeBook({ book_id: "heart", title: "The Expired Heart" }),
+          makeBook({ book_id: "ghost", title: "Ghost Story" }),
+        ],
+      });
+
+    it("with no book chosen yet, step links are bare and the shelf isn't fetched", () => {
+      const server = mockApi();
+      renderWithProviders(<NavRail />);
+      expect(hrefOf("3 Produce")).toBe("/render");
+      expect(server.calls.some((c) => c.url === "/api/books")).toBe(false);
+    });
+
+    it("an explicit ?book= reaches every step link, becomes the remembered book, and never touches tools", async () => {
+      shelf();
+      renderWithProviders(<NavRail />, { route: "/review?book=ghost" });
+      expect(hrefOf("1 Speakers & cast")).toBe("/review?book=ghost");
+      expect(hrefOf("2 Proof & names")).toBe("/lexicon?book=ghost");
+      expect(hrefOf("3 Produce")).toBe("/render?book=ghost");
+      expect(hrefOf("4 Listen")).toBe("/listen?book=ghost");
+      expect(hrefOf("Voices")).toBe("/voices");
+      expect(hrefOf("Series")).toBe("/series");
+      expect(hrefOf("Library")).toBe("/");
+      expect(localStorage.getItem("seiyuu.currentBook")).toBe("ghost");
+      // the book is named plainly above its steps
+      const steps = screen.getByRole("group", { name: "Book steps" });
+      expect(await within(steps).findByText("Ghost Story")).toBeInTheDocument();
+    });
+
+    it("on a screen without ?book=, the step links carry the remembered book once the shelf confirms it", async () => {
+      localStorage.setItem("seiyuu.currentBook", "heart");
+      shelf();
+      renderWithProviders(<NavRail />, { route: "/voices" });
+      await waitFor(() => expect(hrefOf("3 Produce")).toBe("/render?book=heart"));
+      expect(screen.getByText("The Expired Heart")).toBeInTheDocument();
+    });
+
+    it("an explicit ?book= wins over the remembered one and replaces it", async () => {
+      localStorage.setItem("seiyuu.currentBook", "heart");
+      shelf();
+      renderWithProviders(<NavRail />, { route: "/render?book=ghost" });
+      expect(hrefOf("1 Speakers & cast")).toBe("/review?book=ghost");
+      await waitFor(() => expect(localStorage.getItem("seiyuu.currentBook")).toBe("ghost"));
+      expect(await screen.findByText("Ghost Story")).toBeInTheDocument();
+      expect(hrefOf("4 Listen")).toBe("/listen?book=ghost");
+    });
+
+    it("a remembered book that has since been deleted is ignored", async () => {
+      localStorage.setItem("seiyuu.currentBook", "gone");
+      const server = shelf();
+      const { queryClient } = renderWithProviders(<NavRail />, { route: "/voices" });
+      await waitFor(() => expect(queryClient.getQueryState(["books"])?.status).toBe("success"));
+      expect(server.calls.some((c) => c.url === "/api/books")).toBe(true);
+      expect(hrefOf("3 Produce")).toBe("/render");
+      expect(hrefOf("4 Listen")).toBe("/listen");
+      expect(screen.queryByText(/Expired Heart|Ghost Story/)).not.toBeInTheDocument();
+    });
+
+    it("following a step link keeps the book in the URL, and leaving for a tool keeps it remembered", async () => {
+      const user = userEvent.setup();
+      shelf();
+      function Probe() {
+        const location = useLocation();
+        return <output data-testid="where">{location.pathname + location.search}</output>;
+      }
+      renderWithProviders(
+        <>
+          <NavRail />
+          <Probe />
+        </>,
+        { route: "/review?book=heart" },
+      );
+      await user.click(screen.getByRole("link", { name: "3 Produce" }));
+      expect(screen.getByTestId("where").textContent).toBe("/render?book=heart");
+      await user.click(screen.getByRole("link", { name: "Voices" }));
+      expect(screen.getByTestId("where").textContent).toBe("/voices");
+      await waitFor(() => expect(hrefOf("4 Listen")).toBe("/listen?book=heart"));
+    });
+
+    it("blocked storage doesn't crash the rail; an explicit ?book= is remembered for this page only", async () => {
+      const user = userEvent.setup();
+      blockStorage();
+      expect(() => localStorage.getItem("seiyuu.currentBook")).toThrow();
+      shelf();
+      renderWithProviders(<NavRail />, { route: "/review?book=heart" });
+      expect(hrefOf("3 Produce")).toBe("/render?book=heart");
+      await user.click(screen.getByRole("link", { name: "Voices" }));
+      await waitFor(() => expect(hrefOf("3 Produce")).toBe("/render?book=heart"));
+      // the theme switch still works, just unremembered
+      await user.click(screen.getByRole("button", { name: "light" }));
+      expect(document.documentElement.dataset.theme).toBe("light");
+    });
   });
 
   describe("health pill", () => {

@@ -261,7 +261,8 @@ describe("Voices", () => {
     await user.click(screen.getByRole("option", { name: /^indextts2/ }));
 
     await user.click(submit);
-    expect(await within(dialog).findByText("reclone_blocked")).toBeInTheDocument();
+    expect(await within(dialog).findByText("already cloned")).toBeInTheDocument();
+    expect(within(dialog).getByText(/A voice with this name already exists/)).toBeInTheDocument();
     const form = server.formBodyOf("POST", "/api/voices/clone");
     expect((form.get("file") as File).name).toBe("darcy-ref.wav");
     expect(form.get("name")).toBe("Mr. Darcy");
@@ -273,6 +274,73 @@ describe("Voices", () => {
     await user.click(within(dialog).getByRole("button", { name: /replace it/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(server.formBodyOf("POST", "/api/voices/clone").get("replace")).toBe("true");
+  });
+
+  it("reclone_blocked names the recorded books that would need re-recording, by title, before replace", async () => {
+    const user = userEvent.setup();
+    const server = mountServer().get("/api/books", {
+      books: [makeBook({ book_id: "b1", title: "Pride and Prejudice" }), makeBook({ book_id: "b2", title: "Emma" })],
+    });
+    server.error(
+      "POST",
+      "/api/voices/clone",
+      409,
+      "reclone_blocked",
+      "voice 'mr_darcy' already exists; re-clone replaces … (2 rendered book(s) flip to un-rendered: b1, b2)",
+      { stale_books: ["b1", "b2"] },
+    );
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "new clone" }));
+    const dialog = await screen.findByRole("dialog", { name: "New cloned voice" });
+    await user.upload(
+      dialog.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["wav"], "ref.wav", { type: "audio/wav" }),
+    );
+    await user.type(within(dialog).getByPlaceholderText("Mr. Darcy"), "Mr. Darcy");
+    await user.click(within(dialog).getByRole("checkbox", { name: /permission to clone/ }));
+    await user.type(within(dialog).getByPlaceholderText("your name"), "Cyber");
+    await user.click(within(dialog).getByRole("button", { name: "clone voice" }));
+
+    const list = await within(dialog).findByRole("list", { name: "books that need re-recording" });
+    expect(within(list).getByText("Pride and Prejudice")).toBeVisible();
+    expect(within(list).getByText("Emma")).toBeVisible();
+    expect(within(dialog).getByText(/These 2 recorded books go back to not recorded/)).toBeVisible();
+    expect(within(dialog).getByText(/paid lines are billed again/)).toBeVisible();
+    // the raw developer message is not the text
+    expect(within(dialog).queryByText(/flip to un-rendered/)).not.toBeInTheDocument();
+    // nothing replaced until the user says so
+    expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/voices/clone")).toHaveLength(1);
+    expect(within(dialog).getByRole("button", { name: "replace it" })).toBeInTheDocument();
+  });
+
+  it("a delete refused by another book's audiobook build names it and offers to stop it", async () => {
+    const user = userEvent.setup();
+    const server = mountServer({ voices: [makeVoice({ voice_id: "v1", name: "Busy Booth" })] })
+      .get("/api/voices/v1/references", { voice_id: "v1", references: [] })
+      .error(
+        "DELETE",
+        "/api/voices/v1",
+        409,
+        "render_active",
+        "a master job is running; deleting this voice would corrupt the cached segments — wait or cancel it first",
+        { job_id: "job-m1", kind: "master", state: "running", book_id: "other" },
+      );
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "delete Busy Booth" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete voice" });
+    await within(dialog).findByText("Not cast in any book.");
+    await user.click(within(dialog).getByRole("button", { name: "delete voice" }));
+
+    expect(
+      await within(dialog).findByText(
+        "Building the .m4b audiobook is under way; this has to wait until it finishes. Nothing was deleted.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/for this book/)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Stop building the audiobook" })).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
   });
 
   it("audition on a paid engine 402s, then re-sends confirm_paid=true from the confirm key", async () => {
@@ -291,12 +359,12 @@ describe("Voices", () => {
     renderWithProviders(<Voices />);
 
     await user.click(await screen.findByRole("button", { name: /^audition/ }));
-    expect(await screen.findByText("payment_confirmation_required")).toBeInTheDocument();
+    // plain words and the price — the raw code is only a tooltip
+    expect(await screen.findByText(/billed per use — this sample costs about \$0\.0123/)).toBeInTheDocument();
+    expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /confirm ~\$0\.0123 & play/ }));
 
-    await waitFor(() =>
-      expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText(/billed per use/)).not.toBeInTheDocument());
     const posts = server.calls.filter((c) => c.method === "POST" && c.url.includes("/audition"));
     expect(posts).toHaveLength(2);
     expect(JSON.parse(posts[0].body as string)).toEqual({ confirm_paid: false });
@@ -307,18 +375,19 @@ describe("Voices", () => {
     const user = userEvent.setup();
     const server = mountServer({ voices: [makeVoice({ voice_id: "k1", name: "Cold Heart" })] });
     server.error("POST", "/api/voices/k1/audition", 409, "engine_cold", "kokoro has no warm worker");
-    server.post("/api/engines/kokoro/warmup", makeJob({ job_id: "w1", kind: "warmup", state: "queued" }));
+    server.post("/api/engines/kokoro/warmup", makeJob({ job_id: "w1", kind: "warmup", state: "running" }));
+    server.get("/api/jobs/w1", makeJob({ job_id: "w1", kind: "warmup", state: "running" }));
     renderWithProviders(<Voices />);
 
     await user.click(await screen.findByRole("button", { name: /^audition/ }));
-    expect(await screen.findByText("engine_cold")).toBeInTheDocument();
-    expect(screen.getByText(/kokoro has no warm worker/)).toBeInTheDocument();
+    expect(await screen.findByText(/Kokoro hasn't been downloaded yet/)).toBeInTheDocument();
 
     // the recourse targets the VOICE's engine, and success clears back to an idle audition
-    await user.click(screen.getByRole("button", { name: "warm up first" }));
+    await user.click(screen.getByRole("button", { name: "Download now" }));
     await waitFor(() => expect(server.lastCall("POST", "/warmup")?.url).toBe("/api/engines/kokoro/warmup"));
     expect(await screen.findByRole("button", { name: /^audition/ })).toBeInTheDocument();
-    expect(screen.queryByText("engine_cold")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hasn't been downloaded yet/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Downloading Kokoro in the background/)).toBeInTheDocument();
   });
 
   // Fake timers drive the backoff deterministically. fireEvent (not userEvent) on purpose:
@@ -348,7 +417,7 @@ describe("Voices", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
       });
-      expect(screen.getByText("payment_confirmation_required")).toBeInTheDocument();
+      expect(screen.getByText(/billed per use/)).toBeInTheDocument();
       expect(bodies).toEqual([{ confirm_paid: false }]);
 
       // the user confirms the paid audition; the server then refuses softly (GPU borrowed)
@@ -357,7 +426,7 @@ describe("Voices", () => {
         await vi.advanceTimersByTimeAsync(50);
       });
       expect(bodies).toEqual([{ confirm_paid: false }, { confirm_paid: true }]);
-      expect(screen.getByText(/queued behind a render segment — retrying/)).toBeInTheDocument();
+      expect(screen.getByText(/Waiting for the recording to pause between lines/)).toBeInTheDocument();
 
       // bounded auto-retry with backoff: every re-POST must keep the user's confirm_paid=true
       for (let i = 0; i < 6; i++) {
@@ -367,7 +436,7 @@ describe("Voices", () => {
       }
       expect(bodies).toHaveLength(5); // 1 unpaid + 1 explicit confirm + exactly 3 auto-retries
       expect(bodies.slice(1)).toEqual(Array(4).fill({ confirm_paid: true }));
-      expect(screen.getByText(/the render keeps running/)).toBeInTheDocument();
+      expect(screen.getByText(/hasn't paused for a sample yet/)).toBeInTheDocument();
 
       // ...and the budget is truly exhausted: no further auto-POST however long the clock runs
       await act(async () => {
@@ -376,7 +445,7 @@ describe("Voices", () => {
       expect(bodies).toHaveLength(5);
 
       // the manual retry also preserves the paid confirmation — never a fresh unpaid attempt
-      fireEvent.click(screen.getByRole("button", { name: "retry" }));
+      fireEvent.click(screen.getByRole("button", { name: "try again" }));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
       });
@@ -409,7 +478,7 @@ describe("Voices", () => {
     const posts = server.calls.filter((c) => c.method === "POST" && c.url.includes("/audition"));
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0].body as string)).toEqual({ confirm_paid: false });
-    expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
+    expect(screen.queryByText(/billed per use/)).not.toBeInTheDocument();
   });
 
   it("delete always asks first: the dialog lists each book by title and each part by character name", async () => {
@@ -550,7 +619,7 @@ describe("Voices", () => {
     await user.click(within(dialog).getByRole("button", { name: "delete voice" }));
 
     expect(
-      await within(dialog).findByText("A recording or audiobook build is running, so nothing was deleted."),
+      await within(dialog).findByText("A recording is running; this has to wait until it finishes. Nothing was deleted."),
     ).toBeInTheDocument();
     expect(within(dialog).queryByText("render_active")).not.toBeInTheDocument();
     expect(server.calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
@@ -699,7 +768,7 @@ describe("Voices", () => {
       release(errorResponse(409, "render_active", "a render job is running; wait or cancel it first"));
     });
     expect(
-      await within(dialog).findByText("A recording or audiobook build is running, so nothing was deleted."),
+      await within(dialog).findByText("A recording is running; this has to wait until it finishes. Nothing was deleted."),
     ).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "cancel" })).toBeEnabled();
   });

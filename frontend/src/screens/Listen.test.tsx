@@ -1,11 +1,22 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { useState } from "react";
+import { useLocation } from "react-router-dom";
+import { describe, expect, it, vi } from "vitest";
 
-import type { BookDetail, RenderSummaryOut, SegmentBrowserOut, SegmentRow, SegmentWords } from "../api/types";
+import type {
+  BookDetail,
+  RenderSummaryOut,
+  SegmentBrowserOut,
+  SegmentRow,
+  SegmentWords,
+  VoiceAssignment,
+  VoiceOut,
+} from "../api/types";
 import { TransportBar } from "../app/TransportBar";
+import { usePlayer } from "../app/usePlayer";
 import { makeBook } from "../test/fixtures";
-import { mockApi, renderWithProviders } from "../test/utils";
+import { jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Listen } from "./Listen";
 
 /** Text "a bb ccc" over a 90s clip gives DISTINCT interpolated vs whisper offsets for "bb":
@@ -87,6 +98,39 @@ const ch2: SegmentBrowserOut = {
   edit_warnings: [],
 };
 
+function makeVoice(voice_id: string, name: string): VoiceOut {
+  return {
+    voice_id,
+    name,
+    kind: "preset",
+    engine: "kokoro",
+    preset_id: "af_heart",
+    blend: null,
+    reference_audio: null,
+    seed: 1,
+    consent_attested: false,
+    consent: null,
+    tags: [],
+    created_at: "2026-10-01",
+    has_audition: false,
+  };
+}
+
+const voices = {
+  voices: [makeVoice("v-narr", "Warm Narrator"), makeVoice("v-ish", "Sea Captain")],
+  unreadable: [],
+};
+
+const cast: VoiceAssignment = {
+  schema_version: 1,
+  book_id: "b1",
+  stage: "final",
+  narrator_voice_id: "v-narr",
+  assignments: { ishmael: "v-ish" },
+  thought_voice_id: null,
+  created_at: "2026-10-01",
+};
+
 /** The whole GET surface one rendered book needs. Word-timing routes default to 404 so the
     read-along sits on interpolation; a test overrides them (latest registration wins). */
 function serveBook() {
@@ -101,19 +145,47 @@ function serveBook() {
     .get("/api/books/b1/render", summary)
     .get("/api/books/b1/chapters/1/segments", ch1)
     .get("/api/books/b1/chapters/2/segments", ch2)
+    .get("/api/voices", voices)
+    .get("/api/books/b1/assignment", cast)
     .error("GET", "/api/books/b1/chapters/1/words", 404, "not_found", "no word timings")
     .error("GET", "/api/books/b1/chapters/2/words", 404, "not_found", "no word timings");
 }
 
 /** The reader hands clips to the player context; TransportBar (mounted the way main.tsx does)
     is how that handoff becomes observable — it only wakes on /listen with clips loaded. */
+function Where() {
+  const loc = useLocation();
+  return <output data-testid="where">{loc.pathname + loc.search}</output>;
+}
+
 function renderListen(route = "/listen?book=b1") {
   return renderWithProviders(
     <>
       <Listen />
       <TransportBar />
+      <Where />
     </>,
     { route },
+  );
+}
+
+/** Leaving Listen for a fix and coming back: the player (in App, above the routes) keeps
+    playing while Listen unmounts. "away" unmounts Listen; pressing it again brings it back. */
+function RoundTrip({ startAway = false }: { startAway?: boolean }) {
+  const [away, setAway] = useState(startAway);
+  const player = usePlayer();
+  // what Review does when it plays one line: a one-clip list for the same book
+  const oneLine = [
+    { src: "/api/books/b1/segments/blk9/audio?segment=0", duration: 4, key: "blk9:0", speaker: "ishmael", words: [] },
+  ];
+  return (
+    <>
+      {!away && <Listen />}
+      <button onClick={() => setAway((v) => !v)}>away</button>
+      <button onClick={() => player?.load("b1", "one line", oneLine, { autoplay: true })}>play one line</button>
+      <output data-testid="player">{`${player?.playing ? "on" : "off"}|${player?.clips.map((c) => c.key).join(",")}`}</output>
+      <TransportBar />
+    </>
   );
 }
 
@@ -137,6 +209,19 @@ describe("Listen", () => {
     // ?book= is set: the reader replaces the shelf
     expect(await screen.findByRole("heading", { name: "Whale Story" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /not rendered/ })).not.toBeInTheDocument();
+  });
+
+  it("with no ?book it opens the remembered book once, and '‹ shelf' still goes back to the shelf", async () => {
+    const user = userEvent.setup();
+    serveBook();
+    localStorage.setItem("seiyuu.currentBook", "b1");
+    renderListen("/listen");
+    expect(await screen.findByRole("heading", { name: "Whale Story" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "‹ shelf" }));
+    // not bounced straight back into the remembered book
+    expect(await screen.findByRole("button", { name: /not rendered/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Whale Story" })).not.toBeInTheDocument();
   });
 
   it("an empty shelf nudges with a real Add-a-book link", async () => {
@@ -169,8 +254,10 @@ describe("Listen", () => {
     // margins credit the speaker (uppercased) and the voice that rendered the row
     expect(screen.getByText("ISHMAEL")).toBeInTheDocument();
     expect(screen.getAllByText("narration").length).toBeGreaterThan(0);
-    expect(screen.getByText("v-narr")).toBeInTheDocument();
-    expect(screen.getByText(/multivoice · 1 voices/)).toBeInTheDocument();
+    // the recording voice by its library NAME, never the raw id
+    expect(await screen.findByText("Warm Narrator")).toBeInTheDocument();
+    expect(screen.queryByText("v-narr")).not.toBeInTheDocument();
+    expect(screen.getByText(/Full cast · 1 voices/)).toBeInTheDocument();
     // the header sub names the current chapter from the book detail
     expect(screen.getByText(/Loomings — click any word/)).toBeInTheDocument();
   });
@@ -287,5 +374,354 @@ describe("Listen", () => {
     // changing one pref never clobbers the other
     await user.click(screen.getByRole("button", { name: "dark" }));
     expect(JSON.parse(localStorage.getItem("seiyuu.reading")!)).toEqual({ theme: "dark", size: "l" });
+  });
+  describe("links back to the fixes", () => {
+    it("the speaker chip's menu: Fix this line lands on that line in Review", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      renderListen();
+
+      await user.click(await screen.findByRole("button", { name: "Ishmael: fix this line" }));
+      await user.click(await screen.findByRole("menuitem", { name: /Fix this line/ }));
+      expect(screen.getByTestId("where")).toHaveTextContent("/review?book=b1&ch=1&block=blk9&seg=0");
+    });
+
+    it("Open in Review opens the chapter", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      renderListen();
+
+      await user.click(await screen.findByRole("button", { name: "Ishmael: fix this line" }));
+      await user.click(await screen.findByRole("menuitem", { name: /Open in Review/ }));
+      expect(screen.getByTestId("where")).toHaveTextContent("/review?book=b1&ch=1");
+      expect(screen.getByTestId("where")).not.toHaveTextContent("block=");
+    });
+
+    it("Fix pronunciation carries the word last clicked in that line to the dictionary", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      renderListen();
+
+      await screen.findByRole("button", { name: "play/pause" });
+      await user.click(screen.getByText("bb")); // also plays from that word
+      await user.click(screen.getByRole("button", { name: "narration: fix this line" }));
+      await user.click(await screen.findByRole("menuitem", { name: /Fix pronunciation of “bb”/ }));
+      expect(screen.getByTestId("where")).toHaveTextContent("/lexicon?book=b1&term=bb");
+    });
+
+    it("Fix pronunciation uses the text selected in that line, else opens the dictionary plain", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      renderListen();
+
+      const quote = await screen.findByText("Call me Ishmael.");
+      const range = document.createRange();
+      range.setStart(quote.firstChild!, 8);
+      range.setEnd(quote.firstChild!, 16); // "Ishmael."
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      await user.click(screen.getByRole("button", { name: "Ishmael: fix this line" }));
+      expect(await screen.findByRole("menuitem", { name: /Fix pronunciation of “Ishmael”/ })).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+
+      // a selection in ANOTHER line is not this line's word
+      await user.click(screen.getByRole("button", { name: "narration: fix this line" }));
+      const plain = await screen.findByRole("menuitem", { name: /Fix pronunciation/ });
+      expect(plain).not.toHaveTextContent("“");
+      await user.click(plain);
+      expect(screen.getByTestId("where")).toHaveTextContent(/^\/lexicon\?book=b1$/);
+    });
+  });
+
+  describe("voices in the margin", () => {
+    it("names the recording voice, notes a line whose voice changed since, and never shows raw ids", async () => {
+      const server = serveBook();
+      server.get("/api/books/b1/chapters/1/segments", {
+        ...ch1,
+        segments: [
+          makeRow(), // narration, recorded with the narrator: unchanged
+          // Ishmael now has his own voice, but this line was recorded with the narrator's
+          makeRow({
+            block_id: "blk5",
+            type: "dialogue",
+            speaker: "ishmael",
+            speaker_name: "Ishmael",
+            text: "Aye.",
+            audio_key: "k5",
+          }),
+          // recorded with a voice since deleted from the library
+          makeRow({ block_id: "blk6", text: "gone voice", voice_id: "v-deleted", audio_key: "k6" }),
+        ],
+      });
+      renderListen();
+
+      expect(await screen.findByText("changed since recording — now Sea Captain")).toBeInTheDocument();
+      // the deleted voice's narration line would be the narrator's today: flagged too
+      expect(screen.getByText("changed since recording — now Warm Narrator")).toBeInTheDocument();
+      expect(screen.getAllByText("Warm Narrator")).toHaveLength(2);
+      expect(screen.getByText("a voice no longer in your library")).toBeInTheDocument();
+      expect(screen.queryByText("v-narr")).not.toBeInTheDocument();
+      expect(screen.queryByText("v-deleted")).not.toBeInTheDocument();
+    });
+
+    it("a one-narrator recording never flags lines as changed", async () => {
+      const server = serveBook();
+      server.get("/api/books/b1/render", {
+        ...summary,
+        mode: "single",
+        active_mode: "single",
+        available_modes: ["single"],
+      });
+      server.get("/api/books/b1/chapters/1/segments", {
+        ...ch1,
+        segments: [makeRow({ type: "dialogue", speaker: "ishmael", speaker_name: "Ishmael" })],
+      });
+      renderListen();
+
+      expect(await screen.findByText("Warm Narrator")).toBeInTheDocument();
+      expect(screen.queryByText(/changed since recording/)).not.toBeInTheDocument();
+    });
+
+    it("a voice whose files can't be read is not called deleted; it links to Voices", async () => {
+      const server = serveBook();
+      server.get("/api/voices", { ...voices, unreadable: [{ voice_id: "v-broken", error: "bad meta.json" }] });
+      server.get("/api/books/b1/chapters/1/segments", { ...ch1, segments: [makeRow({ voice_id: "v-broken" })] });
+      renderListen();
+
+      const link = await screen.findByRole("link", { name: "a voice that can't be opened right now" });
+      expect(link).toHaveAttribute("href", "/voices");
+      expect(screen.queryByText("a voice no longer in your library")).not.toBeInTheDocument();
+    });
+
+    it("when the voice library can't be loaded, the raw voice id is still credited", async () => {
+      const server = serveBook();
+      server.error("GET", "/api/voices", 500, "internal", "boom");
+      renderListen();
+
+      expect(await screen.findByText("v-narr")).toBeInTheDocument();
+      expect(screen.queryByText("a voice no longer in your library")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("resume where you left off", () => {
+    it("offers the remembered chapter and time, and resuming plays from there", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 2, clip: "blk2:0", offset: 12, seconds: 12 }));
+      renderListen();
+
+      const resume = await screen.findByRole("button", { name: "Resume chapter 2 at 0:12" });
+      expect(screen.getByText(/where you stopped · The Carpet-Bag/)).toBeInTheDocument();
+      await user.click(resume);
+
+      expect(await screen.findByText("sailed")).toBeInTheDocument();
+      expect(await screen.findByText("0:12 / 0:30")).toBeInTheDocument();
+      expect(screen.getByText("playing")).toBeInTheDocument();
+      // offered once: gone after use
+      expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+    });
+
+    it("remembers the place while playing, never the paused 0:00 a fresh open loads at", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      const saved = JSON.stringify({ chapter: 2, clip: "blk2:0", offset: 12, seconds: 12 });
+      localStorage.setItem("seiyuu.listen.b1", saved);
+      renderListen();
+
+      await screen.findByRole("button", { name: "play/pause" }); // chapter 1 loaded, paused
+      expect(screen.getByRole("button", { name: "Resume chapter 2 at 0:12" })).toBeInTheDocument();
+      expect(localStorage.getItem("seiyuu.listen.b1")).toBe(saved);
+
+      await user.click(screen.getByText("bb")); // plays from 0:20 in chapter 1
+      await waitFor(() =>
+        expect(JSON.parse(localStorage.getItem("seiyuu.listen.b1")!)).toEqual({
+          chapter: 1,
+          clip: "blk1:0",
+          offset: 20,
+          seconds: 20,
+        }),
+      );
+      // listening started here, so the old offer goes away
+      expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+    });
+
+    it("no offer for a garbled record or the very start of the book", async () => {
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 1, clip: "blk1:0", offset: 1, seconds: 1 }));
+      const first = renderListen();
+      await screen.findByRole("button", { name: "play/pause" });
+      expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+      first.unmount();
+
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", "{garbled");
+      renderListen();
+      await screen.findByRole("button", { name: "play/pause" });
+      expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+    });
+
+    it("blocked storage: the reader still works, with nothing to resume", async () => {
+      const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new DOMException("blocked", "SecurityError");
+      });
+      try {
+        serveBook();
+        renderListen();
+        expect(await screen.findByText("bb")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+      } finally {
+        getItem.mockRestore();
+      }
+    });
+
+    it("resuming in the chapter already open seeks there without switching chapter", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 1, clip: "blk1:0", offset: 20, seconds: 20 }));
+      renderListen();
+
+      await screen.findByRole("button", { name: "play/pause" }); // chapter 1 loaded, paused
+      await user.click(screen.getByRole("button", { name: "Resume chapter 1 at 0:20" }));
+      expect(await screen.findByText("0:20 / 1:30")).toBeInTheDocument();
+      expect(screen.getByText("playing")).toBeInTheDocument();
+      expect(screen.getByText("bb")).toBeInTheDocument(); // still chapter 1
+    });
+
+    it("leaving for a fix and coming back keeps playing the same chapter, with nothing to resume", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      renderWithProviders(<RoundTrip />, { route: "/listen?book=b1" });
+
+      await screen.findByRole("button", { name: "play/pause" });
+      await user.click(screen.getByTitle("next rendered chapter"));
+      await user.click(await screen.findByText("sailed"));
+      await waitFor(() => expect(screen.getByTestId("player")).toHaveTextContent("on|blk2:0"));
+      await waitFor(() => expect(JSON.parse(localStorage.getItem("seiyuu.listen.b1")!).chapter).toBe(2));
+
+      await user.click(screen.getByRole("button", { name: "away" })); // off to Review...
+      expect(screen.queryByText("sailed")).not.toBeInTheDocument();
+      expect(screen.getByTestId("player")).toHaveTextContent("on|blk2:0");
+      await user.click(screen.getByRole("button", { name: "away" })); // ...and back
+
+      expect(await screen.findByText("sailed")).toBeInTheDocument();
+      expect(screen.queryByText("bb")).not.toBeInTheDocument(); // not rewound to chapter 1
+      expect(screen.getByTestId("player")).toHaveTextContent("on|blk2:0");
+      expect(screen.queryByRole("button", { name: /Resume chapter/ })).not.toBeInTheDocument();
+    });
+
+    it("a line played from Review does not count as listening: the offer stays", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 2, clip: "blk2:0", offset: 12, seconds: 12 }));
+      renderWithProviders(<RoundTrip startAway />, { route: "/listen?book=b1" });
+
+      await user.click(screen.getByRole("button", { name: "play one line" }));
+      expect(screen.getByTestId("player")).toHaveTextContent("on|blk9:0");
+      await user.click(screen.getByRole("button", { name: "away" })); // open Listen
+
+      expect(await screen.findByRole("button", { name: "Resume chapter 2 at 0:12" })).toBeInTheDocument();
+      // the one-liner was not remembered as the place either
+      expect(JSON.parse(localStorage.getItem("seiyuu.listen.b1")!).chapter).toBe(2);
+    });
+
+    it("picking another chapter cancels a resume still waiting to load", async () => {
+      const user = userEvent.setup();
+      const server = serveBook();
+      let releaseCh2: () => void = () => {};
+      const ch2Ready = new Promise<void>((r) => (releaseCh2 = r));
+      server.on("GET", "/api/books/b1/chapters/2/segments", async () => {
+        await ch2Ready;
+        return jsonResponse(ch2);
+      });
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 2, clip: "blk2:0", offset: 12, seconds: 12 }));
+      renderListen();
+
+      await screen.findByRole("button", { name: "play/pause" });
+      await user.click(screen.getByRole("button", { name: "Resume chapter 2 at 0:12" }));
+      await user.click(screen.getByTitle("previous rendered chapter")); // changed their mind
+      expect(await screen.findByText("bb")).toBeInTheDocument();
+      releaseCh2();
+
+      // later, opening chapter 2 starts it from the top, paused: no surprise seek-and-play
+      await user.click(screen.getByTitle("next rendered chapter"));
+      expect(await screen.findByText("sailed")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText("0:00 / 0:30")).toBeInTheDocument());
+      expect(screen.getByText("paused")).toBeInTheDocument();
+    });
+
+    it("finishing the last recorded chapter forgets the place instead of offering its last second", async () => {
+      const user = userEvent.setup();
+      serveBook();
+      localStorage.setItem("seiyuu.listen.b1", JSON.stringify({ chapter: 2, clip: "blk2:0", offset: 12, seconds: 12 }));
+      const grabbed: { audio: HTMLAudioElement | null } = { audio: null };
+      function Grab() {
+        grabbed.audio = usePlayer()?.audio ?? null;
+        return null;
+      }
+      renderWithProviders(
+        <>
+          <Listen />
+          <TransportBar />
+          <Grab />
+        </>,
+        { route: "/listen?book=b1" },
+      );
+
+      await user.click(await screen.findByRole("button", { name: "Resume chapter 2 at 0:12" }));
+      expect(await screen.findByText("0:12 / 0:30")).toBeInTheDocument();
+      await waitFor(() => expect(grabbed.audio).not.toBeNull());
+      fireEvent(grabbed.audio!, new Event("ended")); // chapter 2 is the last recorded one
+      await waitFor(() => expect(localStorage.getItem("seiyuu.listen.b1")).toBeNull());
+    });
+  });
+
+  describe("the audiobook file", () => {
+    it("offers Download .m4b when one exists", async () => {
+      const server = serveBook();
+      server.get("/api/books/b1", {
+        ...detail,
+        status: { ...detail.status, mastered: true },
+        downloads: { m4b: { url: "/api/books/b1/files/m4b", bytes: 412 * 1024 * 1024 }, chapter_mp3s: [] },
+      });
+      renderListen();
+
+      const link = await screen.findByRole("link", { name: /Download \.m4b/ });
+      expect(link).toHaveAttribute("href", "/api/books/b1/files/m4b");
+      expect(link).toHaveAttribute("download");
+      expect(link).toHaveTextContent("412 MB");
+    });
+
+    it("without one, the Build the .m4b step sits there as a real link", async () => {
+      serveBook();
+      renderListen();
+
+      expect(await screen.findByRole("link", { name: "Build the .m4b" })).toHaveAttribute(
+        "href",
+        "/render?book=b1#build",
+      );
+      expect(screen.queryByRole("link", { name: /Download \.m4b/ })).not.toBeInTheDocument();
+    });
+
+    it("audio recorded before the casting offers a real Record-again link", async () => {
+      const server = serveBook();
+      server.get("/api/books/b1", { ...detail, status: { ...detail.status, assigned: true } });
+      server.get("/api/books/b1/render", { ...summary, mode: "single", active_mode: "single", available_modes: ["single"] });
+      renderListen();
+
+      expect(await screen.findByText("this audio predates your casting")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Record again with your cast" })).toHaveAttribute(
+        "href",
+        "/render?book=b1#record",
+      );
+    });
+
+    it("full-cast audio never shows the predates-casting nudge", async () => {
+      const server = serveBook();
+      server.get("/api/books/b1", { ...detail, status: { ...detail.status, assigned: true } });
+      renderListen();
+
+      await screen.findByRole("button", { name: "play/pause" });
+      expect(screen.queryByText("this audio predates your casting")).not.toBeInTheDocument();
+    });
   });
 });

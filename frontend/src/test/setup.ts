@@ -2,6 +2,8 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
+import { resetRememberedBookMemory } from "../app/currentBook";
+
 /** Shared jsdom shims. jsdom implements neither the observer APIs react-aria overlays
     measure with, nor media playback, nor blob URLs — every stub here exists because a
     component under test calls it. Plain prototype/global assignment (NOT vi.stubGlobal)
@@ -83,4 +85,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   // Theme pref and player volume persist in localStorage; never bleed across tests.
   localStorage.clear();
+  // ...and the current-book store's page-session fallback (used when storage refuses).
+  resetRememberedBookMemory();
 });

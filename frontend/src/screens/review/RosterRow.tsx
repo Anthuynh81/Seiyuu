@@ -1,6 +1,9 @@
-import type { CharacterSummary } from "../../api/types";
+import type { CharacterSummary, VoiceOut } from "../../api/types";
 import { chapterOfBlock } from "../../api/types";
 import { Tip } from "../../components/Tooltip";
+import { auditionLine } from "../../lib/audition";
+import { characterHints, genderWarning } from "../../lib/reviewTools";
+import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- roster */
 
@@ -12,14 +15,20 @@ export function RosterRow({
   selected,
   onSelect,
   voiceCell,
+  voice,
 }: {
   char: CharacterSummary;
   masked: boolean;
   onReveal: () => void;
   onEdit: () => void;
+  /** this character's lines are the only ones on the page */
   selected: boolean;
+  /** toggle the page's one-character filter */
   onSelect: () => void;
   voiceCell: React.ReactNode;
+  /** the voice cast for this character right now (unsaved picks included) — its ▶ plays it
+      speaking the character's first sample line */
+  voice?: VoiceOut;
 }) {
   const debutChapter = chapterOfBlock(char.first_appearance);
   if (masked) {
@@ -51,24 +60,62 @@ export function RosterRow({
     );
   }
   return (
-    <tr className={selected ? "sel" : ""} onClick={onSelect}>
-      <td>
-        {char.name}
-        <Tip content="rename / merge">
-          <button
-            className="rowedit"
-            onClick={(e) => {
-              e.stopPropagation();
-              onEdit();
-            }}
-          >
-            ✎
-          </button>
-        </Tip>
-        {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
-      </td>
-      <td>{char.line_count.toLocaleString()}</td>
-      <td className="vcell" onClick={(e) => e.stopPropagation()}>{voiceCell}</td>
-    </tr>
+    <PlayableRow
+      className={selected ? "sel" : ""}
+      onClick={onSelect}
+      colSpan={3}
+      voice={voice}
+      text={auditionLine(char.sample_lines[0])}
+      who={`${char.name}'s voice`}
+      cells={
+        <>
+          <td>
+            {/* the row is clickable too; this is its keyboard-reachable twin */}
+            <button
+              className="rowname"
+              aria-pressed={selected}
+              title={selected ? "show every line again" : `show only ${char.name}'s lines`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect();
+              }}
+            >
+              {char.name}
+            </button>
+            <Tip content="rename / merge">
+              <button
+                className="rowedit"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEdit();
+                }}
+              >
+                ✎
+              </button>
+            </Tip>
+            <CharacterHints char={char} />
+            {char.sample_lines[0] && <span className="sample">{char.sample_lines[0]}</span>}
+          </td>
+          <td>{char.line_count.toLocaleString()}</td>
+        </>
+      }
+      picker={voiceCell}
+    />
+  );
+}
+
+/** What the book told Seiyuu about a character (gender, age) as small chips, plus the plain
+    warning when automatic casting has to guess the voice family. Display only. */
+function CharacterHints({ char }: { char: CharacterSummary }) {
+  const hints = characterHints(char);
+  const warning = genderWarning(char.gender);
+  return (
+    <>
+      <span className="hintchips">
+        <span className={`hintchip ${hints.genderKnown ? "" : "unknown"}`}>{hints.gender}</span>
+        {hints.age && <span className="hintchip">{hints.age}</span>}
+      </span>
+      {warning && <span className="hintwarn">{warning}</span>}
+    </>
   );
 }

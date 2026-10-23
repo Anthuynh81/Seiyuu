@@ -1,9 +1,12 @@
 import { useLocation } from "react-router-dom";
 
-import { useCancelJob, useLiveJobs } from "../api/hooks";
+import { useBooks, useCancelJob, useLiveJobs } from "../api/hooks";
 import type { JobOut } from "../api/types";
 import { TalkSlider } from "../components/Slider";
 import { Tip } from "../components/Tooltip";
+import { stepName, subjectName } from "../lib/jobCopy";
+import { progressLabel } from "../lib/progress";
+import { useJobProgress } from "./useJobProgress";
 import { usePlayer, usePlayerTime } from "./usePlayer";
 
 function ledFor(job: JobOut): string {
@@ -76,13 +79,16 @@ export function TransportBar() {
   const player = usePlayer();
   const cancel = useCancelJob();
   const live = useLiveJobs();
+  // the book's title for the job line (the shared, stable ["books"] key — read only)
+  const books = useBooks();
+
+  const jobs = live.data?.jobs ?? [];
+  const job = jobs.find((j) => j.state === "running") ?? jobs[0];
+  const progress = useJobProgress(job?.state === "running" ? job : null);
 
   if (location.pathname === "/listen" && player && player.clips.length > 0) {
     return <AudioTransport />;
   }
-
-  const jobs = live.data?.jobs ?? [];
-  const job = jobs.find((j) => j.state === "running") ?? jobs[0];
 
   if (!job) {
     return (
@@ -108,17 +114,37 @@ export function TransportBar() {
   return (
     <div className="transport">
       {borrowable ? (
-        <Tip content="still running — a voice audition may borrow the GPU between segments without stopping this render">
+        <Tip content="still running — a voice sample may borrow the graphics card between lines without stopping this recording">
           {stateChip}
         </Tip>
       ) : (
         stateChip
       )}
       <span style={{ color: "var(--ink-2)" }}>
-        {job.kind} · {job.book_id}
+        {subjectName(job, books.data?.books)} · {stepName(job.kind)}
       </span>
-      <div className={`meter ${job.state === "running" ? "run" : ""}`} />
-      <span style={{ color: "var(--ink-2)" }}>{job.progress_text || "waiting for the worker…"}</span>
+      {/* a parsed "chapter N/M" fills the meter; anything else keeps the moving stripe */}
+      {progress ? (
+        <div
+          className="meter"
+          role="progressbar"
+          aria-label="progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress.fraction * 100)}
+        >
+          <i style={{ width: `${progress.fraction * 100}%` }} />
+        </div>
+      ) : (
+        <div className={`meter ${job.state === "running" ? "run" : ""}`} />
+      )}
+      <span style={{ color: "var(--ink-2)" }}>
+        {progress
+          ? progressLabel(progress)
+          : job.state === "queued"
+            ? "waiting its turn"
+            : job.progress_text || "waiting for the worker…"}
+      </span>
       <button
         className="cancel"
         disabled={cancel.isPending || canceling}
