@@ -1,5 +1,7 @@
+import { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -193,6 +195,21 @@ function setupReview(characters?: CharacterSummary[]): MockApi {
   return server;
 }
 
+/** Spoiler-safe is off by default; tests about masking switch it on through the View menu. */
+async function turnOnSpoilerSafe(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /View/ }));
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: /Spoiler-safe/ }));
+  // the menu may stay open for more choices; Escape closes it either way
+  await user.keyboard("{Escape}");
+}
+
+/** The open reassign popover (a plain span, so found through its heading). */
+function reassignPopover(): HTMLElement {
+  const el = screen.getByText(/^reassign ·/).closest(".popover");
+  if (!(el instanceof HTMLElement)) throw new Error("no reassign popover open");
+  return el;
+}
+
 /* ------------------------------------------------------------------ tests */
 
 describe("Review", () => {
@@ -295,6 +312,7 @@ describe("Review", () => {
     renderWithProviders(<Review />);
 
     expect(await screen.findByText("Alice")).toBeInTheDocument();
+    await turnOnSpoilerSafe(user);
     // debut ch 5 > frontier ch 1: the name must not leak
     expect(screen.queryByText("Mallory")).not.toBeInTheDocument();
     expect(screen.getByText(/enters ch 5/)).toBeInTheDocument();
@@ -359,7 +377,7 @@ describe("Review", () => {
 
     await user.click(await screen.findByRole("button", { name: "ALICE" }));
     // the speaker select starts on the current speaker; move it to Bob
-    await user.click(screen.getByRole("button", { name: /Alice/ }));
+    await user.click(within(reassignPopover()).getByRole("button", { name: /Alice/ }));
     await user.click(await screen.findByRole("option", { name: "Bob" }));
     await user.click(screen.getByRole("button", { name: "record edit" }));
 
@@ -432,13 +450,14 @@ describe("Review", () => {
     renderWithProviders(<Review />);
 
     expect(await screen.findByText("It was a dark night.")).toBeInTheDocument();
-    expect(screen.getByText(/chapter 1 of 2 · The Beginning/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Ch 1 · The Beginning/ })).toBeInTheDocument();
+    expect(screen.getByText("of 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "‹" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "›" }));
 
     expect(await screen.findByText("Rain fell on the second morning.")).toBeInTheDocument();
-    expect(screen.getByText(/chapter 2 of 2 · The Middle/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Ch 2 · The Middle/ })).toBeInTheDocument();
     expect(server.lastCall("GET", "/api/books/b1/chapters/2/segments")).toBeDefined();
     expect(screen.getByRole("button", { name: "›" })).toBeDisabled(); // last chapter
   });
@@ -473,7 +492,7 @@ describe("Review", () => {
     expect(screen.getByText(/1 unattributed quote\(s\) · 2 in this chapter/)).toBeInTheDocument();
     // it wears the in-review marker like any low-confidence attribution
     expect(screen.getAllByText(/in review/)).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "next ▸" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toBeEnabled();
 
     // its chip opens the reassign popover — the queue leads straight to the fix
     await user.click(chip);
@@ -1421,5 +1440,586 @@ describe("Review: hear a voice where you cast it", () => {
     expect(server.jsonBodyOf("PUT", "/api/books/b1/assignment")).toMatchObject({
       assignments: { alice: "v-new", bob: "v-narr" },
     });
+  });
+});
+
+/* ------------------------------------------------------------------ 1.10 navigation */
+
+/** Renders the router's current query string so tests can read what the screen wrote there. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <output data-testid="loc">{loc.search}</output>;
+}
+const urlParams = () => new URLSearchParams(screen.getByTestId("loc").textContent ?? "");
+
+function mallory(): CharacterSummary {
+  return { ...bob(), id: "mallory", name: "Mallory", sample_lines: [], first_appearance: "ch005_b0010" };
+}
+
+/** Chapter 2's full page: narration, then a low-confidence Bob line. */
+function chapterTwoSegments(): SegmentBrowserOut {
+  return {
+    chapter_index: 2,
+    title: "The Middle",
+    segments: [
+      seg({ block_id: "ch002_b0001", text: "Rain fell on the second morning." }),
+      seg({
+        block_id: "ch002_b0003",
+        type: "dialogue",
+        speaker: "bob",
+        speaker_name: "Bob",
+        text: '"Is anyone there?" Bob called.',
+        confidence: 0.4,
+      }),
+    ],
+    edit_warnings: [],
+  };
+}
+const CH2_LOW = "/api/books/b1/chapters/2/segments?low_confidence=true";
+
+/** A query client with the app's real retry default (main.tsx: retry 1), minus the backoff. */
+function retryingClient(): QueryClient {
+  return new QueryClient({
+    defaultOptions: {
+      queries: { retry: 1, retryDelay: 0, refetchOnWindowFocus: false },
+      mutations: { retry: false },
+    },
+  });
+}
+
+/** A route that answers only once the test lets it (`release`). */
+function gated(server: MockApi, match: string, reply: () => Response) {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  server.on("GET", match, async () => {
+    await gate;
+    return reply();
+  });
+  return () => release();
+}
+
+/** The always-mounted polite region "Next to check" speaks through. */
+function walkRegion(): HTMLElement {
+  const el = document.querySelector(".drainstrip + [aria-live='polite']");
+  if (!(el instanceof HTMLElement)) throw new Error("no Next-to-check live region");
+  return el;
+}
+
+describe("Review navigation", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("spoiler-safe is off by default, turned on from the View menu, and remembered for this viewer", async () => {
+    const user = userEvent.setup();
+    setupReview([alice(), bob(), mallory()]);
+    const first = renderWithProviders(<Review />);
+
+    // off: every character is named and no frontier control clutters the roster
+    expect(await screen.findByText("Mallory")).toBeInTheDocument();
+    expect(screen.queryByText(/enters ch 5/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "read through chapter" })).not.toBeInTheDocument();
+
+    await turnOnSpoilerSafe(user);
+    expect(screen.queryByText("Mallory")).not.toBeInTheDocument();
+    expect(screen.getByText(/enters ch 5/)).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "read through chapter" })).toBeInTheDocument();
+    expect(localStorage.getItem("seiyuu.review.spoilerSafe")).toBe("1");
+
+    // a fresh visit starts masked
+    first.unmount();
+    setupReview([alice(), bob(), mallory()]);
+    renderWithProviders(<Review />);
+    expect(await screen.findByText(/enters ch 5/)).toBeInTheDocument();
+    expect(screen.queryByText("Mallory")).not.toBeInTheDocument();
+
+    // the menu shows the choice is on; turning it off is remembered too
+    await user.click(screen.getByRole("button", { name: "View" }));
+    const item = await screen.findByRole("menuitemcheckbox", { name: /Spoiler-safe/ });
+    expect(item).toHaveAttribute("aria-checked", "true");
+    await user.click(item);
+    await user.keyboard("{Escape}");
+    expect(await screen.findByText("Mallory")).toBeInTheDocument();
+    expect(localStorage.getItem("seiyuu.review.spoilerSafe")).toBe("0");
+  });
+
+  it("a browser that refuses storage still gets a working page with spoiler-safe off", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("site data blocked");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("site data blocked");
+    });
+    const user = userEvent.setup();
+    setupReview([alice(), bob(), mallory()]);
+    renderWithProviders(<Review />);
+
+    expect(await screen.findByText("Mallory")).toBeInTheDocument();
+    await turnOnSpoilerSafe(user); // works for this page even though it can't be remembered
+    expect(screen.getByText(/enters ch 5/)).toBeInTheDocument();
+  });
+
+  it("with spoiler-safe on, the reassign and merge lists leave out characters not met yet", async () => {
+    const user = userEvent.setup();
+    setupReview([alice(), bob(), mallory()]);
+    renderWithProviders(<Review />);
+    expect(await screen.findByText("Mallory")).toBeInTheDocument();
+
+    // off: everyone is offered
+    await user.click(screen.getByRole("button", { name: "ALICE" }));
+    await user.click(within(reassignPopover()).getByRole("button", { name: /Alice/ }));
+    expect(await screen.findByRole("option", { name: "Mallory" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.click(within(reassignPopover()).getByRole("button", { name: "cancel" }));
+
+    await turnOnSpoilerSafe(user);
+
+    // reassign: Mallory is not a choice
+    await user.click(screen.getByRole("button", { name: "ALICE" }));
+    await user.click(within(reassignPopover()).getByRole("button", { name: /Alice/ }));
+    expect(await screen.findByRole("option", { name: "Bob" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Mallory" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.click(within(reassignPopover()).getByRole("button", { name: "cancel" }));
+
+    // merge: nor there
+    const aliceRow = screen.getByRole("row", { name: /Alice/ });
+    await user.click(within(aliceRow).getByRole("button", { name: "✎" }));
+    const dialog = await screen.findByRole("dialog", { name: /Edit character — Alice/ });
+    await user.click(within(dialog).getByRole("button", { name: /— choose —/ }));
+    expect(await screen.findByRole("option", { name: "Bob" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Mallory" })).not.toBeInTheDocument();
+  });
+
+  it("a line credited to a hidden character keeps that speaker in the reassign list without naming it", async () => {
+    const user = userEvent.setup();
+    const server = setupReview([alice(), bob(), mallory()]);
+    const base = chapterOneSegments();
+    server.get("/api/books/b1/chapters/1/segments", {
+      ...base,
+      segments: [
+        ...base.segments,
+        seg({
+          block_id: "ch001_b0003",
+          type: "dialogue",
+          speaker: "mallory",
+          speaker_name: "Mallory",
+          text: '"Psst," someone whispered.',
+          confidence: 0.9,
+        }),
+      ],
+    } satisfies SegmentBrowserOut);
+    renderWithProviders(<Review />);
+    expect(await screen.findByText(/someone whispered/)).toBeInTheDocument();
+    await turnOnSpoilerSafe(user);
+
+    await user.click(screen.getByRole("button", { name: "▮▮▮▮▮" }));
+    const pop = reassignPopover();
+    expect(within(pop).getByRole("button", { name: /a hidden character/ })).toBeInTheDocument();
+    expect(within(pop).queryByText(/Mallory/)).not.toBeInTheDocument();
+  });
+
+  it("?ch=&block=&seg= scrolls to that line and moves keyboard focus onto it", async () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    setupReview();
+    renderWithProviders(<Review />, { route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1" });
+
+    const line = await screen.findByText('"Hello there," said Alice.');
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(line).toHaveClass("target");
+    expect(scroll.mock.contexts).toContain(line);
+    // the other line on the page is not marked
+    expect(screen.getByText("It was a dark night.")).not.toHaveClass("target");
+  });
+
+  it("?block= alone opens the line's own chapter", async () => {
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    renderWithProviders(<Review />, { route: "/review?book=b1&block=ch002_b0003" });
+
+    const line = await screen.findByText('"Is anyone there?" Bob called.');
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(screen.getByRole("button", { name: /Ch 2 · The Middle/ })).toBeInTheDocument();
+  });
+
+  it("a link to a line that is no longer there says so plainly", async () => {
+    setupReview();
+    renderWithProviders(<Review />, { route: "/review?book=b1&ch=1&block=ch001_b0099" });
+    expect(await screen.findByText(/The linked line isn't on this page/)).toBeInTheDocument();
+    expect(screen.getByText("It was a dark night.")).toBeInTheDocument();
+  });
+
+  it("the chapter dropdown switches chapters and writes ?ch= into the URL", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+
+    await user.click(await screen.findByRole("button", { name: /Ch 1 · The Beginning/ }));
+    await user.click(await screen.findByRole("option", { name: "Ch 2 · The Middle" }));
+
+    expect(await screen.findByText("Rain fell on the second morning.")).toBeInTheDocument();
+    expect(urlParams().get("ch")).toBe("2");
+    expect(urlParams().get("book")).toBe("b1");
+    expect(server.lastCall("GET", "/api/books/b1/chapters/2/segments")).toBeDefined();
+  });
+
+  it("Next to check finds the line in this chapter, then fetches the next chapter's lines to check", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    server.get(CH2_LOW, { ...chapterTwoSegments(), segments: [chapterTwoSegments().segments[1]] });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+    await screen.findByText("It was a dark night.");
+
+    // first: the 0.55 Alice line on this page — no look-ahead request needed
+    const next = screen.getByRole("button", { name: "Next to check ▸" });
+    await user.click(next);
+    const aliceLine = screen.getByText('"Hello there," said Alice.');
+    await waitFor(() => expect(aliceLine).toHaveClass("target"));
+    // the line is marked and announced, but focus stays on Next for the press-check-press loop
+    expect(next).toHaveFocus();
+    expect(screen.getByText('Next line to check, chapter 1: "Hello there," said Alice.')).toHaveClass("sr-only");
+    expect(urlParams().get("block")).toBe("ch001_b0001");
+    expect(urlParams().get("seg")).toBe("1");
+    expect(server.lastCall("GET", "low_confidence")).toBeUndefined();
+
+    // then: nothing left in chapter 1, so chapter 2's ?low_confidence= lines are fetched
+    await user.click(next);
+    const bobLine = await screen.findByText('"Is anyone there?" Bob called.');
+    await waitFor(() => expect(bobLine).toHaveClass("target"));
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toHaveFocus();
+    expect(server.lastCall("GET", CH2_LOW)).toBeDefined();
+    expect(urlParams().get("ch")).toBe("2");
+    expect(urlParams().get("block")).toBe("ch002_b0003");
+    expect(urlParams().get("seg")).toBe("0");
+  });
+
+  it("Next to check skips a chapter with nothing to read and stops at the end of the book in plain words", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.error("GET", CH2_LOW, 404, "not_found", "chapter 2 has no attribution");
+    renderWithProviders(<Review />, {
+      route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1",
+      queryClient: retryingClient(),
+    });
+    await screen.findByText('"Hello there," said Alice.');
+
+    await user.click(screen.getByRole("button", { name: "Next to check ▸" }));
+    expect(await screen.findByText(/Nothing left to check from here to the end of the book/)).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.url === CH2_LOW)).toHaveLength(1); // never retried
+  });
+
+  it("at the end of the book, 'start again' looks from the first chapter and lands there", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    server.get("/api/books/b1/chapters/1/segments?low_confidence=true", {
+      ...chapterOneSegments(),
+      segments: [chapterOneSegments().segments[1]],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&ch=2&block=ch002_b0003&seg=0" },
+    );
+    await screen.findByText('"Is anyone there?" Bob called.');
+
+    // the last line to check in the last chapter: nothing further, and nothing fetched
+    await user.click(screen.getByRole("button", { name: "Next to check ▸" }));
+    expect(await screen.findByText(/Nothing left to check from here to the end of the book/)).toBeInTheDocument();
+    expect(server.lastCall("GET", "low_confidence")).toBeUndefined();
+
+    await user.click(screen.getByRole("button", { name: "start again from the first chapter" }));
+    const aliceLine = await screen.findByText('"Hello there," said Alice.');
+    await waitFor(() => expect(aliceLine).toHaveClass("target"));
+    // the "start again" link went away with the note: focus moved to Next, not to <body>
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toHaveFocus();
+    expect(server.lastCall("GET", "/chapters/1/segments?low_confidence=true")).toBeDefined();
+    expect(urlParams().get("ch")).toBe("1");
+    expect(screen.queryByText(/Nothing left to check/)).not.toBeInTheDocument();
+  });
+
+  it("a failed look-ahead stops with the reason instead of retrying", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.error("GET", CH2_LOW, 500, "internal", "disk on fire");
+    // the app's own default (main.tsx) retries a query once: the walk must opt out of that
+    renderWithProviders(<Review />, {
+      route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1",
+      queryClient: retryingClient(),
+    });
+    await screen.findByText('"Hello there," said Alice.');
+
+    await user.click(screen.getByRole("button", { name: "Next to check ▸" }));
+    expect(await screen.findByText(/Couldn't read chapter 2: disk on fire/)).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.url === CH2_LOW)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toBeEnabled();
+  });
+
+  it("clicking a character shows only their lines, with a clear way back to every line", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/1/segments?speaker=alice", {
+      ...chapterOneSegments(),
+      segments: [chapterOneSegments().segments[1]],
+    });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+    expect(await screen.findByText("It was a dark night.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Alice" }));
+
+    expect(await screen.findByText(/showing only/)).toHaveTextContent("showing only Alice · 1 line in this chapter");
+    await waitFor(() => expect(screen.queryByText("It was a dark night.")).not.toBeInTheDocument());
+    expect(screen.getByText('"Hello there," said Alice.')).toBeInTheDocument();
+    expect(server.lastCall("GET", "/chapters/1/segments?speaker=alice")).toBeDefined();
+    expect(urlParams().get("speaker")).toBe("alice");
+    expect(screen.getByRole("button", { name: "Alice" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "show all" }));
+    expect(await screen.findByText("It was a dark night.")).toBeInTheDocument();
+    expect(screen.queryByText(/showing only/)).not.toBeInTheDocument();
+    expect(urlParams().get("speaker")).toBeNull();
+  });
+
+  it("a filtered chapter with none of their lines says so", async () => {
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/1/segments?speaker=bob", { ...chapterOneSegments(), segments: [] });
+    renderWithProviders(<Review />, { route: "/review?book=b1&speaker=bob" });
+    expect(await screen.findByText("No lines for Bob in this chapter.")).toBeInTheDocument();
+    expect(screen.getByText(/showing only/)).toHaveTextContent("showing only Bob · 0 lines in this chapter");
+  });
+
+  it("with spoiler-safe off, a reassign list opened before (or without) the character list names the speaker", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.error("GET", "/api/books/b1/characters", 500, "corrupt_artifact", "characters file unreadable");
+    renderWithProviders(<Review />);
+    expect(await screen.findByText("characters file unreadable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "ALICE" }));
+    const pop = reassignPopover();
+    expect(within(pop).getByRole("button", { name: /Alice/ })).toBeInTheDocument();
+    expect(within(pop).queryByText(/hidden/)).not.toBeInTheDocument();
+  });
+
+  it("Next to check follows the one-character filter: other speakers' lines are passed over", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const bobLine = chapterTwoSegments().segments[1];
+    server
+      .get("/api/books/b1/chapters/2/segments", chapterTwoSegments())
+      .get("/api/books/b1/chapters/1/segments?speaker=bob", { ...chapterOneSegments(), segments: [] })
+      .get("/api/books/b1/chapters/2/segments?speaker=bob", { ...chapterTwoSegments(), segments: [bobLine] })
+      .get("/api/books/b1/chapters/2/segments?speaker=bob&low_confidence=true", {
+        ...chapterTwoSegments(),
+        segments: [bobLine],
+      });
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&speaker=bob" },
+    );
+    expect(await screen.findByText("No lines for Bob in this chapter.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next to check ▸" })).not.toHaveAttribute("aria-disabled"));
+
+    // Alice's 0.55 line in chapter 1 is not Bob's: the walk goes on to chapter 2, asking only for Bob
+    await user.click(screen.getByRole("button", { name: "Next to check ▸" }));
+    const line = await screen.findByText('"Is anyone there?" Bob called.');
+    await waitFor(() => expect(line).toHaveClass("target"));
+    expect(server.lastCall("GET", "/chapters/2/segments?speaker=bob&low_confidence=true")).toBeDefined();
+    expect(server.lastCall("GET", "/chapters/1/segments?speaker=bob&low_confidence")).toBeUndefined();
+    expect(urlParams().get("ch")).toBe("2");
+    expect(urlParams().get("block")).toBe("ch002_b0003");
+    expect(urlParams().get("speaker")).toBe("bob");
+  });
+
+  it("while Next to check looks ahead, the button keeps focus, says it is busy, and ignores more presses", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    const release = gated(server, CH2_LOW, () => errorResponse(404, "not_found", "chapter 2 has no attribution"));
+    renderWithProviders(<Review />, { route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1" });
+    await screen.findByText('"Hello there," said Alice.');
+    const region = walkRegion(); // mounted before anything is said into it
+    expect(region).toBeEmptyDOMElement();
+
+    const next = screen.getByRole("button", { name: "Next to check ▸" });
+    next.focus();
+    await user.keyboard("{Enter}");
+    const busy = await screen.findByRole("button", { name: "looking in chapter 2…" });
+    expect(busy).toBe(next);
+    expect(busy).toHaveFocus();
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).toHaveAttribute("aria-busy", "true");
+    expect(region).toHaveTextContent("Looking for the next line to check in chapter 2…");
+    await user.keyboard("{Enter}"); // a second press while busy starts nothing
+    expect(server.calls.filter((c) => c.url === CH2_LOW)).toHaveLength(1);
+
+    release();
+    await waitFor(() =>
+      expect(region).toHaveTextContent("Nothing left to check from here to the end of the book."),
+    );
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toHaveFocus();
+  });
+
+  it("changing chapter while Next to check looks ahead abandons the search", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server.get("/api/books/b1/chapters/2/segments", chapterTwoSegments());
+    const release = gated(server, CH2_LOW, () =>
+      jsonResponse({ ...chapterTwoSegments(), segments: [chapterTwoSegments().segments[1]] }),
+    );
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1" },
+    );
+    await screen.findByText('"Hello there," said Alice.');
+
+    await user.click(screen.getByRole("button", { name: "Next to check ▸" }));
+    expect(await screen.findByRole("button", { name: "looking in chapter 2…" })).toBeInTheDocument();
+    await waitFor(() => expect(server.lastCall("GET", CH2_LOW)).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: /Ch 1 · The Beginning/ }));
+    await user.click(await screen.findByRole("option", { name: "Ch 2 · The Middle" }));
+    const bobLine = await screen.findByText('"Is anyone there?" Bob called.');
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toBeInTheDocument();
+
+    // the late answer lands nowhere: no jump to its line, no landing message
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(urlParams().get("ch")).toBe("2");
+    expect(urlParams().get("block")).toBeNull();
+    expect(bobLine).not.toHaveClass("target");
+    expect(walkRegion()).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: "Next to check ▸" })).toBeInTheDocument();
+  });
+
+  it("a live refresh after landing on a linked line does not scroll to it again", async () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    const server = setupReview();
+    const { queryClient } = renderWithProviders(<Review />, {
+      route: "/review?book=b1&ch=1&block=ch001_b0001&seg=1",
+    });
+    const line = await screen.findByText('"Hello there," said Alice.');
+    await waitFor(() => expect(line).toHaveFocus());
+    const scrollsTo = () => scroll.mock.contexts.filter((c) => c === line).length;
+    expect(scrollsTo()).toBe(1);
+    const fetches = () => server.calls.filter((c) => c.url === "/api/books/b1/chapters/1/segments").length;
+    const before = fetches();
+
+    // what JobCompletionWatcher (or an edit) does: refresh every segment page
+    await queryClient.invalidateQueries({ queryKey: ["segments"] });
+    await waitFor(() => expect(fetches()).toBeGreaterThan(before));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(scrollsTo()).toBe(1);
+    expect(line).toHaveClass("target");
+  });
+});
+
+describe("Review front matter", () => {
+  /** b1 whose chapter 1 is front matter (no attribution) and chapter 2 is the story. */
+  function frontMatterBook(server: MockApi, bookId = "b1") {
+    server
+      .error("GET", `/api/books/${bookId}/chapters/1/segments`, 404, "not_found", "chapter 1 has no attribution")
+      .get(`/api/books/${bookId}/chapters/2/segments`, chapterTwoSegments());
+  }
+
+  it("an unattributed chapter 1 is skipped when no chapter was asked for, and ?ch=2 lands in the URL", async () => {
+    const server = setupReview();
+    frontMatterBook(server);
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+    expect(await screen.findByText("Rain fell on the second morning.")).toBeInTheDocument();
+    expect(urlParams().get("ch")).toBe("2");
+  });
+
+  it("an explicit ?ch=1 stays on chapter 1 and says why it is empty", async () => {
+    const server = setupReview();
+    frontMatterBook(server);
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&ch=1" },
+    );
+    expect(await screen.findByText("chapter 1 has no attribution")).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(urlParams().get("ch")).toBe("1");
+    expect(server.lastCall("GET", "/api/books/b1/chapters/2/segments")).toBeUndefined();
+  });
+
+  it("a link to a line in chapter 1 is not bounced to chapter 2", async () => {
+    const server = setupReview();
+    frontMatterBook(server);
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1&block=ch001_b0001" },
+    );
+    expect(await screen.findByText("chapter 1 has no attribution")).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(urlParams().get("ch")).toBeNull();
+    expect(urlParams().get("block")).toBe("ch001_b0001");
+    expect(server.lastCall("GET", "/api/books/b1/chapters/2/segments")).toBeUndefined();
+  });
+
+  it("the skip happens again for the next book", async () => {
+    const user = userEvent.setup();
+    const server = mockApi().get("/api/books", {
+      books: [
+        makeBook({ book_id: "b1", title: "Book One", attributed: true }),
+        makeBook({ book_id: "b2", title: "Book Two", attributed: true }),
+      ],
+    });
+    registerBook(server, "b1", "Book One");
+    registerBook(server, "b2", "Book Two");
+    frontMatterBook(server, "b1");
+    frontMatterBook(server, "b2");
+    renderWithProviders(
+      <>
+        <Review />
+        <LocationProbe />
+      </>,
+      { route: "/review?book=b1" },
+    );
+    await screen.findByText("Rain fell on the second morning.");
+    expect(urlParams().get("ch")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: /Book One/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Book Two" }));
+    await waitFor(() => expect(server.lastCall("GET", "/api/books/b2/chapters/2/segments")).toBeDefined());
+    expect(urlParams().get("book")).toBe("b2");
+    expect(urlParams().get("ch")).toBe("2");
   });
 });

@@ -192,6 +192,8 @@
 .key[disabled] { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
 .key.quiet { border-color: var(--hairline); color: var(--ink-2); }
 .key.quiet:hover { background: var(--console-hi); color: var(--ink); }
+.key[aria-disabled="true"], .key[aria-disabled="true"]:hover { border-color: var(--hairline); color: var(--ink-3); cursor: not-allowed; background: none; }
+.key[aria-busy="true"] { cursor: progress; }
 .key.danger { border-color: var(--clip); color: var(--clip); }
 .key.danger:hover { background: var(--clip); color: var(--booth); border-color: var(--clip); }
 .link { color: var(--tungsten); text-decoration: none; background: none; border: none; cursor: pointer; padding: 0; font: inherit; }
@@ -614,5 +616,16 @@ details.fine.attr-adv { margin-top: 0; padding: 8px 14px; }
 /* tooltip: a raised console chip, mono voice */
 .ttip { background: var(--raised); border: 1px solid var(--hairline-strong); color: var(--ink-2); font-family: var(--mono); font-size: 11px; line-height: 1.5; padding: 6px 9px; max-width: 340px; z-index: 70; }
 .ttip-arrow { display: block; width: 6px; height: 6px; background: var(--raised); border-left: 1px solid var(--hairline-strong); border-top: 1px solid var(--hairline-strong); transform: rotate(225deg) translate(2px, 2px); }
+
+/* Character Review navigation (1.10): the line a deep link / "Next to check" landed on, and
+   the one-character filter bar above the page. A tungsten bar outside the line's box (outer
+   box-shadow never paints under the text, so the dialogue hanging indent is untouched). */
+.seg.target { background: color-mix(in srgb, var(--tungsten) 12%, transparent); box-shadow: -4px 0 0 0 var(--tungsten); outline: none; }
+.seg.target:focus-visible { outline: 1px solid var(--tungsten-dim); outline-offset: 2px; }
+.filterbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--hairline); border-left: 3px solid var(--tungsten); background: var(--booth-0); padding: 6px 12px; margin-bottom: 12px; font-size: 12.5px; color: var(--ink-2); }
+.filterbar b { color: var(--ink); font-weight: 600; }
+.navnote { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.rowname { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.rowname:hover, .rowname[aria-pressed="true"] { color: var(--tungsten); }
 
 } /* @layer components */

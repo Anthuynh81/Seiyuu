@@ -20,7 +20,9 @@ export function RosterRow({
   masked: boolean;
   onReveal: () => void;
   onEdit: () => void;
+  /** this character's lines are the only ones on the page */
   selected: boolean;
+  /** toggle the page's one-character filter */
   onSelect: () => void;
   voiceCell: React.ReactNode;
   /** the voice cast for this character right now (unsaved picks included) — its ▶ plays it
@@ -67,7 +69,18 @@ export function RosterRow({
       cells={
         <>
           <td>
-            {char.name}
+            {/* the row is clickable too; this is its keyboard-reachable twin */}
+            <button
+              className="rowname"
+              aria-pressed={selected}
+              title={selected ? "show every line again" : `show only ${char.name}'s lines`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect();
+              }}
+            >
+              {char.name}
+            </button>
             <Tip content="rename / merge">
               <button
                 className="rowedit"

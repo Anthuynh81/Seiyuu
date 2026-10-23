@@ -16,6 +16,7 @@ export const SegmentPair = memo(function SegmentPair({
   emoOpen,
   onEmotion,
   emotionPopover,
+  target = false,
 }: {
   segKey: string;
   row: SegmentRow;
@@ -28,6 +29,9 @@ export const SegmentPair = memo(function SegmentPair({
   emoOpen: boolean;
   onEmotion: (key: string) => void;
   emotionPopover: React.ReactNode;
+  /** the line a deep link or "Next to check" landed on: marked, and focusable so the page
+      can move keyboard focus to it */
+  target?: boolean;
 }) {
   const dialogueish = row.type !== "narration";
   // An unattributed quote is NOT narration — the chip says so, so the reassign popover
@@ -42,7 +46,11 @@ export const SegmentPair = memo(function SegmentPair({
         : (row.speaker_name ?? row.speaker);
   return (
     <>
-      <p className={`seg serif relative ${dialogueish ? "dlg" : ""}`} data-seg={`${row.block_id}:${row.segment_index}`}>
+      <p
+        className={`seg serif relative ${dialogueish ? "dlg" : ""} ${target ? "target" : ""}`}
+        data-seg={`${row.block_id}:${row.segment_index}`}
+        tabIndex={target ? -1 : undefined}
+      >
         {open || emoOpen ? <span className="hl">{row.text}</span> : row.text}
         {popover}
       </p>

@@ -1,8 +1,10 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
+  segmentsQuery,
   useAssignment,
   useBook,
   useBooks,
@@ -17,7 +19,7 @@ import {
   useVoices,
   type SuggestInput,
 } from "../api/hooks";
-import type { CharacterSummary, SuggestCastResponse } from "../api/types";
+import type { CharacterSummary, SegmentRow, SuggestCastResponse } from "../api/types";
 import { chapterOfBlock } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
 import { NextStep } from "../components/NextStep";
@@ -33,8 +35,9 @@ import {
 } from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
 import { nextStep } from "../lib/nextStep";
+import { findLine, matchesSpeaker, readLocation, walkToNextCheck } from "../lib/reviewNav";
 import { CharacterEditor } from "./review/CharacterEditor";
-import { isReviewable, useFrontier } from "./review/helpers";
+import { isReviewable, useFrontier, useSpoilerSafe } from "./review/helpers";
 import { EmotionPopover, ReassignPopover } from "./review/popovers";
 import { ResetCastDialog } from "./review/ResetCastDialog";
 import { RosterRow } from "./review/RosterRow";
@@ -42,13 +45,25 @@ import { AttributePanel } from "./render/AttributePanel";
 import { SegmentPair } from "./review/SegmentPair";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
 import { PlayableRow } from "./review/PlayableRow";
+import { ViewMenu } from "./review/ViewMenu";
 import { VoicePicker } from "./review/VoicePicker";
 import { AddVoiceDialog } from "./voices/AddVoiceDialog";
+
+/** "Next to check" progress: idle, walking chapters, or stopped with a plain message. */
+type Walk =
+  | { state: "idle" }
+  | { state: "looking"; chapter: number }
+  | { state: "end"; fromStart: boolean }
+  | { state: "error"; message: string }
+  /** landed on a line: focus stays on the button, the polite region says where it went */
+  | { state: "landed"; message: string };
+const IDLE: Walk = { state: "idle" };
 
 /* -------------------------------------------------- the screen */
 
 export function Review() {
-  const [, setParams] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  const qc = useQueryClient();
   const books = useBooks();
   // no ?book=: the book this viewer last worked on, else the first one with speakers found
   const bookId = useScreenBook(
@@ -58,11 +73,41 @@ export function Review() {
   const book = useBook(bookId);
   const attributed = !!book.data?.status.attributed;
 
-  const [chapter, setChapter] = useState(1);
+  // Where the page is lives in the URL (?ch=, ?block=&seg=, ?speaker=), so a line can be linked
+  // to and a reload keeps the place. Moves within the screen REPLACE the history entry.
+  const loc = useMemo(() => readLocation(params), [params]);
+  const chapter = loc.chapter;
+  const speakerFilter = loc.speaker;
+  const target = loc.target;
+  const patchParams = useCallback(
+    (patch: Record<string, string | null>) =>
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === null) next.delete(k);
+            else next.set(k, v);
+          }
+          return next;
+        },
+        { replace: true },
+      ),
+    [setParams],
+  );
   const chapterCount = book.data?.chapters?.length ?? 1;
+  const chapterList = useMemo(
+    () => book.data?.chapters?.map((c) => c.index) ?? Array.from({ length: chapterCount }, (_, i) => i + 1),
+    [book.data, chapterCount],
+  );
 
   const overview = useCharacters(bookId, attributed);
   const segments = useSegments(bookId, chapter, attributed);
+  // "show only <Name>": the server's ?speaker= view of the same chapter (the full chapter
+  // above still feeds the queue counts, the emotion tags and the narrator's sample line)
+  const filtered = useSegments(bookId, chapter, attributed && speakerFilter !== null, {
+    speaker: speakerFilter,
+  });
+  const shown = speakerFilter !== null ? filtered : segments;
   // F2/F2a: the per-segment emotion tags the model captured, now EDITABLE via the set_emotion
   // edit overlay (EmotionPopover). Keyed block_id:ordinal to line up with each row.
   const attribution = useChapterAttribution(bookId, chapter, attributed);
@@ -152,9 +197,8 @@ export function Review() {
     setTagFilter((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
 
   const [frontier, setFrontier] = useFrontier(bookId);
-  const [spoilerSafe, setSpoilerSafe] = useState(true);
+  const [spoilerSafe, setSpoilerSafe] = useSpoilerSafe();
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
-  const [selectedChar, setSelectedChar] = useState<string | null>(null);
   const [editingChar, setEditingChar] = useState<CharacterSummary | null>(null);
   const [popoverAt, setPopoverAt] = useState<string | null>(null); // `${block_id}:${idx}`
   const [emoAt, setEmoAt] = useState<string | null>(null); // emotion editor, same key shape
@@ -164,23 +208,25 @@ export function Review() {
   // Front matter (title page, copyright) is often chapter 1 and never attributed —
   // skip forward once instead of opening the screen on a 404.
   const autoSkipped = useRef(false);
-  // Chapter position and the one-shot front-matter skip are per-book state.
+  // The one-shot front-matter skip is per-book state (a book switch drops ?ch= with ?book=).
+  // Only an implicit chapter 1 skips: a chapter or line someone asked for stays put.
   useEffect(() => {
-    setChapter(1);
     autoSkipped.current = false;
   }, [bookId]);
+  const implicitChapter = !loc.explicitChapter && target === null;
   useEffect(() => {
     if (
       !autoSkipped.current &&
+      implicitChapter &&
       chapter === 1 &&
       segments.error instanceof ApiError &&
       segments.error.code === "not_found" &&
       chapterCount > 1
     ) {
       autoSkipped.current = true;
-      setChapter(2);
+      patchParams({ ch: "2" });
     }
-  }, [segments.error, chapter, chapterCount]);
+  }, [segments.error, chapter, chapterCount, implicitChapter, patchParams]);
 
   const threshold = overview.data?.confidence_threshold ?? 0.7;
   const lowConfInChapter = useMemo(
@@ -218,12 +264,102 @@ export function Review() {
     setEmoAt((cur) => (cur === key ? null : key));
   }, []);
 
-  const jumpToLowConf = () => {
-    const first = lowConfInChapter[0];
-    if (!first) return;
-    pageRef.current
-      ?.querySelector(`[data-seg="${first.block_id}:${first.segment_index}"]`)
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  // spoiler-safe: the reassign list offers only the characters met so far (the merge list in
+  // CharacterEditor filters the same way)
+  const visibleCast = useMemo(() => cast.filter((c) => !maskedIds.has(c.id)), [cast, maskedIds]);
+
+  /* ---- the linked line: scroll to it and move focus there, once per arrival */
+  const shownRows = shown.data?.segments;
+  const targetRow = useMemo(
+    () => (target && shownRows ? findLine(shownRows, target) : undefined),
+    [target, shownRows],
+  );
+  const targetKey = targetRow ? `${targetRow.block_id}:${targetRow.segment_index}` : null;
+  const landedOn = useRef<string | null>(null);
+  // A landing "Next to check" asked for: scroll there but leave focus on the button, so the
+  // press-check-press loop never needs a long Shift+Tab back past the roster.
+  const quietArrival = useRef<string | null>(null);
+  useEffect(() => {
+    if (!targetKey) {
+      landedOn.current = null; // left the line: arriving on it again later scrolls again
+      return;
+    }
+    const arrival = `${bookId}|${chapter}|${targetKey}`;
+    // a live refetch (job ticks, an edit) re-renders the page; only a NEW target scrolls
+    if (landedOn.current === arrival) return;
+    const el = [...(pageRef.current?.querySelectorAll<HTMLElement>("[data-seg]") ?? [])].find(
+      (n) => n.dataset.seg === targetKey,
+    );
+    if (!el) return;
+    landedOn.current = arrival;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    // only a real deep-link arrival (a first load, a link from another screen) moves focus
+    if (quietArrival.current !== arrival) el.focus({ preventScroll: true });
+    quietArrival.current = null;
+  }, [targetKey, bookId, chapter]);
+
+  /* ---- Next to check: forward through the lines worth a look, across chapters */
+  const [walk, setWalk] = useState<Walk>(IDLE);
+  const walkRun = useRef(0);
+  const nextRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    walkRun.current += 1; // abandons an in-flight walk for the old book / filter
+    setWalk(IDLE);
+  }, [bookId, speakerFilter]);
+  const nextToCheck = async (fromStart = false) => {
+    if (!bookId) return;
+    const run = ++walkRun.current;
+    const from = fromStart ? { chapter: chapterList[0] ?? 1, after: null } : { chapter, after: target };
+    setWalk({ state: "looking", chapter: from.chapter });
+    const result = await walkToNextCheck({
+      chapters: chapterList,
+      from,
+      // the open chapter is already loaded in full; later ones are fetched lazily, and only
+      // their ?low_confidence= lines
+      startRows: from.chapter === chapter ? (segments.data?.segments ?? null) : null,
+      keep: (s: SegmentRow) => isReviewable(s, threshold) && matchesSpeaker(s, speakerFilter),
+      laterRows: async (ch) => {
+        try {
+          // retry: false. The app-wide default (retry: 1) would ask twice for every front-matter
+          // 404 and every failure; a refusal stops the walk and is never re-asked on its own.
+          const page = await qc.fetchQuery({
+            ...segmentsQuery(bookId, ch, { speaker: speakerFilter, lowConfidence: true }),
+            retry: false,
+          });
+          return page.segments;
+        } catch (e) {
+          if (e instanceof ApiError && e.code === "not_found") return null; // nothing to read there
+          throw e;
+        }
+      },
+      cancelled: () => walkRun.current !== run,
+      onChapter: (ch) => setWalk({ state: "looking", chapter: ch }),
+    });
+    if (walkRun.current !== run || result.kind === "cancelled") return;
+    if (result.kind === "found") {
+      const excerpt = result.row.text.replace(/\s+/g, " ").trim();
+      setWalk({
+        state: "landed",
+        message: `Next line to check, chapter ${result.chapter}: ${
+          excerpt.length > 80 ? `${excerpt.slice(0, 79)}…` : excerpt
+        }`,
+      });
+      quietArrival.current = `${bookId}|${result.chapter}|${result.row.block_id}:${result.row.segment_index}`;
+      patchParams({
+        ch: String(result.chapter),
+        block: result.row.block_id,
+        seg: String(result.row.segment_index),
+      });
+    } else if (result.kind === "end") {
+      setWalk({ state: "end", fromStart });
+    } else {
+      setWalk({ state: "error", message: `Couldn't read chapter ${result.chapter}: ${result.message}` });
+    }
+  };
+  const setChapter = (n: number) => {
+    walkRun.current += 1;
+    setWalk(IDLE);
+    patchParams({ ch: String(n), block: null, seg: null });
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
@@ -261,6 +397,37 @@ export function Review() {
     );
   }
 
+  const filterChar = speakerFilter !== null ? cast.find((c) => c.id === speakerFilter) : undefined;
+  const filterName =
+    speakerFilter === "narration"
+      ? "narration"
+      : filterChar
+        ? maskedIds.has(filterChar.id)
+          ? "a hidden character"
+          : filterChar.name
+        : "one character";
+  const filterSuffix = speakerFilter !== null ? ` for ${filterName}` : "";
+  // aria-disabled (still focusable), not `disabled`: a keyboard press must not push focus to
+  // <body> while the walk looks ahead or the landed chapter loads
+  const nextBusy = walk.state === "looking" || segments.isPending;
+  // nothing in the whole book needs a look: the walk would only report the end
+  const nothingToCheck =
+    !!overview.data &&
+    overview.data.low_confidence_segments === 0 &&
+    overview.data.unattributed_quote_segments === 0 &&
+    lowConfInChapter.length === 0;
+  const chapterOptions = (() => {
+    const opts = (book.data?.chapters ?? []).map((c) => ({
+      value: String(c.index),
+      label: c.title ? `Ch ${c.index} · ${c.title}` : `Chapter ${c.index}`,
+    }));
+    if (opts.length === 0) {
+      for (let i = 1; i <= chapterCount; i++) opts.push({ value: String(i), label: `Chapter ${i}` });
+    }
+    // a link to a chapter the book doesn't list still shows where the page is
+    if (!opts.some((o) => o.value === String(chapter))) opts.push({ value: String(chapter), label: `Chapter ${chapter}` });
+    return opts;
+  })();
   const warnings = segments.data?.edit_warnings ?? [];
   const flaggedHere = overview.data?.flagged.filter((f) => f.chapter_index === chapter) ?? [];
 
@@ -319,7 +486,19 @@ export function Review() {
                 </span>
               </Tip>
             )}
-            <button className="key quiet" onClick={jumpToLowConf} disabled={lowConfInChapter.length === 0}>next ▸</button>
+            <Tip content="go to the next line worth checking — it carries on into later chapters">
+              <button
+                ref={nextRef}
+                className="key quiet"
+                onClick={() => {
+                  if (!nextBusy && !nothingToCheck) void nextToCheck();
+                }}
+                aria-disabled={nextBusy || nothingToCheck || undefined}
+                aria-busy={walk.state === "looking" || undefined}
+              >
+                {walk.state === "looking" ? `looking in chapter ${walk.chapter}…` : "Next to check ▸"}
+              </button>
+            </Tip>
             <span className="flex-1" />
             <span className="tag">edits</span>
             <span className="mono text-[11.5px] text-ink-2">{editLog.data?.ops.length ?? 0}</span>
@@ -333,32 +512,63 @@ export function Review() {
             {undo.error && <span className="mono text-[11px] text-clip">{undo.error.message}</span>}
           </div>
 
+          {/* "Next to check" speaks here. Always mounted, so screen readers hear the end, a
+              failure or a landing arrive (a region inserted together with its text is often
+              not announced). A bare polite region, not role=status, like PlayableRow's. */}
+          <div aria-live="polite">
+            {walk.state === "looking" && (
+              <span className="sr-only">Looking for the next line to check in chapter {walk.chapter}…</span>
+            )}
+            {walk.state === "landed" && <span className="sr-only">{walk.message}</span>}
+            {walk.state === "end" && (
+              <p className="navnote -mt-2 mb-3.5">
+                {walk.fromStart
+                  ? `Nothing to check${filterSuffix} in this book.`
+                  : `Nothing left to check${filterSuffix} from here to the end of the book.`}{" "}
+                {!walk.fromStart && (
+                  <button
+                    className="link"
+                    onClick={() => {
+                      // this link goes away as the walk starts: keep focus on Next instead
+                      nextRef.current?.focus();
+                      void nextToCheck(true);
+                    }}
+                  >
+                    start again from the first chapter
+                  </button>
+                )}
+              </p>
+            )}
+            {walk.state === "error" && (
+              <div className="refusal -mt-2 mb-3.5">
+                <span className="tag">couldn't look further</span>
+                <p>{walk.message}</p>
+              </div>
+            )}
+          </div>
+
           <div className="review">
             <div className="panel roster" style={{ margin: 0 }}>
               <div className="panel-h">
                 <b>Cast</b>
                 <span className="tag ml-2">{cast.length}</span>
-                <Tip content="hide characters that first appear beyond your reading frontier">
-                  <button
-                    className="key quiet ml-auto px-[9px] py-[3px]"
-                    onClick={() => setSpoilerSafe(!spoilerSafe)}
-                  >
-                    spoiler-safe {spoilerSafe ? "✓" : "✗"}
-                  </button>
-                </Tip>
+                <ViewMenu spoilerSafe={spoilerSafe} onSpoilerSafe={setSpoilerSafe} />
               </div>
-              <div className="frontier">
-                <span className="tag">frontier</span> read through ch{" "}
-                <input
-                  className="frontin"
-                  type="number"
-                  min={1}
-                  max={chapterCount}
-                  value={frontier}
-                  onChange={(e) => setFrontier(Number(e.target.value) || 1)}
-                />{" "}
-                — later characters stay hidden
-              </div>
+              {spoilerSafe && (
+                <div className="frontier">
+                  <span className="tag">frontier</span> read through ch{" "}
+                  <input
+                    className="frontin"
+                    aria-label="read through chapter"
+                    type="number"
+                    min={1}
+                    max={chapterCount}
+                    value={frontier}
+                    onChange={(e) => setFrontier(Number(e.target.value) || 1)}
+                  />{" "}
+                  — later characters stay hidden
+                </div>
+              )}
               <div className="caststrip">
                 {/* One "Suggest a cast" in both states, at the same position, so it keeps its
                     identity when the saved cast loads under the pointer. It also replaces the old
@@ -592,8 +802,10 @@ export function Review() {
                       masked={isMasked(c)}
                       onReveal={() => setRevealed(new Set(revealed).add(c.id))}
                       onEdit={() => setEditingChar(c)}
-                      selected={selectedChar === c.id}
-                      onSelect={() => setSelectedChar(selectedChar === c.id ? null : c.id)}
+                      selected={speakerFilter === c.id}
+                      onSelect={() =>
+                        patchParams({ speaker: speakerFilter === c.id ? null : c.id, block: null, seg: null })
+                      }
                       voice={casting?.map[c.id] ? voiceById.get(casting.map[c.id]) : undefined}
                       voiceCell={
                         casting ? (
@@ -618,10 +830,13 @@ export function Review() {
             <div className="page-wrap" ref={pageRef}>
               <div className="flex items-center gap-2.5 mb-3.5">
                 <button className="chap" disabled={chapter <= 1} onClick={() => setChapter(chapter - 1)}>‹</button>
-                <span className="tag">
-                  chapter {chapter} of {chapterCount}
-                  {segments.data && ` · ${segments.data.title}`}
-                </span>
+                <TalkSelect
+                  ariaLabel="chapter"
+                  value={String(chapter)}
+                  onChange={(v) => setChapter(Number(v))}
+                  options={chapterOptions}
+                />
+                <span className="tag">of {chapterCount}</span>
                 <button className="chap" disabled={chapter >= chapterCount} onClick={() => setChapter(chapter + 1)}>›</button>
                 {emotionMap.size > 0 && (
                   <Tip content="the emotion the model tagged each line with — voiced at render only when emotion rendering is enabled">
@@ -644,11 +859,36 @@ export function Review() {
                   flagged {f.block_id} — {f.reason}
                 </div>
               ))}
-              {segments.isPending && <div className="loadline">setting the page…</div>}
-              {segments.isError && <div className="errline">{segments.error.message}</div>}
-              {segments.data && (
+              {speakerFilter !== null && (
+                <div className="filterbar">
+                  <span>
+                    showing only <b>{filterName}</b>
+                    {shown.data &&
+                      ` · ${shown.data.segments.length} line${shown.data.segments.length === 1 ? "" : "s"} in this chapter`}
+                  </span>
+                  <button
+                    className="link"
+                    onClick={() => patchParams({ speaker: null, block: null, seg: null })}
+                  >
+                    show all
+                  </button>
+                </div>
+              )}
+              {target && shown.data && !targetRow && (
+                <p className="navnote mb-2.5" role="status">
+                  The linked line isn't on this page
+                  {speakerFilter !== null ? " (it may be hidden by the filter)" : ""} — it may have moved since the
+                  link was made.
+                </p>
+              )}
+              {shown.isPending && <div className="loadline">setting the page…</div>}
+              {shown.isError && <div className="errline">{shown.error.message}</div>}
+              {shown.data && shown.data.segments.length === 0 && speakerFilter !== null && (
+                <p className="navnote">No lines for {filterName} in this chapter.</p>
+              )}
+              {shown.data && (shown.data.segments.length > 0 || speakerFilter === null) && (
                 <div className="paper page">
-                  {segments.data.segments.map((s) => {
+                  {shown.data.segments.map((s) => {
                     const key = `${s.block_id}:${s.segment_index}`;
                     const low = isReviewable(s, threshold);
                     const dimmed = s.speaker !== null && maskedIds.has(s.speaker);
@@ -658,6 +898,7 @@ export function Review() {
                         key={key}
                         segKey={key}
                         row={s}
+                        target={key === targetKey}
                         low={low}
                         maskedName={dimmed}
                         emotion={emotion}
@@ -665,7 +906,13 @@ export function Review() {
                         onChip={handleChip}
                         popover={
                           popoverAt === key ? (
-                            <ReassignPopover row={s} cast={cast} bookId={bookId} onClose={() => setPopoverAt(null)} />
+                            <ReassignPopover
+                              row={s}
+                              cast={visibleCast}
+                              speakerHidden={dimmed}
+                              bookId={bookId}
+                              onClose={() => setPopoverAt(null)}
+                            />
                           ) : null
                         }
                         emoOpen={emoAt === key}

@@ -13,11 +13,16 @@ import { NONE } from "./helpers";
 export function ReassignPopover({
   row,
   cast,
+  speakerHidden = false,
   bookId,
   onClose,
 }: {
   row: SegmentRow;
+  /** the characters the speaker list offers (spoiler-safe leaves out the ones not met yet) */
   cast: CharacterSummary[];
+  /** spoiler-safe really masks this line's current speaker (not merely: missing from `cast`,
+      which is also true while the character list loads or after it failed) */
+  speakerHidden?: boolean;
   bookId: string;
   onClose: () => void;
 }) {
@@ -34,7 +39,21 @@ export function ReassignPopover({
           ariaLabel="speaker"
           value={speaker}
           onChange={setSpeaker}
-          options={[{ value: NONE, label: "— narration —" }, ...cast.map((c) => ({ value: c.id, label: c.name }))]}
+          options={[
+            { value: NONE, label: "— narration —" },
+            // spoiler-safe hands over only the characters met so far; a line already credited
+            // to a hidden one keeps that choice without naming it. A speaker missing for any
+            // other reason (the character list still loading, or failed) keeps their own name.
+            ...(row.speaker !== null && !cast.some((c) => c.id === row.speaker)
+              ? [
+                  {
+                    value: row.speaker,
+                    label: speakerHidden ? "a hidden character" : (row.speaker_name ?? row.speaker),
+                  },
+                ]
+              : []),
+            ...cast.map((c) => ({ value: c.id, label: c.name })),
+          ]}
         />
       </span>
       <span className="mono block text-[10px] text-ink-3">anchor: {anchor}…</span>

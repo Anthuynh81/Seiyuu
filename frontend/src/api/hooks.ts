@@ -439,13 +439,41 @@ export function useCharacterNames(bookIds: string[]): Map<string, Map<string, st
   });
 }
 
-export function useSegments(bookId: string | null, chapter: number, attributed: boolean) {
-  return useQuery({
-    queryKey: ["segments", bookId, chapter],
+/** The segment browser's server-side view filters (`?speaker=` / `?low_confidence=`). */
+export interface SegmentFilter {
+  /** a character id, or "narration" */
+  speaker?: string | null;
+  lowConfidence?: boolean;
+}
+
+/** One chapter's segment rows. The unfiltered view keeps its ["segments", book, chapter] key;
+    a filtered view adds its query string as a 4th part, so every invalidation of a book's (or
+    a chapter's) segments refreshes the filtered views too. */
+export function segmentsQuery(bookId: string | null, chapter: number, filter?: SegmentFilter) {
+  const qs = new URLSearchParams();
+  if (filter?.speaker) qs.set("speaker", filter.speaker);
+  if (filter?.lowConfidence) qs.set("low_confidence", "true");
+  const search = qs.toString();
+  return {
+    queryKey: search ? ["segments", bookId, chapter, search] : ["segments", bookId, chapter],
     // signal: rapid chapter paging aborts the superseded fetch instead of letting the
     // server finish a whole-chapter payload nobody will read
-    queryFn: ({ signal }) =>
-      api<SegmentBrowserOut>(`/api/books/${bookId}/chapters/${chapter}/segments`, { signal }),
+    queryFn: ({ signal }: { signal?: AbortSignal }) =>
+      api<SegmentBrowserOut>(
+        `/api/books/${bookId}/chapters/${chapter}/segments${search ? `?${search}` : ""}`,
+        { signal },
+      ),
+  };
+}
+
+export function useSegments(
+  bookId: string | null,
+  chapter: number,
+  attributed: boolean,
+  filter?: SegmentFilter,
+) {
+  return useQuery({
+    ...segmentsQuery(bookId, chapter, filter),
     enabled: bookId !== null && attributed,
   });
 }

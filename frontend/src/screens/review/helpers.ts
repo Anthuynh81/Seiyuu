@@ -30,3 +30,21 @@ export function useFrontier(bookId: string | null): [number, (n: number) => void
     },
   ];
 }
+
+/* -------------------------------------------------- spoiler-safe (localStorage, per viewer) */
+
+const SPOILER_KEY = "seiyuu.review.spoilerSafe";
+
+/** Spoiler-safe hides characters who first appear beyond the reading frontier. OFF unless this
+    viewer turned it on (owner decision); remembered per viewer, not per book. Storage that
+    refuses just means the choice lasts this page only. */
+export function useSpoilerSafe(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState(() => readStored(SPOILER_KEY) === "1");
+  return [
+    on,
+    (next: boolean) => {
+      setOn(next);
+      writeStored(SPOILER_KEY, next ? "1" : "0");
+    },
+  ];
+}
