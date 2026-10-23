@@ -355,3 +355,64 @@ describe("SuggestCastPanel ▶ per row", () => {
     expect(screen.getAllByRole("button", { name: /proposed voice/ })).toHaveLength(1);
   });
 });
+
+describe("SuggestCastPanel apply progress", () => {
+  it("shows the AI progress for an apply sent with AI hints, even if the box is unticked meanwhile", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    const props = {
+      preview: preview({ alice: "alice_auto", bob: "bob_auto", carol: "carol_auto" }),
+      saved: null,
+      characters: CHARACTERS,
+      isMasked: () => false,
+      voices: VOICES,
+      refreshing: false,
+      unsavedEdits: false,
+      applyError: null,
+      onPreview: accepting(),
+      onApply,
+      onDismiss: () => {},
+    };
+    const client = makeQueryClient();
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <SuggestCastPanel {...props} applying={false} />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /use AI trait hints/ }));
+    await user.click(screen.getByRole("button", { name: "apply cast" }));
+    expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ useLlm: true }));
+    rerender(
+      <QueryClientProvider client={client}>
+        <SuggestCastPanel {...props} applying />
+      </QueryClientProvider>,
+    );
+    await user.click(screen.getByRole("checkbox", { name: /use AI trait hints/ }));
+    expect(screen.getByRole("progressbar", { name: /with AI hints/ })).toBeInTheDocument();
+    expect(screen.getByText(/loading the AI model/)).toBeInTheDocument();
+  });
+
+  it("shows no strip for an apply it did not send (reset cast shares the mutation)", () => {
+    const client = makeQueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <SuggestCastPanel
+          preview={preview({ alice: "alice_auto" })}
+          saved={null}
+          characters={CHARACTERS}
+          isMasked={() => false}
+          voices={VOICES}
+          refreshing={false}
+          unsavedEdits={false}
+          applying
+          applyError={null}
+          onPreview={accepting()}
+          onApply={vi.fn()}
+          onDismiss={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+});

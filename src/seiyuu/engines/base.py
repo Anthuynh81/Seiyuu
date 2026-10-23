@@ -14,7 +14,17 @@ import numpy as np
 import torch
 from pydantic import BaseModel
 
-from seiyuu.engines.audio import AudioFile, to_canonical
+from seiyuu.engines.audio import AudioFile, silence, to_canonical
+
+# A line with nothing to pronounce ("……", "───", "♪♪", an emoji) renders as this much silence
+# instead of reaching an engine: Kokoro returns no audio for it and LLM-style engines may invent
+# speech. The assembler's paragraph gaps still surround it, so it reads as a held beat.
+SILENT_BEAT_SECONDS = 0.6
+
+
+def nothing_to_say(text: str) -> bool:
+    """True when ``text`` has no letter or digit in any script, so there is nothing to speak."""
+    return not any(ch.isalnum() for ch in text)
 
 
 class EngineVoice(BaseModel):
@@ -78,6 +88,8 @@ class TTSEngine(ABC):
         """Synthesize text with a voice; always returns canonical audio."""
         if not text or not text.strip():
             raise SynthesisError(f"{self.engine_id}: refusing to synthesize empty text")
+        if nothing_to_say(text):
+            return silence(SILENT_BEAT_SECONDS)
         samples, sample_rate = self._synthesize_native(text, voice, settings or {})
         return to_canonical(samples, sample_rate)
 

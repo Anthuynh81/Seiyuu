@@ -2,8 +2,14 @@
 
 import importlib
 
-from seiyuu.engines.audio import CANONICAL_SAMPLE_RATE, AudioFile, to_canonical
-from seiyuu.engines.base import EngineVoice, SynthesisError, TTSEngine
+from seiyuu.engines.audio import CANONICAL_SAMPLE_RATE, AudioFile, silence, to_canonical
+from seiyuu.engines.base import (
+    SILENT_BEAT_SECONDS,
+    EngineVoice,
+    SynthesisError,
+    TTSEngine,
+    nothing_to_say,
+)
 
 # Engine classes are referenced as strings and imported lazily so that
 # importing seiyuu.engines never pulls in an engine SDK.
@@ -49,6 +55,7 @@ def list_engine_ids() -> list[str]:
 
 __all__ = [
     "CANONICAL_SAMPLE_RATE",
+    "SILENT_BEAT_SECONDS",
     "AudioFile",
     "EngineVoice",
     "SynthesisError",
@@ -56,6 +63,8 @@ __all__ = [
     "get_engine",
     "get_engine_class",
     "list_engine_ids",
+    "nothing_to_say",
+    "silence",
     "to_canonical",
     "voices_dir_kwargs",
 ]

@@ -49,6 +49,7 @@ import { ResetCastDialog } from "./review/ResetCastDialog";
 import { RosterRow } from "./review/RosterRow";
 import { AttributePanel } from "./render/AttributePanel";
 import { SegmentPair } from "./review/SegmentPair";
+import { rememberAiApply } from "../lib/applyTiming";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
 import { PlayableRow } from "./review/PlayableRow";
 import { ViewMenu } from "./review/ViewMenu";
@@ -813,7 +814,8 @@ export function Review() {
                   applying={draftCast.isPending}
                   applyError={draftCast.error instanceof ApiError ? draftCast.error : null}
                   onPreview={requestPreview}
-                  onApply={({ input, recast, useLlm, confirmPaid }) =>
+                  onApply={({ input, recast, useLlm, confirmPaid }) => {
+                    const started = performance.now();
                     draftCast.mutate(
                       {
                         strategy: "smart",
@@ -823,9 +825,15 @@ export function Review() {
                         use_llm: useLlm,
                         ...(confirmPaid ? { confirm_paid: true } : {}),
                       },
-                      { onSuccess: closeSuggest },
-                    )
-                  }
+                      {
+                        onSuccess: () => {
+                          // the next AI apply's progress estimate (only a finished one counts)
+                          if (useLlm) rememberAiApply((performance.now() - started) / 1000);
+                          closeSuggest();
+                        },
+                      },
+                    );
+                  }}
                   onDismiss={closeSuggest}
                 />
               )}
