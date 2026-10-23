@@ -65,7 +65,7 @@ def test_system_shape_and_defaults(client) -> None:
     assert body["limits"]["max_upload_bytes"] == 100 * 1024 * 1024
     # the attribution defaults the UI shows (and lets the user override per job)
     assert body["attribution"]["provider"] == "local"
-    assert body["attribution"]["model"] == "qwen2.5:7b"
+    assert body["attribution"]["model"] == "gemma4:12b-it-qat"
     assert body["attribution"]["prompt_version"]
     assert body["attribution"]["hybrid"] is False
     assert body["engines"] == ["chatterbox", "elevenlabs", "indextts2", "kokoro"]

@@ -56,17 +56,18 @@ class Settings(BaseSettings):
     # required for reasoning models like Qwen3) or "openai" (the /v1 compat shim).
     ollama_transport: str = "native"
     # Context window for the native transport; the chunk's prompt + JSON output must fit.
-    # qwen2.5:7b (~4.7GB) fits fully on an 8GB GPU at 8192; a 9B model would spill to CPU
-    # (~10x slower) — drop num_ctx or use a smaller model if you swap to one.
+    # gemma4:12b-it-qat at 8192 is ~8.0GB, fully on a 12GB GPU. On an 8GB card use
+    # qwen2.5:7b (~4.7GB) or drop num_ctx — a model that spills to CPU is ~10x slower.
     ollama_num_ctx: int = 8192
     # Keep the model resident between chunks (a book is many calls seconds apart). The
     # explicit free-before-render unload is the M3 GPU resource manager's job; 0 here would
     # reload the model every chunk.
     ollama_keep_alive: str = "5m"
     attribution_provider: str = "local"
-    # qwen2.5:7b: non-thinking, fits an 8GB GPU fully, reliable at the per-block speaker
-    # task. qwen3.5:9b is higher quality but too large to stay on-GPU here (slow).
-    attribution_model: str = "qwen2.5:7b"
+    # gemma4:12b-it-qat won the 2026-10-22 A/B on PDNC gold (design/attribution-model-ab-*):
+    # 90.6% vs qwen2.5:7b's 70.6%, ~2.3x the time per chunk. qwen2.5:7b stays the fast /
+    # 8GB fallback (ATTRIBUTION_MODEL=qwen2.5:7b in .env).
+    attribution_model: str = "gemma4:12b-it-qat"
     # v5 (F1+F2): per-quote (hybrid) speaker attribution + per-segment emotion, the new base.
     # v6 = v5 + the thought-candidates section (selected when emit_thoughts is on). prompt_version
     # is part of the ChunkCacheKey, so bumping v3->v5 re-attributes every book onto v5/v6 while
