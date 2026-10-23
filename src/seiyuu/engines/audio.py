@@ -36,6 +36,11 @@ class AudioFile:
         return path
 
 
+def silence(seconds: float) -> AudioFile:
+    """Canonical digital silence of ``seconds``."""
+    return AudioFile(samples=np.zeros(round(seconds * CANONICAL_SAMPLE_RATE), dtype=np.float32))
+
+
 def to_canonical(samples: np.ndarray | torch.Tensor, sample_rate: int) -> AudioFile:
     """Any engine output → mono, 24 kHz, float32, clamped to [-1, 1].
 

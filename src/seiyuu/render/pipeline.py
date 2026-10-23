@@ -22,7 +22,14 @@ if TYPE_CHECKING:
     from seiyuu.normalize.lexicon import CompiledLexicon
 
 from seiyuu.attribute.models import AttributionReport, EmotionVerdict
-from seiyuu.engines import TTSEngine, get_engine, voices_dir_kwargs
+from seiyuu.engines import (
+    SILENT_BEAT_SECONDS,
+    TTSEngine,
+    get_engine,
+    nothing_to_say,
+    silence,
+    voices_dir_kwargs,
+)
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
@@ -181,6 +188,24 @@ def _effective_single_args(
     return voice_id, settings, seed, None
 
 
+def _segment_cost(engine: TTSEngine, text: str) -> float:
+    """What synthesizing ``text`` bills. A line with nothing to say is a local silent beat that
+    never reaches the engine, so it is free; quote and render both price through this."""
+    return 0.0 if nothing_to_say(text) else engine.cost_estimate(text)
+
+
+def _silent_beat(cache: SegmentCache, key: SegmentKey) -> tuple[Path, float]:
+    """Write the silent beat for a line with nothing to say under its key; (wav, seconds).
+
+    Always rewritten, never served from cache: an older render may have cached real engine
+    audio for the line (possibly invented speech) with its verdict and read-along words, and
+    those sidecars are dropped so nothing describes audio that is no longer there."""
+    cache.validation_path(key).unlink(missing_ok=True)
+    cache.words_path(key).unlink(missing_ok=True)
+    audio = silence(SILENT_BEAT_SECONDS)
+    return cache.put(key, audio), audio.duration_seconds
+
+
 def _gate_paid(
     engine: TTSEngine,
     text: str,
@@ -196,7 +221,7 @@ def _gate_paid(
     returns the updated running paid total. No automatic code path may bill, and an approved
     render may never bill past its approval — if the segment cache changed under us mid-run
     (eviction, concurrent job), fail loudly instead of overspending."""
-    cost = engine.cost_estimate(text)
+    cost = _segment_cost(engine, text)
     if cost <= 0:
         return spent_usd
     if not allow_paid:
@@ -432,8 +457,12 @@ class _ValidationOverlap:
         self.synthesized = 0
         self.validation_failures = 0
 
-    def handles(self, engine: TTSEngine) -> bool:
-        return self._validator is not None and engine.requires_validation
+    def handles(self, engine: TTSEngine, text: str) -> bool:
+        """Whether this segment is whisper-validated: a validated engine, and something to say
+        (a line with nothing to pronounce renders as silence, which has nothing to check)."""
+        return (
+            self._validator is not None and engine.requires_validation and not nothing_to_say(text)
+        )
 
     def rescored(
         self,
@@ -849,13 +878,27 @@ def render_book(
                     normalized_text=text,
                 )
                 overlap.wait_for_key(key)  # an identical segment may still be in flight
+                if nothing_to_say(text):
+                    wav_path, duration = _silent_beat(cache, key)
+                    segments.append(
+                        RenderedSegment(
+                            block_id=block.id,
+                            type=block.type,
+                            wav=wav_path.relative_to(book_output_dir).as_posix(),
+                            duration_seconds=round(duration, 3),
+                            voice_id=voice_id,
+                            seed=effective_seed,
+                            settings_hash=key.settings_hash,
+                        )
+                    )
+                    continue
                 # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
                 # same key_hash. In-scope only — the chapter-skip above already excludes the rest.
                 wav_path = None if force else cache.get(key)
                 if wav_path is not None:
                     cache_hits += 1
                     validation = overlap.rescored(key, cache.get_validation(key), alternates)
-                    if validation is None and overlap.handles(engine):
+                    if validation is None and overlap.handles(engine, text):
                         # A cache hit with no stored verdict (crash between the wav write and
                         # the verdict write, or a pre-M4 segment) must not ship unvalidated:
                         # re-score the cached wav off-thread; its row (counted and flagged
@@ -911,7 +954,7 @@ def render_book(
                     engine, text, allow_paid, paid_spent, max_paid_usd,
                     book_id=book.book_meta.book_id, block_id=block.id, voice=voice_id,
                 )  # fmt: skip
-                if overlap.handles(engine):
+                if overlap.handles(engine, text):
                     # validated engine: synthesize now, score on the worker — the GPU moves
                     # on to the next segment while whisper (CPU) scores this one
                     segments.append(None)
@@ -1192,7 +1235,8 @@ def render_book_multivoice(
                     overlap.wait_for_key(key)  # an identical revalidation may be in flight
                     # force: a re-render bypasses the cache HIT and re-synthesizes, overwriting the
                     # same key_hash. In-scope only — the chapter-skip above excludes the rest.
-                    wav_path = None if force else cache.get(key)
+                    # A line with nothing to say is always rewritten as its silent beat (pass 2).
+                    wav_path = None if force or nothing_to_say(text) else cache.get(key)
                     if wav_path is None:
                         rendered.append(None)
                         groups.setdefault(meta.engine, []).append(
@@ -1215,7 +1259,7 @@ def render_book_multivoice(
                         continue
                     cache_hits += 1
                     validation = overlap.rescored(key, cache.get_validation(key), alternates)
-                    if validation is None and overlap.handles(engine):
+                    if validation is None and overlap.handles(engine, text):
                         # A cache hit with no stored verdict (crash between the wav write
                         # and the verdict write, or a pre-M4 segment) must not ship
                         # unvalidated: re-score the cached wav off-thread; its row (counted
@@ -1280,6 +1324,19 @@ def render_book_multivoice(
                         broker.publish(engine_id, p.engine)
                         lent_id, lent_engine = engine_id, p.engine
                     overlap.wait_for_key(p.key)  # an identical twin may be in flight
+                    if nothing_to_say(p.text):
+                        # before the paid gate and the cloud-voice resolve: nothing is sent
+                        wav_path, duration = _silent_beat(cache, p.key)
+                        rendered[p.slot] = RenderedSegment(
+                            block_id=p.block_id,
+                            type=p.block_type,
+                            wav=wav_path.relative_to(book_output_dir).as_posix(),
+                            duration_seconds=round(duration, 3),
+                            voice_id=p.voice_id,
+                            seed=p.meta.seed,
+                            settings_hash=p.key.settings_hash,
+                        )
+                        continue
                     wav_path = None if force else cache.get(p.key)
                     if wav_path is not None:
                         # rendered by an identical earlier segment this run: reuse it
@@ -1319,7 +1376,7 @@ def render_book_multivoice(
                     except Exception as exc:
                         raise RenderError(f"synthesis failed: {p.where}: {exc}") from exc
                     used_gpu = used_gpu or p.engine.uses_gpu
-                    if overlap.handles(p.engine):
+                    if overlap.handles(p.engine, p.text):
                         # validated engine: synthesize now, score on the worker — the GPU
                         # moves on to the next segment while whisper (CPU) scores this one
                         overlap.submit_fresh(
@@ -1479,7 +1536,7 @@ def estimate_render_cost(
                     seed=meta.seed,
                     normalized_text=text,
                 )
-                cost = engine.cost_estimate(text)
+                cost = _segment_cost(engine, text)
                 if cost > 0:
                     paid_hashes.append(key.key_hash)  # paid identity, cached or not
                 # force: price forced-in-scope segments as work (a HIT no longer discounts them),
@@ -1545,7 +1602,7 @@ def estimate_render_cost_single(
                 seed=seed,
                 normalized_text=text,
             )
-            cost = engine.cost_estimate(text)
+            cost = _segment_cost(engine, text)
             if cost > 0:
                 paid_hashes.append(key.key_hash)
             # force: price forced-in-scope segments as work (see estimate_render_cost).

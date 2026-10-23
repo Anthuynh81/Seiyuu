@@ -7,6 +7,7 @@ import { TalkSelect } from "../../components/Select";
 import { auditionLine } from "../../lib/audition";
 import { castRowStatus, genderLabel, manualPicks, proposalMatchesSaved, type CastRowStatus } from "../../lib/casting";
 import { failureLine } from "../../lib/glossary";
+import { ApplyCastProgress } from "./ApplyCastProgress";
 import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- casting */
@@ -88,6 +89,8 @@ export function SuggestCastPanel({
   const [failure, setFailure] = useState<string | null>(null);
   const [recast, setRecast] = useState(false);
   const [useLlm, setUseLlm] = useState(false);
+  // what the apply in flight asked for (the tick box may change while it runs)
+  const [appliedWithLlm, setAppliedWithLlm] = useState(false);
   const [allowPaid, setAllowPaid] = useState(false);
   const shown = pending ?? committed;
 
@@ -323,7 +326,10 @@ export function SuggestCastPanel({
           className="key px-3 py-[3px]"
           disabled={applying || noop || stale}
           title={noop && !stale ? "this is already your cast — change a row, or tick re-cast to rebuild voices" : undefined}
-          onClick={() => onApply({ input: inputFor(committed), recast, useLlm })}
+          onClick={() => {
+            setAppliedWithLlm(useLlm);
+            onApply({ input: inputFor(committed), recast, useLlm });
+          }}
         >
           {applying ? "applying…" : noop ? "nothing to apply" : "apply cast"}
         </button>
@@ -336,12 +342,16 @@ export function SuggestCastPanel({
             <button
               className="key quiet px-[9px] py-[3px]"
               disabled={!allowPaid || applying || stale}
-              onClick={() => onApply({ input: inputFor(committed), recast, useLlm, confirmPaid: true })}
+              onClick={() => {
+                setAppliedWithLlm(useLlm);
+                onApply({ input: inputFor(committed), recast, useLlm, confirmPaid: true });
+              }}
             >
               retry cast
             </button>
           </>
         )}
+        {applying && <ApplyCastProgress useLlm={appliedWithLlm} characters={characters.length} />}
       </div>
     </div>
   );

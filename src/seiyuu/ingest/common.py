@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 
 from seiyuu.ingest.models import Block, BlockType, Chapter, NormalizedBook
 
-# A paragraph made only of decorative symbols (e.g. ***, * * *, ~ ~ ~, ---).
-DECORATIVE_PATTERN = re.compile(r"^[\s*~\-—–_=•·.#•◦]+$")
+# A paragraph made only of decorative symbols (e.g. ***, * * *, ~ ~ ~, ---, ───, +++, ◇◇◇):
+# dashes and bars (U+2012-U+2015, U+2E3A-B), box-drawing lines (U+2500-U+257F), and ornaments.
+DECORATIVE_PATTERN = re.compile(r"^[\s*~\-—–_=•·.#•◦+‒-―⸺⸻─-╿⁂◇◆☆★✦✧❖]+$")
 
 # Heading texts that mark real content sections (vs front/back matter).
 CHAPTER_TITLE_PATTERN = re.compile(

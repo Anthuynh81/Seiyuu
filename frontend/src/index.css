@@ -178,6 +178,9 @@
 /* a parsed "chapter N/M" fills the meter instead of the stripe (lib/progress.ts) */
 .transport .meter > i, .jobmeter > i { display: block; height: 100%; background: var(--rolling); }
 .jobmeter { height: 6px; margin-top: 6px; border: 1px solid var(--hairline); background: var(--booth-0); }
+/* no fraction to show: the same crawling stripe as the transport meter */
+.jobmeter.run { position: relative; overflow: hidden; }
+.jobmeter.run::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(90deg, var(--rolling) 0 6px, transparent 6px 10px); animation: crawl 1s linear infinite; opacity: 0.85; }
 .transport .cancel { font-family: var(--mono); font-size: 11px; color: var(--ink-2); border: 1px solid var(--hairline); padding: 3px 10px; }
 .transport .cancel:hover { color: var(--clip); border-color: var(--clip); }
 .transport .idle { color: var(--ink-3); }
