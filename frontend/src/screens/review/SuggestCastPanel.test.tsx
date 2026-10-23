@@ -390,6 +390,29 @@ describe("SuggestCastPanel apply progress", () => {
     );
     await user.click(screen.getByRole("checkbox", { name: /use AI trait hints/ }));
     expect(screen.getByRole("progressbar", { name: /with AI hints/ })).toBeInTheDocument();
-    expect(screen.getByText(/reads your 3 characters/)).toBeInTheDocument();
+    expect(screen.getByText(/loading the AI model/)).toBeInTheDocument();
+  });
+
+  it("shows no strip for an apply it did not send (reset cast shares the mutation)", () => {
+    const client = makeQueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <SuggestCastPanel
+          preview={preview({ alice: "alice_auto" })}
+          saved={null}
+          characters={CHARACTERS}
+          isMasked={() => false}
+          voices={VOICES}
+          refreshing={false}
+          unsavedEdits={false}
+          applying
+          applyError={null}
+          onPreview={accepting()}
+          onApply={vi.fn()}
+          onDismiss={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ApiError } from "../../api/client";
 import type { SuggestInput } from "../../api/hooks";
@@ -89,8 +89,12 @@ export function SuggestCastPanel({
   const [failure, setFailure] = useState<string | null>(null);
   const [recast, setRecast] = useState(false);
   const [useLlm, setUseLlm] = useState(false);
-  // what the apply in flight asked for (the tick box may change while it runs)
-  const [appliedWithLlm, setAppliedWithLlm] = useState(false);
+  // what THIS panel's apply in flight asked for (the tick box may change while it runs); null
+  // when the panel sent nothing, so another apply (reset cast) never shows a strip here
+  const [sent, setSent] = useState<{ useLlm: boolean; cloud: boolean } | null>(null);
+  useEffect(() => {
+    if (!applying) setSent(null);
+  }, [applying]);
   const [allowPaid, setAllowPaid] = useState(false);
   const shown = pending ?? committed;
 
@@ -327,7 +331,7 @@ export function SuggestCastPanel({
           disabled={applying || noop || stale}
           title={noop && !stale ? "this is already your cast — change a row, or tick re-cast to rebuild voices" : undefined}
           onClick={() => {
-            setAppliedWithLlm(useLlm);
+            setSent({ useLlm, cloud: false });
             onApply({ input: inputFor(committed), recast, useLlm });
           }}
         >
@@ -343,7 +347,7 @@ export function SuggestCastPanel({
               className="key quiet px-[9px] py-[3px]"
               disabled={!allowPaid || applying || stale}
               onClick={() => {
-                setAppliedWithLlm(useLlm);
+                setSent({ useLlm, cloud: true });
                 onApply({ input: inputFor(committed), recast, useLlm, confirmPaid: true });
               }}
             >
@@ -351,7 +355,7 @@ export function SuggestCastPanel({
             </button>
           </>
         )}
-        {applying && <ApplyCastProgress useLlm={appliedWithLlm} characters={characters.length} />}
+        {applying && sent && <ApplyCastProgress useLlm={sent.useLlm} cloud={sent.cloud} />}
       </div>
     </div>
   );
