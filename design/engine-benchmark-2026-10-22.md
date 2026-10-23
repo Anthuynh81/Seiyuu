@@ -57,10 +57,15 @@ or "June 21" failed). The scorer was rebuilt (`src/seiyuu/validate/scoring.py`):
 - every failure carries a plain-words reason.
 
 The re-scored column above uses the rebuilt scorer. The one remaining failure is Chatterbox's
-lighthouse paragraph, where whisper heard "its two under 12 steps" for "two hundred and twelve":
-plausibly a genuinely slurred number (worth a listen:
-`output/benchmarks/20261022-164639/audio/chatterbox/01_narration.wav`). The other two engines
-read the same number cleanly.
+lighthouse paragraph, where whisper heard "its two under 12 steps" for "two hundred and twelve".
+The other two engines read the same number cleanly. A listening check
+(`output/benchmarks/20261022-164639/audio/chatterbox/01_narration.wav`) found the number spoken
+correctly, with a slightly robotic delivery. So this was a whisper mishearing and a false
+alarm, but a cheap one.
+
+The number check stays as it is. A failed segment retries with a new seed (seed+1, seed+2), and
+the best attempt is kept, so a false alarm costs one extra synth at worst. Letting a really
+wrong number through would cost more.
 
 ## Next
 

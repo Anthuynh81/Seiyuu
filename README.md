@@ -81,7 +81,7 @@ default path.
 
 | Provider | Where | Role |
 |---|---|---|
-| **Ollama** (local) | local | default for all drafts & prompt iteration — `qwen2.5:7b` fits 8 GB |
+| **Ollama** (local) | local | default — `gemma4:12b-it-qat` (12 GB card); `qwen2.5:7b` for 8 GB |
 | **Anthropic** (Claude) | cloud | final-quality attribution / low-confidence escalation (opt-in) |
 
 Both attribution backends use **schema-enforced JSON output** (Ollama structured outputs /
@@ -109,7 +109,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 # 3. Local attribution model
 ollama serve
-ollama pull qwen2.5:7b
+ollama pull gemma4:12b-it-qat   # or qwen2.5:7b on an 8 GB card (set ATTRIBUTION_MODEL)
 
 # 4. (optional) cloud finishers — only needed when you enable them
 #    put ANTHROPIC_API_KEY / ELEVENLABS_API_KEY in .env

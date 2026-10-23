@@ -46,7 +46,7 @@ Interface: `list_voices()`, `synthesize(text, voice, settings) -> AudioFile`,
 ### Attribution LLM providers (`AttributionLLM` interface)
 | Provider | Type | Role | Cost |
 |---|---|---|---|
-| Local (Ollama, native `/api/chat`) | Local, default for dev/drafts | All prompt iteration + draft attribution. Default model: `qwen2.5:7b` (non-thinking, ~4.7GB). Qwen3.5 4B/9B are candidates pending the M9 accuracy A/B | Free |
+| Local (Ollama, native `/api/chat`) | Local, default for dev/drafts | All prompt iteration + draft attribution. Default model: `gemma4:12b-it-qat` (~8GB at 8K ctx; won the M9 accuracy A/B, 90.6% vs 70.6% — design/attribution-model-ab-2026-10-22.md). `qwen2.5:7b` is the fast / 8GB fallback | Free |
 | Anthropic (Claude API) | Cloud | Final-quality attribution; escalation target for low-confidence chunks | ~$1–5/novel depending on model |
 
 Interface: `attribute_chunk(chunk_text, registry, schema) -> segments`,
@@ -228,7 +228,7 @@ regenerable from reference.wav.
      dialogue by that speaker, prose = narration). The hard reconstruction guard remains as
      a safety net but can no longer be violated by a well-behaved model.
    - **Local transport:** Ollama native `/api/chat` (the OpenAI `/v1` shim can't disable a
-     reasoning model's thinking or set `num_ctx`); default model `qwen2.5:7b` (fits 8GB).
+     reasoning model's thinking or set `num_ctx`); default model `gemma4:12b-it-qat` (`qwen2.5:7b` on 8GB cards).
    - **Alias resolution:** a deterministic once-per-book post-pass (`attribute/aliases.py`)
      merges only provably-same characters — honorific-strip exact match (`Darcy`→`Mr. Darcy`)
      and subsumed-alias consolidation, gated by a gender/generation guard — and FLAGS the
@@ -386,8 +386,9 @@ regenerable from reference.wav.
   escalating.
 - Which local model wins on attribution quality — *M2 finding:* qwen3.5:9b is a reasoning
   model whose weights exceed usable 8GB VRAM (CPU spill, slow); qwen2.5:7b (non-thinking)
-  fits fully and is the working default. Re-run the bake-off (incl. Gemma) if more VRAM is
-  available; cache is keyed by model_id so results don't clobber.
+  fits fully and was the working default. *M9 (12GB):* the bake-off was re-run against PDNC
+  gold — gemma4:12b-it-qat 90.6%, gemma4:e4b 81.2%, qwen3.5:9b 76.0%, qwen2.5:7b 70.6% — and
+  Gemma 12B is now the default (design/attribution-model-ab-2026-10-22.md).
 - Alias-resolution quality on small models: *M2 update:* a deterministic registry post-pass
   now merges honorific variants and flags ambiguous families (precision over recall). Still
   open: an opt-in LLM adjudication of the flagged candidates (cross-family conflations,

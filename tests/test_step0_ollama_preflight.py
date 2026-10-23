@@ -30,9 +30,12 @@ from seiyuu.attribute.providers.local import (
 )
 from seiyuu.cli import main
 from seiyuu.repository.jobs import JobState
+from seiyuu.settings import Settings
 from test_api_m6b1 import make_settings
 
 BASE = "http://localhost:11434/v1"
+# The model the API pre-flights by default; tests that mean "the default is pulled" follow it.
+DEFAULT_MODEL = Settings.model_fields["attribution_model"].default
 
 
 class FakeGet:
@@ -171,7 +174,7 @@ def test_service_hybrid_still_checks_local(tmp_path, real_preflight) -> None:
 
 
 def test_service_checks_local_adjudicator_on_full_book_only(tmp_path, real_preflight) -> None:
-    real_preflight(FakeGet(["qwen2.5:7b"]))
+    real_preflight(FakeGet([DEFAULT_MODEL]))
     cfg = make_settings(tmp_path, adjudication_provider="local", adjudication_model="judge:1b")
     with pytest.raises(OllamaModelMissingError) as info:
         svc.preflight_attribution(cfg, use_adjudicate=True)
@@ -283,7 +286,7 @@ def _app_with_book(tmp_path, epub_bytes, **overrides):
     ("fake", "code", "fix"),
     [
         (FakeGet(down=True), "ollama_unreachable", "ollama serve"),
-        (FakeGet(["other:latest"]), "model_missing", "ollama pull qwen2.5:7b"),
+        (FakeGet(["other:latest"]), "model_missing", f"ollama pull {DEFAULT_MODEL}"),
     ],
 )
 def test_route_returns_503_before_enqueuing(
@@ -322,7 +325,7 @@ def test_route_anthropic_provider_skips_preflight(
 def test_route_enqueues_when_ollama_ready(
     tmp_path, epub_bytes, real_preflight, monkeypatch
 ) -> None:
-    fake = real_preflight(FakeGet(["qwen2.5:7b"]))
+    fake = real_preflight(FakeGet([DEFAULT_MODEL]))
     monkeypatch.setattr("seiyuu.api.handlers.run_attribution", lambda *a, **k: None)
     client, book_id = _app_with_book(tmp_path, epub_bytes)
     try:
@@ -339,7 +342,7 @@ def test_job_runs_the_adjudication_setting_the_route_checked(
     # Server default adjudicates with an UNPULLED local judge; a request opting out must
     # pass the route AND the job must honor the opt-out (it used to fall back to the server
     # default and fail on the unpulled model in the background).
-    real_preflight(FakeGet(["qwen2.5:7b"]))
+    real_preflight(FakeGet([DEFAULT_MODEL]))
     seen: dict = {}
     monkeypatch.setattr("seiyuu.api.handlers.run_attribution", lambda *a, **k: seen.update(k))
     client, book_id = _app_with_book(
@@ -371,7 +374,7 @@ def test_job_runs_the_adjudication_setting_the_route_checked(
 
 def test_system_probe_reports_model_installed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("seiyuu.api.routes.system._probe_ollama", lambda _url: True)
-    fake = FakeGet(["qwen2.5:7b"])
+    fake = FakeGet([DEFAULT_MODEL])
     monkeypatch.setattr(local, "_urllib_get", fake)
     with TestClient(create_app(settings=make_settings(tmp_path))) as client:
         assert client.get("/api/system").json()["ollama"]["model_installed"] is None
@@ -389,7 +392,7 @@ def test_system_probe_reports_model_installed(tmp_path, monkeypatch) -> None:
 
 def test_system_probe_unreachable_leaves_model_installed_unknown(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("seiyuu.api.routes.system._probe_ollama", lambda _url: False)
-    fake = FakeGet(["qwen2.5:7b"])
+    fake = FakeGet([DEFAULT_MODEL])
     monkeypatch.setattr(local, "_urllib_get", fake)
     with TestClient(create_app(settings=make_settings(tmp_path))) as client:
         body = client.get("/api/system", params={"probe": True}).json()["ollama"]

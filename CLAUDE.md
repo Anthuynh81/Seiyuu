@@ -17,10 +17,10 @@ starting any new milestone. Build CLI-first; the frontend is milestone M6.
   defaults to the NATIVE `/api/chat` transport (`ollama_transport=native`) because the
   OpenAI-compatible `/v1` shim cannot disable thinking or set `num_ctx` per request —
   both are required for reasoning models. The `/v1` shim stays available via
-  `ollama_transport=openai` for non-thinking models. Default model: `qwen2.5:7b`
-  (~4.7GB, non-thinking) — it fits an 8GB GPU fully and is reliable at the per-block
-  speaker task. `qwen3.5:9b` is higher quality; it spilled to CPU (~10x slower) on the old
-  8GB card but should fit the 12GB target. Benchmark before switching the default.
+  `ollama_transport=openai` for non-thinking models. Default model: `gemma4:12b-it-qat`
+  (~8GB at num_ctx 8192, fully on the 12GB card) — it won the PDNC-gold A/B (90.6% vs
+  qwen2.5:7b's 70.6%; design/attribution-model-ab-2026-10-22.md). `qwen2.5:7b` (~4.7GB) is
+  the fast / 8GB fallback. Re-run `seiyuu eval run` before switching the default again.
   Ollama being down is a clear, actionable error, not a crash.
 - ffmpeg is on PATH and is the only sanctioned way to touch audio containers/m4b.
 
