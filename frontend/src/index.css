@@ -387,6 +387,8 @@ details.fine summary:hover { color: var(--tungsten); }
 
 .provenance { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 7px 12px; background: var(--console); border: 1px solid var(--hairline); }
 .voicelabel { display: block; margin-top: 3px; font-size: 9.5px; color: var(--paper-ink-2); opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Listen: the line would get a different voice today (its speaker or that voice changed after recording) */
+.voicenote { display: block; margin-top: 3px; padding-left: 5px; border-left: 2px solid var(--tungsten-dim); font-size: 9.5px; font-style: italic; color: var(--paper-ink); }
 
 /* shelf: pick a book by cover */
 .shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; max-width: 900px; }

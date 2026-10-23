@@ -51,6 +51,42 @@ describe("Lexicon", () => {
     expect(screen.queryByRole("button", { name: "Elodin ×5" })).not.toBeInTheDocument();
   });
 
+  it("?term= (from Listen's Fix pronunciation) waits in a new unsaved row", async () => {
+    const user = userEvent.setup();
+    mockApi()
+      .get("/api/books", { books: [makeBook({ book_id: "b1", title: "The Name of the Wind" })] })
+      .get("/api/books/b1/lexicon", lexiconOut([entry({ term: "Kvothe", respelling: "KVOH-thee" })]));
+    renderWithProviders(<Lexicon />, { route: "/lexicon?book=b1&term=Elodin" });
+
+    expect(await screen.findByDisplayValue("Elodin")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Kvothe")).toBeInTheDocument();
+    // the word's row comes FIRST (easy to find in a long dictionary), its respelling focused
+    const terms = screen.getAllByLabelText("term");
+    expect(terms).toHaveLength(2);
+    expect(terms[0]).toHaveValue("Elodin");
+    const respelling = screen.getAllByLabelText("respelling")[0];
+    await waitFor(() => expect(respelling).toHaveFocus());
+    expect(screen.getByText(/Type how “Elodin” should sound/)).toBeInTheDocument();
+    // nothing is saved for them: the row needs its respelling, then an explicit save
+    expect(screen.getByRole("button", { name: "save" })).toBeDisabled();
+    await user.type(respelling, "EL-oh-din");
+    expect(screen.getByRole("button", { name: "save" })).toBeEnabled();
+    // the hint only asks while the row is still waiting for its respelling
+    expect(screen.queryByText(/Type how “Elodin” should sound/)).not.toBeInTheDocument();
+  });
+
+  it("?term= for a word already in the dictionary adds no duplicate row", async () => {
+    mockApi()
+      .get("/api/books", { books: [makeBook({ book_id: "b1" })] })
+      .get("/api/books/b1/lexicon", lexiconOut([entry({ term: "Kvothe", respelling: "KVOH-thee" })]));
+    renderWithProviders(<Lexicon />, { route: "/lexicon?book=b1&term=kvothe" });
+
+    expect(await screen.findByDisplayValue("Kvothe")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("term")).toHaveLength(1);
+    // already respelled: nothing left to ask for
+    expect(screen.queryByText(/should sound/)).not.toBeInTheDocument();
+  });
+
   it("shows the no-books empty state when nothing is ingested and never fetches a lexicon", async () => {
     const server = mockApi().get("/api/books", {
       books: [makeBook({ book_id: "b1", ingested: false })],

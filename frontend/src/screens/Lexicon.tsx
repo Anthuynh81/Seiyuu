@@ -16,6 +16,8 @@ import { TalkSelect } from "../components/Select";
 import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
 import { ADD_A_BOOK } from "../lib/nextStep";
 
+const sameTerm = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 /* A per-book pronunciation dictionary: term -> respelling (spoken on every engine), with an
    optional IPA that only the Kokoro engine uses. Editing re-synthesizes only the segments whose
    text changes; the affected-segment count is shown before and after a save. */
@@ -89,7 +91,9 @@ function EntryRow({
 }
 
 export function Lexicon() {
-  const [, setParams] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  // ?term=: arrived from Listen's "Fix pronunciation" — that word waits in a new row
+  const wantTerm = (params.get("term") ?? "").trim();
   const books = useBooks();
   const ingested = books.data?.books.filter((b) => b.ingested) ?? [];
   // no ?book=: the book this viewer last worked on (if imported), else the first imported one
@@ -121,6 +125,28 @@ export function Lexicon() {
     suggestAI.reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId, serverSig]);
+
+  // Add the ?term= word as a new, unsaved row once the book's entries are in (once per book and
+  // term; a word already in the dictionary is left as it is). Runs after the seeding effect
+  // above, so its updater sees the seeded entries. The row goes FIRST and its respelling box
+  // takes focus: in a long dictionary a row appended at the bottom is hard to find.
+  const termAdded = useRef<string | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [focusTermRow, setFocusTermRow] = useState(0);
+  useEffect(() => {
+    if (!wantTerm || !bookId || !lexicon.data) return;
+    const key = `${bookId}|${wantTerm}`;
+    if (termAdded.current === key) return;
+    termAdded.current = key;
+    const have = lexicon.data.entries.some((r) => sameTerm(r.term, wantTerm));
+    setRows((rs) => (rs.some((r) => sameTerm(r.term, wantTerm)) ? rs : [blankEntry(wantTerm), ...rs]));
+    if (!have) setFocusTermRow((n) => n + 1);
+  }, [bookId, wantTerm, lexicon.data]);
+  useEffect(() => {
+    if (focusTermRow) tableRef.current?.querySelector<HTMLInputElement>('input[aria-label="respelling"]')?.focus();
+  }, [focusTermRow]);
+  // the hint asks for a respelling only while the word's row is still waiting for one
+  const termWaiting = !!wantTerm && rows.some((r) => sameTerm(r.term, wantTerm) && !r.respelling.trim());
 
   const dupes = duplicateTerms(rows);
   const dirty = serverSig !== null && entriesSig(rows) !== serverSig;
@@ -196,6 +222,11 @@ export function Lexicon() {
         engine; an optional IPA is used only by Kokoro. Editing re-synthesizes only the segments
         whose text changes.
       </p>
+      {termWaiting && (
+        <p className="mono -mt-1 mb-3 text-[11px] text-ink-2">
+          Type how “{wantTerm}” should sound in the first row below, then save.
+        </p>
+      )}
 
       {lexicon.isError && (
         <div className="refusal">
@@ -210,7 +241,7 @@ export function Lexicon() {
           <span className="tag ml-2">{cleanForSave(rows).length}</span>
         </div>
         <div className="overflow-x-auto px-3.5 pt-2">
-          <table className="w-full border-collapse">
+          <table ref={tableRef} className="w-full border-collapse">
             <thead>
               <tr className="mono text-left text-[11px] text-ink-3">
                 <th className="px-1.5 py-1 font-semibold">term</th>

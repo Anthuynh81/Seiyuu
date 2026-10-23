@@ -11,6 +11,15 @@ export function readStored(key: string): string | null {
   }
 }
 
+/** Forgets a remembered value (a refused removal just leaves it remembered). */
+export function removeStored(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* storage blocked: nothing to forget */
+  }
+}
+
 /** Returns false when the browser refused the write (the value then lasts this page only). */
 export function writeStored(key: string, value: string): boolean {
   try {
