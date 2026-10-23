@@ -187,6 +187,17 @@ regenerable from reference.wav.
 
 ### 6. Assembly
 - Pause logic: scene_break → long, paragraph → medium, dialogue exchange → short.
+- Inter-voice loudness matching (`assemble/voice_match.py`, setting `voice_loudness_match`,
+  `--match-voices/--no-match-voices`): ONE gain per voice per book, from BS.1770 integrated
+  loudness (pyloudnorm; duration-weighted power mean of the voice's segments, sub-0.4 s and
+  silent segments skipped), moving every voice to the narrator (or the duration-weighted
+  median without one). Clamped to ±`voice_loudness_max_gain_db` (9 dB) and peak-guarded at
+  -1 dBFS (a boost is reduced, never hard-clipped). Applied in memory before concatenation,
+  so a voice's own dynamics survive and cached segment WAVs are never touched; single-voice
+  renders are a no-op. Per-segment measurements are cached in `loudness_cache.json` beside
+  the manifest (wav path + size + mtime_ns) so assemble then master measures once; a
+  cancelled or failed pass keeps every valid entry. An unreadable segment WAV fails with
+  AssembleError naming its chapter and block.
 - Loudness normalization pass; per-chapter MP3s + .m4b (AAC) with chapter markers
   and cover art via ffmpeg metadata file.
 - Duration estimates from word count + engine pace; optional target-duration mode

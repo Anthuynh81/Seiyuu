@@ -105,6 +105,7 @@ class PauseWrite(BaseModel):
 class LoudnessWrite(BaseModel):
     enabled: bool | None = None  # None -> settings.loudness_enabled
     target_lufs: float | None = None  # None -> settings.loudness_target_lufs; 0.0 honored
+    match_voices: bool | None = None  # None -> settings.voice_loudness_match
 
 
 class AssembleParams(BaseModel):

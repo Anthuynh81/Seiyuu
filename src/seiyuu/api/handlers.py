@@ -77,6 +77,16 @@ def _loudness_target(cfg: Settings, write: LoudnessWrite | None):
     return LoudnessTarget(i=target, tp=cfg.loudness_true_peak, lra=cfg.loudness_range)
 
 
+def _voice_match(cfg: Settings, write: LoudnessWrite | None):
+    """LoudnessWrite.match_voices -> VoiceMatch | None (None = no inter-voice matching).
+    Independent of `enabled`: matching voices to each other is not chapter normalization."""
+    from seiyuu.assemble import VoiceMatch
+
+    flag = (write or LoudnessWrite()).match_voices
+    enabled = cfg.voice_loudness_match if flag is None else flag
+    return VoiceMatch(max_gain_db=cfg.voice_loudness_max_gain_db) if enabled else None
+
+
 def _find_cover(book_output_dir: Path) -> Path | None:
     for name in COVER_NAMES:
         candidate = book_output_dir / name
@@ -263,6 +273,7 @@ def build_handlers(
             cfg.output_dir / ctx.job.book_id,
             pauses=_pause_profile(params.pauses),
             loudness=_loudness_target(cfg, params.loudness),
+            voice_match=_voice_match(cfg, params.loudness),
             progress=ctx.progress,
             check_cancel=ctx.check_cancel,
         )
@@ -276,6 +287,7 @@ def build_handlers(
             book_output_dir,
             pauses=_pause_profile(params.pauses),
             loudness=_loudness_target(cfg, params.loudness),
+            voice_match=_voice_match(cfg, params.loudness),
             cover=_find_cover(book_output_dir) if params.use_cover else None,
             bitrate=params.bitrate,
             target_seconds=(

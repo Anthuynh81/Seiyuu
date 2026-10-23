@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     loudness_target_lufs: float = -18.0
     loudness_true_peak: float = -1.5
     loudness_range: float = 11.0
+    # Inter-voice loudness matching: one BS.1770 gain per voice per book (toward the narrator)
+    # before the chapter loudnorm, so speaker changes don't jump in volume. The gain is clamped
+    # to +/- voice_loudness_max_gain_db so a bad measurement can't blow a voice up.
+    voice_loudness_match: bool = True
+    voice_loudness_max_gain_db: float = Field(9.0, ge=0)
 
     # Duration (M4): narration pace for runtime estimates; atempo clamp for target-duration.
     narration_wpm: float = 150.0

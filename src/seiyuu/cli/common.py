@@ -297,7 +297,13 @@ def _build_pauses(**overrides):
 
 
 def _loudness_options(fn):
-    """Loudness-normalization flags shared by `assemble` and `convert`."""
+    """Loudness flags shared by `assemble`, `master` and `convert`."""
+    fn = click.option(
+        "--match-voices/--no-match-voices",
+        "match_voices",
+        default=None,
+        help="Match each voice's loudness to the narrator before normalizing (default: on).",
+    )(fn)
     fn = click.option(
         "--target-lufs", type=float, default=None, help="Integrated loudness target (LUFS)."
     )(fn)
@@ -322,3 +328,11 @@ def _build_loudness(cfg, **overrides):
         tp=cfg.loudness_true_peak,
         lra=cfg.loudness_range,
     )
+
+
+def _build_voice_match(cfg, **overrides):
+    from seiyuu.assemble import VoiceMatch
+
+    flag = overrides.get("match_voices")
+    enabled = cfg.voice_loudness_match if flag is None else flag
+    return VoiceMatch(max_gain_db=cfg.voice_loudness_max_gain_db) if enabled else None
