@@ -1,9 +1,13 @@
 """Assembly stage: manifest + cached segments → per-chapter MP3s.
 
 Pause logic: scene_break → long, after-heading → extra, dialogue↔dialogue → short beat,
-otherwise the paragraph gap. Optional EBU R128 loudness normalization (two-pass loudnorm)
-brings each chapter to a target LUFS. The chaptered .m4b is built by the `master` stage from
-these same normalized chapters. ffmpeg (on PATH) is the only way audio containers are touched.
+otherwise the paragraph gap. Optional inter-voice loudness matching (`voice_match.py`) first
+gives every voice ONE book-wide gain toward the narrator's BS.1770 loudness, applied in memory
+before concatenation, so speaker changes don't jump in volume (cached segment WAVs are never
+modified; single-voice renders are a no-op). Optional EBU R128 loudness normalization
+(two-pass loudnorm) then brings each chapter to a target LUFS. The chaptered .m4b is built by
+the `master` stage from these same chapters. ffmpeg (on PATH) is the only way audio containers
+are touched.
 """
 
 import json
@@ -11,13 +15,15 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+from seiyuu.assemble.errors import AssembleError
+from seiyuu.assemble.voice_match import VoiceMatch, plan_voice_gains
 from seiyuu.engines import CANONICAL_SAMPLE_RATE
 from seiyuu.ingest.models import BlockType
 from seiyuu.render import MANIFEST_NAME, RenderedChapter, RenderManifest
@@ -49,10 +55,6 @@ class LoudnessTarget:
     i: float = -18.0
     tp: float = -1.5
     lra: float = 11.0
-
-
-class AssembleError(Exception):
-    """Loud assembly failure naming the chapter/block involved."""
 
 
 @dataclass
@@ -88,8 +90,13 @@ def _chapter_samples(
     book_dir: Path,
     pauses: PauseProfile,
     narrator_voice_id: str | None = None,
+    voice_gains: Mapping[str, float] | None = None,
 ) -> np.ndarray:
-    """Concatenate a chapter's segment audio with pause silences."""
+    """Concatenate a chapter's segment audio with pause silences.
+
+    ``voice_gains`` maps voice_id -> linear gain (inter-voice loudness matching); voices not
+    in it are copied through untouched, so an empty/None map is bit-identical to no matching.
+    """
     parts = [_silence(pauses.chapter_lead_in)]
     prev: BlockType | None = None
     prev_block_id: str | None = None
@@ -126,6 +133,9 @@ def _chapter_samples(
                 f"non-canonical audio reached assembly: {wav_path} "
                 f"(rate={sample_rate}, ndim={samples.ndim}, block={seg.block_id})"
             )
+        factor = (voice_gains or {}).get(seg.voice_id) if seg.voice_id else None
+        if factor is not None:
+            samples = samples * np.float32(factor)
         parts.append(samples)
         prev = seg.type
         prev_block_id = seg.block_id
@@ -213,18 +223,41 @@ def _encode_mp3(
     os.replace(tmp, mp3_path)
 
 
+def _voice_gains(
+    manifest: RenderManifest,
+    book_output_dir: Path,
+    voice_match: VoiceMatch | None,
+    say: Callable[[str], None],
+    check: Callable[[], None],
+) -> dict[str, float]:
+    """The per-BOOK voice gain map (computed once per assemble/master call, before the
+    chapter loop, so every chapter of both outputs gets the same gains)."""
+    if voice_match is None:
+        return {}
+    plan = plan_voice_gains(
+        manifest, book_output_dir, voice_match, check_cancel=check, progress=say
+    )
+    if plan is None:
+        return {}
+    say(plan.summary())
+    return plan.factors()
+
+
 def assemble_book(
     book_output_dir: Path,
     *,
     pauses: PauseProfile | None = None,
     loudness: LoudnessTarget | None = None,
+    voice_match: VoiceMatch | None = None,
     progress: Callable[[str], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
 ) -> AssembleResult:
     """Build chapters/ch{NNN}.mp3 for every chapter in the render manifest.
 
-    When `loudness` is given, each chapter is two-pass loudnorm'd to that target before
-    encoding (None = leave levels untouched). ``check_cancel`` (when given) is called
+    When `voice_match` is given, each voice first gets one book-wide gain toward the
+    narrator's loudness (None = no matching). When `loudness` is given, each chapter is then
+    two-pass loudnorm'd to that target before encoding (None = leave levels untouched).
+    ``check_cancel`` (when given) is called
     between chapters and may raise to abort cooperatively; finished chapter MP3s remain.
     """
     if shutil.which("ffmpeg") is None:
@@ -244,11 +277,13 @@ def assemble_book(
     # narrator id (multi-voice only) lets the pause logic tell dialogue from narration
     narrator_voice_id = (manifest.assignment or {}).get("narrator_voice_id")
 
+    gains = _voice_gains(manifest, book_output_dir, voice_match, say, check)
+
     mp3_paths: list[Path] = []
     total_seconds = 0.0
     for chapter in manifest.chapters:
         check()
-        samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
+        samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id, gains)
         tmp_wav = chapters_dir / f"ch{chapter.index:03d}.tmp.wav"
         mp3_path = chapters_dir / f"ch{chapter.index:03d}.mp3"
         try:
@@ -330,6 +365,7 @@ def master_book(
     *,
     pauses: PauseProfile | None = None,
     loudness: LoudnessTarget | None = None,
+    voice_match: VoiceMatch | None = None,
     cover: Path | None = None,
     bitrate: str = "64k",
     sample_rate: int = 44_100,
@@ -341,7 +377,8 @@ def master_book(
     """Build one chaptered .m4b (AAC) audiobook from the render manifest.
 
     Chapters are streamed into a single working WAV (peak memory = one chapter, so full books
-    fit), loudness-normalized over the whole book when `loudness` is given, then encoded to AAC
+    fit), with the same per-book voice gains as `assemble_book` when `voice_match` is given,
+    loudness-normalized over the whole book when `loudness` is given, then encoded to AAC
     at `sample_rate` (the single 24kHz→44.1kHz upsample) with ffmpeg chapter markers and an
     optional cover image. When `target_seconds` is set, a single clamped `atempo` nudges the
     whole book toward that runtime and the chapter markers are scaled to match.
@@ -366,6 +403,8 @@ def master_book(
     check = check_cancel or (lambda: None)
     narrator_voice_id = (manifest.assignment or {}).get("narrator_voice_id")
 
+    # Measure before creating the work dir: a cancel/failure while measuring leaves nothing.
+    gains = _voice_gains(manifest, book_output_dir, voice_match, say, check)
     work = book_output_dir / "master"
     work.mkdir(parents=True, exist_ok=True)
     book_wav = work / "book.wav"
@@ -382,7 +421,9 @@ def master_book(
         ) as out:
             for chapter in manifest.chapters:
                 check()
-                samples = _chapter_samples(chapter, book_output_dir, pauses, narrator_voice_id)
+                samples = _chapter_samples(
+                    chapter, book_output_dir, pauses, narrator_voice_id, gains
+                )
                 out.write(samples)
                 dur_ms = round(len(samples) / CANONICAL_SAMPLE_RATE * 1000)
                 raw_marks.append((chapter.title, cursor_ms, cursor_ms + dur_ms))

@@ -9,6 +9,7 @@ from seiyuu.cli.common import (
     _build_loudness,
     _build_pauses,
     _build_validator,
+    _build_voice_match,
     _loudness_options,
     _pass_cost_gate,
     _pause_options,
@@ -357,6 +358,7 @@ def convert(
             book_dir,
             pauses=_build_pauses(**pause_overrides),
             loudness=_build_loudness(cfg, **pause_overrides),
+            voice_match=_build_voice_match(cfg, **pause_overrides),
             progress=click.echo,
         )
     except AssembleError as exc:
@@ -373,6 +375,7 @@ def convert(
                 book_dir,
                 pauses=_build_pauses(**pause_overrides),
                 loudness=_build_loudness(cfg, **pause_overrides),
+                voice_match=_build_voice_match(cfg, **pause_overrides),
                 progress=click.echo,
             )
         except AssembleError as exc:

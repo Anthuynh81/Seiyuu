@@ -8,6 +8,7 @@ from seiyuu.cli import main
 from seiyuu.cli.common import (
     _build_loudness,
     _build_pauses,
+    _build_voice_match,
     _loudness_options,
     _pause_options,
     _resolve_book_dir,
@@ -39,6 +40,7 @@ def assemble(book_id: str, output_dir: Path | None, **overrides) -> None:
             book_dir,
             pauses=_build_pauses(**overrides),
             loudness=_build_loudness(cfg, **overrides),
+            voice_match=_build_voice_match(cfg, **overrides),
             progress=click.echo,
         )
     except AssembleError as exc:
@@ -94,6 +96,7 @@ def master(
             book_dir,
             pauses=_build_pauses(**overrides),
             loudness=_build_loudness(cfg, **overrides),
+            voice_match=_build_voice_match(cfg, **overrides),
             cover=cover,
             bitrate=bitrate,
             target_seconds=target_minutes * 60 if target_minutes else None,

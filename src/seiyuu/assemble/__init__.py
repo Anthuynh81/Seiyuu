@@ -9,6 +9,7 @@ from seiyuu.assemble.pipeline import (
     assemble_book,
     master_book,
 )
+from seiyuu.assemble.voice_match import VoiceMatch
 
 __all__ = [
     "AssembleError",
@@ -16,6 +17,7 @@ __all__ = [
     "LoudnessTarget",
     "MasterResult",
     "PauseProfile",
+    "VoiceMatch",
     "assemble_book",
     "master_book",
 ]
