@@ -6,6 +6,7 @@ import type { CastAccent, CharacterSummary, SuggestCastResponse, VoiceAssignment
 import { TalkSelect } from "../../components/Select";
 import { auditionLine } from "../../lib/audition";
 import { castRowStatus, genderLabel, manualPicks, proposalMatchesSaved, type CastRowStatus } from "../../lib/casting";
+import { failureLine } from "../../lib/glossary";
 import { PlayableRow } from "./PlayableRow";
 
 /* -------------------------------------------------- casting */
@@ -96,7 +97,7 @@ export function SuggestCastPanel({
     // only the latest request reports back, so an older reply can never commit a stale choice
     onPreview(inputFor(next), (error) => {
       setPending(null);
-      if (error) setFailure(error.message);
+      if (error) setFailure(failureLine(error));
       else setCommitted(next);
     });
   };
@@ -293,7 +294,7 @@ export function SuggestCastPanel({
         {existing > 0 && (
           <label className="mono flex items-center gap-[5px] text-[11px]">
             <input type="checkbox" checked={recast} onChange={(e) => setRecast(e.target.checked)} />
-            re-cast the {existing} existing (re-renders their audio)
+            re-cast the {existing} existing (their lines are recorded again)
           </label>
         )}
         {!distinct && (
@@ -304,7 +305,7 @@ export function SuggestCastPanel({
         )}
         <label
           className="mono flex items-center gap-[5px] text-[11px]"
-          title="ask the LLM for per-character voice-trait hints. Voices stay distinct — the hint only nudges which one each character gets."
+          title="ask the AI for per-character voice-trait hints. Voices stay distinct — the hint only nudges which one each character gets."
         >
           <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
           ✨ use AI trait hints

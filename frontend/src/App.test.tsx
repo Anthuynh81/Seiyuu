@@ -35,11 +35,11 @@ describe("App", () => {
   it.each([
     ["/", "Library"],
     ["/listen", "Listen"],
-    ["/review", "Character Review"],
-    ["/lexicon", "Pronunciation"],
-    ["/voices", "Voice Studio"],
+    ["/review", "Speakers & cast"],
+    ["/lexicon", "Proof & names"],
+    ["/voices", "Voices"],
     ["/series", "Series"],
-    ["/render", "Render & Jobs"],
+    ["/render", "Produce"],
   ] as [string, string][])("route %s renders its screen heading %s", async (route, heading) => {
     mockEmptyBackend();
     renderWithProviders(<App />, { route });

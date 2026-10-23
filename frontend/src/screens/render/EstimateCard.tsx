@@ -1,4 +1,6 @@
 import type { CostEstimateOut, RenderMode } from "../../api/types";
+import { PlainErrorLine } from "../../components/PlainError";
+import type { FlowFailure } from "../../lib/money";
 import { MODE_LABEL } from "../../lib/render";
 
 /* -------------------------------------------------- estimate + money flow */
@@ -16,7 +18,7 @@ export function EstimateCard({
   onMint: () => void;
   onFreeRender: () => void;
   minting: boolean;
-  error: string | null;
+  error: FlowFailure | null;
 }) {
   const totalSegs = est.paid_segments + est.cached_segments + est.free_segments || 1;
   const paid = est.total_usd > 0;
@@ -55,7 +57,7 @@ export function EstimateCard({
           <button className="key" onClick={onFreeRender}>record — free, nothing to approve</button>
         )}
       </div>
-      {error && <div className="errline mx-3.5 mb-3">{error}</div>}
+      {error && <PlainErrorLine as="div" className="errline mx-3.5 mb-3" error={error.error} fallback={error.lead} />}
     </div>
   );
 }

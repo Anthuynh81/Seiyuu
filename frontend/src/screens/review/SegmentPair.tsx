@@ -4,6 +4,7 @@ import { Button } from "react-aria-components";
 import type { EmotionVerdict } from "../../api/types";
 import type { SegmentRow } from "../../api/types";
 import { intensityDots } from "../../lib/emotion";
+import { term } from "../../lib/glossary";
 import { canPlay, isConfirmed } from "../../lib/reviewTools";
 
 export const SegmentPair = memo(function SegmentPair({
@@ -59,7 +60,7 @@ export const SegmentPair = memo(function SegmentPair({
   const chipLabel =
     row.speaker === null
       ? row.unattributed_quote && !isConfirmed(row)
-        ? "unattributed"
+        ? term("unattributed")
         : "narration"
       : maskedName
         ? "▮▮▮▮▮"
@@ -89,7 +90,7 @@ export const SegmentPair = memo(function SegmentPair({
         )}
         {emotion ? (
           <Button className={`emochip ${emotion.label} ${emoOpen ? "on" : ""}`} onPress={() => onEmotion(segKey)}>
-            <span title="change or clear this line's emotion — voiced at render only when emotion rendering is enabled">
+            <span title="change or clear this line's emotion — voiced only when a recording has emotion turned on">
               {emotion.label} {intensityDots(emotion.intensity)}
             </span>
           </Button>
@@ -98,7 +99,7 @@ export const SegmentPair = memo(function SegmentPair({
             <button
               className="emoadd"
               onClick={() => onEmotion(segKey)}
-              title="tag this line with an emotion (voiced at render when emotion rendering is on)"
+              title="tag this line with an emotion (voiced only when a recording has emotion turned on)"
             >
               + emotion
             </button>

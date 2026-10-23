@@ -24,6 +24,7 @@ import { chapterOfBlock } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
 import { usePlayer } from "../app/usePlayer";
 import { NextStep } from "../components/NextStep";
+import { PlainError, PlainErrorLine } from "../components/PlainError";
 import { TalkSelect } from "../components/Select";
 import { Tip } from "../components/Tooltip";
 import { auditionLine } from "../lib/audition";
@@ -35,7 +36,7 @@ import {
   type CastingState,
 } from "../lib/casting";
 import { buildEmotionMap, emotionKey } from "../lib/emotion";
-import { explainJobError } from "../lib/jobErrors";
+import { cliHint, SCREENS, term } from "../lib/glossary";
 import { nextStep } from "../lib/nextStep";
 import { findLine, matchesSpeaker, readLocation, walkToNextCheck } from "../lib/reviewNav";
 import { canPlay, describeEditWarning, mergeSuggestions, type LineTarget } from "../lib/reviewTools";
@@ -311,15 +312,8 @@ export function Review() {
   const confirmError = confirmLine.error;
   const confirmNote = useMemo(() => {
     if (!confirmError) return null;
-    const why = explainJobError(
-      confirmError instanceof ApiError
-        ? { code: confirmError.code, message: confirmError.message }
-        : confirmError.message,
-    );
     return (
-      <span className="linenote" role="alert">
-        {why.known ? `${why.summary} ${why.fix ?? ""}` : `Couldn't save that: ${confirmError.message}`}
-      </span>
+      <PlainErrorLine className="linenote" error={confirmError} fallback="Couldn't save that" />
     );
   }, [confirmError]);
 
@@ -489,13 +483,13 @@ export function Review() {
   };
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
-  if (books.isError) return <section className="screen"><div className="errline">{books.error.message}</div></section>;
+  if (books.isError) return <section className="screen"><PlainError error={books.error} title="couldn't load your books" /></section>;
   if (!bookId) {
     // no book has its speakers found yet: point at the first one that could
     const candidate = books.data?.books.find((b) => b.ingested && !b.attributed) ?? books.data?.books[0];
     return (
       <section className="screen">
-        <h1>Character Review</h1>
+        <h1>{SCREENS.review}</h1>
         <p className="sub">
           {candidate ? (
             <>
@@ -561,7 +555,7 @@ export function Review() {
   return (
     <section className="screen">
       <h1 className="flex items-baseline gap-3.5">
-        Character Review
+        {SCREENS.review}
         <TalkSelect
           className="bookpick"
           ariaLabel="book"
@@ -600,16 +594,18 @@ export function Review() {
           <div className="drainstrip">
             <span className="state"><i className={`led ${overview.data && overview.data.low_confidence_segments > 0 ? "warn" : "ok"}`} />review queue</span>
             <span className="mono text-[11.5px] text-ink-2">
-              {overview.data?.low_confidence_segments ?? "…"} low-confidence in the book ·{" "}
+              {overview.data?.low_confidence_segments ?? "…"} to check in the book ·{" "}
               {overview.data && overview.data.unattributed_quote_segments > 0
                 ? `${overview.data.unattributed_quote_segments} quote(s) with no speaker set · `
                 : ""}
               {lowConfInChapter.length} in this chapter
             </span>
             {overview.data && (
-              <Tip content="the LLM that produced this attribution">
-                <span className="mono text-[10.5px] text-ink-3">
-                  read by {overview.data.provider_id} · {overview.data.model_id} · {overview.data.prompt_version}
+              <Tip
+                content={`the AI that found the speakers: ${overview.data.provider_id} · ${overview.data.model_id} · prompt ${overview.data.prompt_version} ${cliHint("attribute")}`}
+              >
+                <span className="mono text-[10.5px] text-ink-3" tabIndex={0}>
+                  speakers found by {overview.data.model_id}
                 </span>
               </Tip>
             )}
@@ -781,7 +777,7 @@ export function Review() {
               )}
               {casting && allTags.length > 0 && (
                 <div className="caststrip flex-wrap gap-1.5">
-                  <Tip content="narrow every voice picker to voices carrying ALL the selected tags — tag voices in Voice Studio">
+                  <Tip content={`narrow every voice picker to voices carrying ALL the selected tags — tag voices on the ${SCREENS.voices} screen`}>
                     <span className="tag">voice tags</span>
                   </Tip>
                   {allTags.map((t) => (
@@ -835,14 +831,12 @@ export function Review() {
               )}
               {/* only the FIRST request's failure lands here; an open panel reports its own */}
               {suggestCast.error && !castPreview && (
-                <div className="refusal mx-3 my-2">
-                  <span className="tag">couldn't suggest a cast</span>
-                  <p>{suggestCast.error.message}</p>
-                </div>
+                <PlainError className="mx-3 my-2" error={suggestCast.error} title="couldn't suggest a cast" />
               )}
               {draftCast.data && draftCast.data.created_voice_ids.length > 0 && (
                 <div className="caststrip mono text-[11px] text-ok">
-                  created {draftCast.data.created_voice_ids.length} voice(s) — tune them in Voice Studio
+                  made {draftCast.data.created_voice_ids.length} new voice
+                  {draftCast.data.created_voice_ids.length === 1 ? "" : "s"} for this cast
                 </div>
               )}
               {(draftCast.error || saveCast.error) && (
@@ -854,7 +848,9 @@ export function Review() {
                         ? "couldn't apply the cast"
                         : "couldn't save casting"}
                   </span>
-                  <p>{(draftCast.error ?? saveCast.error)?.message}</p>
+                  {!(draftCast.error instanceof ApiError && draftCast.error.code === "payment_confirmation_required") && (
+                    <PlainErrorLine as="div" error={draftCast.error ?? saveCast.error} />
+                  )}
                 </div>
               )}
               {staleAfterSave && !castingDirty && book.data?.status.rendered && (
@@ -864,12 +860,14 @@ export function Review() {
                     voices changed — the rendered audio still uses the old ones.
                   </span>
                   <Link className="link" to={`/render?book=${encodeURIComponent(bookId)}`}>
-                    re-render in Render &amp; Jobs →
+                    re-record on {SCREENS.render} →
                   </Link>
                 </div>
               )}
               {overview.isPending && <div className="loadline p-3.5">reading the registry…</div>}
-              {overview.isError && <div className="errline p-3.5">{overview.error.message}</div>}
+              {overview.isError && (
+                <PlainError className="m-3" error={overview.error} title={`couldn't load the ${term("registry")}`} />
+              )}
               <table>
                 <tbody>
                   <tr>
@@ -969,7 +967,7 @@ export function Review() {
                 <span className="tag">of {chapterCount}</span>
                 <button className="chap" disabled={chapter >= chapterCount} onClick={() => setChapter(chapter + 1)}>›</button>
                 {emotionMap.size > 0 && (
-                  <Tip content="the emotion the model tagged each line with — voiced at render only when emotion rendering is enabled">
+                  <Tip content="the emotion the model tagged each line with — voiced only when a recording has emotion turned on">
                     <span className="mono text-[10.5px] text-ink-3">
                       {emotionMap.size} emotion tag(s) in this chapter
                     </span>
@@ -1032,7 +1030,7 @@ export function Review() {
                 </p>
               )}
               {shown.isPending && <div className="loadline">setting the page…</div>}
-              {shown.isError && <div className="errline">{shown.error.message}</div>}
+              {shown.isError && <PlainError error={shown.error} title="couldn't load this chapter" />}
               {shown.data && shown.data.segments.length === 0 && speakerFilter !== null && (
                 <p className="navnote">No lines for {filterName} in this chapter.</p>
               )}

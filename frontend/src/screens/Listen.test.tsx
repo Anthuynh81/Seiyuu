@@ -257,7 +257,7 @@ describe("Listen", () => {
     // the recording voice by its library NAME, never the raw id
     expect(await screen.findByText("Warm Narrator")).toBeInTheDocument();
     expect(screen.queryByText("v-narr")).not.toBeInTheDocument();
-    expect(screen.getByText(/multivoice · 1 voices/)).toBeInTheDocument();
+    expect(screen.getByText(/Full cast · 1 voices/)).toBeInTheDocument();
     // the header sub names the current chapter from the book detail
     expect(screen.getByText(/Loomings — click any word/)).toBeInTheDocument();
   });

@@ -114,7 +114,7 @@ export function TransportBar() {
   return (
     <div className="transport">
       {borrowable ? (
-        <Tip content="still running — a voice audition may borrow the GPU between segments without stopping this render">
+        <Tip content="still running — a voice sample may borrow the graphics card between lines without stopping this recording">
           {stateChip}
         </Tip>
       ) : (

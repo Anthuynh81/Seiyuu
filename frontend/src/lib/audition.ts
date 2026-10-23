@@ -1,5 +1,6 @@
 import { ApiError, BACKEND_DOWN } from "../api/client";
 import type { JobKind } from "../api/types";
+import { JOB_DOING } from "./glossary";
 import { engineName, manualInstallFor } from "./health";
 
 /** Plain words for a refused voice sample (POST /voices/{id}/audition). Pure, so every player
@@ -60,13 +61,10 @@ export interface AuditionRefusal {
   estimatedUsd?: number;
 }
 
-const BUSY_DOING: Partial<Record<JobKind, string>> = {
-  render: "recording",
-  attribute: "finding the speakers",
-  warmup: "getting a voice engine ready",
-  assemble: "building the chapter MP3s",
-  master: "building the audiobook",
-  ingest: "adding a book",
+/** "recording", "finding the speakers": the glossary's step name, mid-sentence. */
+const busyDoing = (kind: JobKind | null): string => {
+  const doing = kind ? JOB_DOING[kind] : undefined;
+  return doing ? doing[0].toLowerCase() + doing.slice(1) : "recording";
 };
 
 /** "$0.0123" — enough places that a fraction-of-a-cent sample doesn't read as free. */
@@ -91,7 +89,7 @@ export function explainAuditionRefusal(err: ApiError, engine: string): AuditionR
     }
     case "gpu_busy": {
       const kind = typeof detail.kind === "string" ? (detail.kind as JobKind) : null;
-      const doing = (kind && BUSY_DOING[kind]) ?? "recording";
+      const doing = busyDoing(kind);
       return {
         ...base,
         kind: "gpu_busy",

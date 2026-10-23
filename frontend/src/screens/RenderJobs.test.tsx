@@ -349,6 +349,29 @@ describe("RenderJobs", () => {
     expect(postCount(server, "/render")).toBe(1);
   });
 
+  it("a refused render start reads in plain words and offers to stop the job in the way, never retrying", async () => {
+    const user = userEvent.setup();
+    const server = mountRoutes(readyCard())
+      .get("/api/books/demo/cost-estimate", makeEstimate())
+      .error(
+        "POST",
+        "/api/books/demo/render",
+        409,
+        "conflicting_job",
+        "an attribute job for 'demo' is running; wait for it or cancel it before rendering",
+        makeJob({ job_id: "job-a1", kind: "attribute", state: "running" }),
+      )
+      .post("/api/jobs/job-a1/cancel", makeJob({ job_id: "job-a1", kind: "attribute", state: "canceled" }));
+    renderWithProviders(<RenderJobs />);
+
+    await user.click(await screen.findByRole("button", { name: "record — free, nothing to approve" }));
+    const line = await screen.findByText(/Finding the speakers is still running for this book/);
+    expect(screen.queryByText(/an attribute job for 'demo'/)).not.toBeInTheDocument();
+    await user.click(within(line).getByRole("button", { name: "Stop finding the speakers" }));
+    await waitFor(() => expect(postCount(server, "/api/jobs/job-a1/cancel")).toBe(1));
+    expect(postCount(server, "/render")).toBe(1);
+  });
+
   it("cost_drift stamps the ticket dead (DRIFT + refusal reason) and RE-MINT revives a live ticket", async () => {
     const user = userEvent.setup();
     const server = mountRoutes(readyCard()).get(
@@ -365,7 +388,9 @@ describe("RenderJobs", () => {
     await user.click(await screen.findByRole("button", { name: "CONFIRM & RENDER" }));
 
     expect(await screen.findByText("DRIFT")).toBeInTheDocument();
-    expect(screen.getByText("the cache shifted under this quote")).toBeInTheDocument();
+    // why, in plain words; the server's own text stays in the tooltip
+    const why = screen.getByText(/The approved price no longer matches/);
+    expect(why).toHaveAttribute("title", "the cache shifted under this quote");
     expect(screen.queryByRole("button", { name: "CONFIRM & RENDER" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "RE-MINT QUOTE" }));
@@ -481,7 +506,8 @@ describe("RenderJobs", () => {
     await user.click(screen.getByRole("button", { name: /find the speakers in the whole book/ }));
 
     // the 402 surfaces the reason and an explicit confirm control — nothing auto-retries
-    expect(await screen.findByText(/anthropic attribution is a paid run/)).toBeInTheDocument();
+    expect(await screen.findByText(/uses Claude online, which costs money/)).toBeInTheDocument();
+    expect(screen.queryByText(/anthropic attribution is a paid run/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "confirm the paid run" }));
 
     await waitFor(() => expect(bodies).toHaveLength(2));
@@ -525,7 +551,7 @@ describe("RenderJobs", () => {
 
     const box = await screen.findByRole("region", { name: "Speakers found" });
     expect(box).toHaveAttribute("id", "find-speakers");
-    expect(within(box).getByRole("link", { name: "check them in Character Review" })).toHaveAttribute(
+    expect(within(box).getByRole("link", { name: "check them on Speakers & cast" })).toHaveAttribute(
       "href",
       "/review?book=demo",
     );
@@ -841,14 +867,17 @@ describe("RenderJobs", () => {
       409,
       "conflicting_job",
       "a master job for 'demo' is running; it reads the cover mid-run",
+      { job_id: "m1", book_id: "demo", kind: "master", state: "running" },
     );
     const { container } = renderWithProviders(<RenderJobs />);
 
     await screen.findByAltText("cover art");
     await user.upload(coverInput(container)!, jpeg());
 
-    expect(await screen.findByText("conflicting_job")).toBeInTheDocument();
-    expect(screen.getByText(/a master job is running and reads the cover mid-run/)).toBeInTheDocument();
+    // plain words with the recourse, never the raw code as the main text
+    expect(await screen.findByText(/Building the .m4b audiobook is still running for this book/)).toBeInTheDocument();
+    expect(screen.queryByText("conflicting_job")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop building the audiobook" })).toBeInTheDocument();
   });
 
   it("a 415 on cover upload shows the envelope message inline", async () => {
@@ -1083,7 +1112,8 @@ describe("RenderJobs", () => {
       expect(postCount(server, "/render")).toBe(1);
 
       answer(errorResponse(409, "conflicting_job", "another job is already working on this book"));
-      expect(await within(dialog).findByText("another job is already working on this book")).toBeInTheDocument();
+      expect(await within(dialog).findByText(/Another job is still running for this book/)).toBeInTheDocument();
+      expect(within(dialog).queryByText("another job is already working on this book")).not.toBeInTheDocument();
       expect(within(dialog).getByRole("button", { name: "record the whole book" })).toBeEnabled();
       expect(postCount(server, "/render")).toBe(1);
     });
@@ -1117,7 +1147,7 @@ describe("RenderJobs", () => {
 
       // the re-price fails: the reason and a way to try again — still no free key
       answerMint(errorResponse(503, "missing_key", "the ElevenLabs key isn't set"));
-      expect(await within(dialog).findByText("the ElevenLabs key isn't set")).toBeInTheDocument();
+      expect(await within(dialog).findByText(/the ElevenLabs key isn't set/)).toBeInTheDocument();
       expect(within(dialog).getByRole("button", { name: "get a fresh price" })).toBeInTheDocument();
       expect(within(dialog).queryByRole("button", { name: "record the whole book" })).not.toBeInTheDocument();
       expect(postCount(server, "/render")).toBe(1);

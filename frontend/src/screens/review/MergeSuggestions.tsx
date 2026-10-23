@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError } from "../../api/client";
 import { useRecordEdit } from "../../api/hooks";
 import { JobErrorText } from "../../components/JobErrorText";
-import { explainJobError } from "../../lib/jobErrors";
+import { explainJobError, failureOf } from "../../lib/jobErrors";
 import { mergePreview, type MergeSuggestion } from "../../lib/reviewTools";
 import { readStored, writeStored } from "../../lib/storage";
 
@@ -100,11 +99,7 @@ function MergeCard({
   const loser = flipped ? suggestion.winner : suggestion.loser;
   const winner = flipped ? suggestion.loser : suggestion.winner;
   const refused = record.error
-    ? explainJobError(
-        record.error instanceof ApiError
-          ? { code: record.error.code, message: record.error.message }
-          : record.error.message,
-      )
+    ? explainJobError(failureOf(record.error))
     : null;
   return (
     <div className="mergecard">

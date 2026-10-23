@@ -206,7 +206,7 @@ async function turnOnSpoilerSafe(user: ReturnType<typeof userEvent.setup>) {
 
 /** The open reassign popover (a plain span, so found through its heading). */
 function reassignPopover(): HTMLElement {
-  const el = screen.getByText(/^reassign ·/).closest(".popover");
+  const el = screen.getByText("who says this line?").closest(".popover");
   if (!(el instanceof HTMLElement)) throw new Error("no reassign popover open");
   return el;
 }
@@ -230,8 +230,8 @@ describe("Review", () => {
     expect(screen.getByRole("button", { name: /Book Two/ })).toBeInTheDocument();
     expect(server.lastCall("GET", "/api/books/b1/characters")).toBeUndefined();
     // review-queue stats + attribution provenance from /characters
-    expect(screen.getByText(/3 low-confidence in the book · 1 in this chapter/)).toBeInTheDocument();
-    expect(screen.getByText(/read by local · qwen2.5:7b · v6/)).toBeInTheDocument();
+    expect(screen.getByText(/3 to check in the book · 1 in this chapter/)).toBeInTheDocument();
+    expect(screen.getByText(/speakers found by qwen2.5:7b/)).toBeInTheDocument();
     // the chapter page renders segments with the speaker chip in the margin
     expect(screen.getByText("It was a dark night.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "ALICE" })).toBeInTheDocument();
@@ -499,8 +499,8 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    // distinguishable chip: "unattributed", never passed off as plain narration
-    const chip = await screen.findByRole("button", { name: "unattributed" });
+    // distinguishable chip: "speaker unknown", never passed off as plain narration
+    const chip = await screen.findByRole("button", { name: "speaker unknown" });
     // the drainstrip counts it: the book-level stat AND the chapter queue (0.0 + the 0.55 dialogue)
     expect(screen.getByText(/1 quote\(s\) with no speaker set · 2 in this chapter/)).toBeInTheDocument();
     // it wears the in-review marker like any low-confidence attribution
@@ -509,7 +509,7 @@ describe("Review", () => {
 
     // its chip opens the reassign popover — the queue leads straight to the fix
     await user.click(chip);
-    expect(await screen.findByText(/reassign · ch001_b0002 \[0\]/)).toBeInTheDocument();
+    expect(await screen.findByText("who says this line?")).toHaveAttribute("title", "ch001_b0002 [0]");
   });
 
   it("first cast: one Suggest a cast button (no hash auto-cast) previews, and apply drafts with strategy=smart", async () => {
@@ -546,7 +546,7 @@ describe("Review", () => {
     });
     await user.click(screen.getByRole("button", { name: "apply cast" }));
 
-    expect(await screen.findByText(/created 2 voice\(s\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/made 2 new voices for this cast/)).toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
       stage: "draft",
@@ -783,7 +783,7 @@ describe("Review", () => {
     // plain words, not the server code
     expect(await screen.findByText("the AI caster is paid — approve it below to continue")).toBeInTheDocument();
     expect(screen.queryByText("payment_confirmation_required")).not.toBeInTheDocument();
-    expect(screen.getByText(/anthropic cast is a paid call/)).toBeInTheDocument();
+    expect(screen.queryByText(/anthropic cast is a paid call/)).not.toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
       stage: "draft",
@@ -810,7 +810,7 @@ describe("Review", () => {
     await user.click(screen.getByRole("checkbox", { name: /approve the paid \(Anthropic\) caster/ }));
     await user.click(retry);
 
-    expect(await screen.findByText(/created 2 voice\(s\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/made 2 new voices for this cast/)).toBeInTheDocument();
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toEqual({
       strategy: "smart",
       stage: "draft",
@@ -902,7 +902,7 @@ describe("Review", () => {
     expect(
       await screen.findByText(/the rendered audio still uses the old ones/),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /re-render in Render & Jobs/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /re-record on Produce/ })).toHaveAttribute(
       "href",
       "/render?book=b1",
     );
@@ -978,7 +978,7 @@ describe("Review cast reset", () => {
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toMatchObject({ stage: "final" });
     // nothing differs from the saved cast until re-cast is ticked (with its re-recording warning)
     expect(screen.getByRole("button", { name: "nothing to apply" })).toBeDisabled();
-    await user.click(screen.getByRole("checkbox", { name: /re-cast the 1 existing \(re-renders their audio\)/ }));
+    await user.click(screen.getByRole("checkbox", { name: /re-cast the 1 existing \(their lines are recorded again\)/ }));
     await user.click(screen.getByRole("button", { name: "apply cast" }));
     await waitFor(() => expect(draftPosts(server)).toHaveLength(1));
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/draft")).toMatchObject({
@@ -2127,17 +2127,26 @@ describe("Review power tools", () => {
   it("a refused Looks right says why in plain words and is not retried", async () => {
     const user = userEvent.setup();
     const server = setupReview();
-    server.error("POST", "/api/books/b1/edits", 409, "render_active", "a render job for 'b1' is running");
+    server.error("POST", "/api/books/b1/edits", 409, "render_active", "a render job for 'b1' is running", {
+      job_id: "job-r1",
+      kind: "render",
+      state: "running",
+    });
+    server.post("/api/jobs/job-r1/cancel", makeJob({ job_id: "job-r1", state: "canceled" }));
     renderWithProviders(<Review />);
 
     await user.click(await screen.findByRole("button", { name: "Looks right: keep Alice" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "A recording is running for this book, so the change was refused.",
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("A recording is running for this book; changes are paused until it finishes.");
+    // the raw guard message is not the text; the recourse is right there in the line note
+    expect(alert).not.toHaveTextContent("a render job for 'b1'");
+    await user.click(within(alert).getByRole("button", { name: "Cancel recording" }));
+    expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/jobs/job-r1/cancel")).toHaveLength(1);
+    // the refused edit itself is never retried
     expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/books/b1/edits")).toHaveLength(1);
   });
 
-  it("a confirmed unattributed quote reads as narration: no 'unattributed', no Looks right", async () => {
+  it("a confirmed unattributed quote reads as narration: no 'speaker unknown', no Looks right", async () => {
     const server = setupReview();
     const base = chapterOneSegments();
     server.get("/api/books/b1/chapters/1/segments", {
@@ -2150,7 +2159,7 @@ describe("Review power tools", () => {
     renderWithProviders(<Review />);
 
     // the unconfirmed one keeps its marker and its Looks right (the narrator reads it)
-    expect(await screen.findByRole("button", { name: "unattributed" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "speaker unknown" })).toBeInTheDocument();
     // ...worded as what it records: the narrator reads this quote
     const keep = screen.getAllByRole("button", { name: "Narrator reads it: keep the narrator for this quote" });
     expect(keep).toHaveLength(1);
@@ -2294,7 +2303,7 @@ describe("Review power tools", () => {
     const chip = await screen.findByRole("button", { name: "ALICE" });
     chip.focus();
     await user.keyboard("{Enter}");
-    expect(await screen.findByText(/^reassign ·/)).toBeInTheDocument();
+    expect(await screen.findByText("who says this line?")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "cancel" }));
 
     screen.getByRole("button", { name: "angry ••" }).focus();
@@ -2608,7 +2617,7 @@ describe("Review power tools", () => {
     await user.click(within(drawer).getByRole("button", { name: "Undo this…" }));
     await user.click(within(drawer).getByRole("button", { name: "Undo it" }));
 
-    expect(await within(drawer).findByText("A recording is running for this book, so the change was refused.")).toBeInTheDocument();
+    expect(await within(drawer).findByText("A recording is running for this book; changes are paused until it finishes.")).toBeInTheDocument();
     expect(server.calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
   });
 });

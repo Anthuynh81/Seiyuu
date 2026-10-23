@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { useBooks, useCloudSlots, useVoices } from "../api/hooks";
+import { PlainError } from "../components/PlainError";
 import { TalkSelect } from "../components/Select";
+import { SCREENS } from "../lib/glossary";
 import { AddVoiceDialog } from "./voices/AddVoiceDialog";
 import { CloneDialog } from "./voices/CloneDialog";
 import type { DuplicateRecipe } from "./voices/helpers";
@@ -65,7 +67,7 @@ export function Voices() {
 
   return (
     <section className="screen">
-      <h1>Voice Studio</h1>
+      <h1>{SCREENS.voices}</h1>
       <p className="sub">
         Presets, blends, and consent-attested clones. Auditions are live synthesis — the console refuses with a reason
         when the GPU or the cloud is otherwise engaged.
@@ -140,7 +142,7 @@ export function Voices() {
           </div>
         )}
         {voices.isPending && <div className="loadline p-3.5">opening the booth…</div>}
-        {voices.isError && <div className="errline m-3.5">{voices.error.message}</div>}
+        {voices.isError && <PlainError className="m-3.5" error={voices.error} title="couldn't load your voices" />}
         {voices.data?.unreadable.map((u) => (
           <div className="refusal mx-3.5 mt-2.5" key={u.voice_id}>
             <span className="tag">unreadable</span>

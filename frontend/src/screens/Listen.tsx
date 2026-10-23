@@ -15,6 +15,7 @@ import type { BookCard, SegmentRow } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
 import { usePlayer, type PlayClip, type PlayWord } from "../app/usePlayer";
 import { NextStep } from "../components/NextStep";
+import { PlainError } from "../components/PlainError";
 import { StaleAudioBanner } from "../components/StaleAudio";
 import {
   clock,
@@ -25,6 +26,7 @@ import {
   voiceChangedSince,
   type ResumePoint,
 } from "../lib/listen";
+import { MODE_NAMES, SCREENS } from "../lib/glossary";
 import { ADD_A_BOOK, bookHref, nextStep, RENDER_ANCHOR } from "../lib/nextStep";
 import { readStored, removeStored, writeStored } from "../lib/storage";
 import { alignWordTimings, buildClipWords, groupPlayableRows } from "../lib/words";
@@ -349,12 +351,12 @@ export function Listen() {
 
   /* ---------------- shelf (no book chosen) ---------------- */
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
-  if (books.isError) return <section className="screen"><h1>Listen</h1><div className="errline">{books.error.message}</div></section>;
+  if (books.isError) return <section className="screen"><h1>Listen</h1><PlainError error={books.error} title="couldn't load your books" /></section>;
   if (!bookId) {
     return (
       <section className="screen">
         <h1>Listen</h1>
-        <p className="sub">Pick a book from the shelf — upload cover art in Render &amp; Jobs to make this prettier.</p>
+        <p className="sub">Pick a book from the shelf — add cover art on {SCREENS.render} to make this prettier.</p>
         <div className="shelf">
           {books.data?.books.map((b) => (
             <CoverTile key={b.book_id} book={b} onPick={() => setParams({ book: b.book_id })} />
@@ -490,8 +492,8 @@ export function Listen() {
           <span className="state">
             <i className={`led ${summary.data.mode === "multivoice" ? "ok" : "off"}`} />
             {summary.data.mode === "multivoice"
-              ? `multivoice · ${Object.keys(summary.data.voices_used ?? {}).length || "cast"} voices`
-              : "single voice"}
+              ? `${MODE_NAMES.multivoice} · ${Object.keys(summary.data.voices_used ?? {}).length || "cast"} voices`
+              : MODE_NAMES.single}
           </span>
           {summary.data.mode === "single" && book.data?.status.assigned && (
             <span className="flex items-center gap-2">
@@ -514,7 +516,7 @@ export function Listen() {
       )}
       <StaleAudioBanner status={book.data?.status} />
       {segments.isPending && (rendered || !book.data) && <div className="loadline">setting the page…</div>}
-      {segments.isError && <div className="refusal"><span className="tag">not attributed</span><p>{segments.error.message}</p></div>}
+      {segments.isError && <PlainError error={segments.error} title="couldn't load this chapter" />}
       {book.data && !rendered && (
         <div className="refusal">
           <span className="tag">no audio yet</span>

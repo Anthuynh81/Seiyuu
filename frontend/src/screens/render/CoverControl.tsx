@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { ApiError } from "../../api/client";
 import { useDeleteCover, useUploadCover } from "../../api/hooks";
 import type { CoverOut } from "../../api/types";
+import { PlainError } from "../../components/PlainError";
 
 /* -------------------------------------------------- cover art (master + shelf) */
 
@@ -86,19 +87,9 @@ export function CoverControl({ bookId, cover }: { bookId: string; cover: CoverOu
             </button>
           ))}
       </div>
-      {apiErr &&
-        (apiErr.code === "conflicting_job" ? (
-          <div className="refusal mt-2.5">
-            <span className="tag">conflicting_job</span>
-            <p>
-              a master job is running and reads the cover mid-run — wait for it or cancel it in the transport bar,
-              then retry.
-            </p>
-          </div>
-        ) : (
-          <div className="errline mt-2.5">{apiErr.message}</div>
-        ))}
-      {err && !apiErr && <div className="errline mt-2.5">{String(err)}</div>}
+      {err && (
+        <PlainError className="mt-2.5" error={err} title={apiErr?.code === "conflicting_job" ? "busy" : "couldn't change the cover"} />
+      )}
     </div>
   );
 }

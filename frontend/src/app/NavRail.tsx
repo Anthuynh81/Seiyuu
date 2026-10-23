@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 
 import { useLiveJobs } from "../api/hooks";
+import { SCREENS } from "../lib/glossary";
 import { useCurrentBook, withBook } from "./currentBook";
 import { HealthPill } from "./SystemDrawer";
 import { type ThemePref, useTheme } from "./useTheme";
@@ -8,15 +9,15 @@ import { type ThemePref, useTheme } from "./useTheme";
 /** The rail reads in workflow order: the shelf, then one book's numbered steps, then the
     tools that serve every book. Routes are unchanged; only labels, order and grouping are. */
 const steps = [
-  { to: "/review", n: 1, label: "Speakers & cast" },
-  { to: "/lexicon", n: 2, label: "Proof & names" },
-  { to: "/render", n: 3, label: "Produce" },
-  { to: "/listen", n: 4, label: "Listen" },
+  { to: "/review", n: 1, label: SCREENS.review },
+  { to: "/lexicon", n: 2, label: SCREENS.lexicon },
+  { to: "/render", n: 3, label: SCREENS.render },
+  { to: "/listen", n: 4, label: SCREENS.listen },
 ];
 
 const tools = [
-  { to: "/voices", label: "Voices" },
-  { to: "/series", label: "Series" },
+  { to: "/voices", label: SCREENS.voices },
+  { to: "/series", label: SCREENS.series },
 ];
 
 const themes: { id: ThemePref; label: string; title: string }[] = [
@@ -39,7 +40,7 @@ export function NavRail() {
         <span>audiobook console</span>
       </div>
       <NavLink to="/" end className={linkClass}>
-        Library
+        {SCREENS.library}
       </NavLink>
       <div role="group" aria-labelledby="nav-steps" className="navgroup">
         <div className="navcap" id="nav-steps">

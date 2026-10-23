@@ -2,11 +2,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Dialog as AriaDialog, Heading, Modal, ModalOverlay } from "react-aria-components";
 
-import { api, ApiError } from "../../api/client";
+import { api } from "../../api/client";
 import { useUndoEdit } from "../../api/hooks";
 import type { EditLog } from "../../api/types";
 import { JobErrorText } from "../../components/JobErrorText";
-import { explainJobError } from "../../lib/jobErrors";
+import { explainJobError, failureLine, failureOf } from "../../lib/jobErrors";
 import { describeEdit, type LineTarget } from "../../lib/reviewTools";
 
 /** The book's edit history (GET /edits), newest first, in plain words, with a "Go to line" for
@@ -86,7 +86,7 @@ export function HistoryDrawer({
         staleTime: 0,
       });
     } catch (e) {
-      setCheckError(e instanceof Error ? e.message : String(e));
+      setCheckError(failureLine(e, "Couldn't check the list of changes"));
       return;
     } finally {
       setChecking(false);
@@ -112,9 +112,7 @@ export function HistoryDrawer({
   };
 
   const refused = undo.error
-    ? explainJobError(
-        undo.error instanceof ApiError ? { code: undo.error.code, message: undo.error.message } : undo.error.message,
-      )
+    ? explainJobError(failureOf(undo.error))
     : null;
 
   return (

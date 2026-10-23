@@ -1,4 +1,5 @@
 import type { ChapterSummary, RenderMode, RenderRequest, VoiceOut } from "../api/types";
+import { MODE_NAMES } from "./glossary";
 
 /** Pure helpers for the Render screen: the plain names for the two recording modes, the
     single-narrator spec every estimate/quote/render must carry identically, the whole-book
@@ -6,10 +7,8 @@ import type { ChapterSummary, RenderMode, RenderRequest, VoiceOut } from "../api
 
 /* -------------------------------------------------- modes */
 
-export const MODE_LABEL: Record<RenderMode, string> = {
-  multivoice: "Full cast",
-  single: "One narrator",
-};
+/** The plain names for the two recording modes (lib/glossary's MODE_NAMES). */
+export const MODE_LABEL: Record<RenderMode, string> = MODE_NAMES;
 
 /** The archive names the render summary uses ("multi"/"single") in the same words. */
 export const ARCHIVE_LABEL: Record<"multi" | "single", string> = {

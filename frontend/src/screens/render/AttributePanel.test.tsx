@@ -102,14 +102,38 @@ describe("AttributePanel — first run", () => {
     expect(screen.queryByText("ollama serve")).not.toBeInTheDocument();
 
     await user.click(key);
-    // plain words first; the server's text stays as secondary detail
+    // plain words, never the server's developer text
     expect(await screen.findByText(/This run uses Claude online, which costs money/)).toBeInTheDocument();
-    expect(screen.getByText(/attribution with provider=anthropic is paid/)).toBeInTheDocument();
+    expect(screen.queryByText(/provider=anthropic is paid/)).not.toBeInTheDocument();
     expect(bodies).toHaveLength(1); // nothing auto-retries
     await user.click(screen.getByRole("button", { name: "confirm the paid run" }));
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[0]).toEqual({ chapters: [], provider: "anthropic", model: "claude-test" });
     expect(bodies[1]).toEqual({ chapters: [], provider: "anthropic", model: "claude-test", confirm_paid: true });
+  });
+
+  it("a missing Anthropic key says so plainly (never 'still starting') and isn't retried", async () => {
+    const user = userEvent.setup();
+    const server = routes({ ollama: { base_url: "x", reachable: false, model_installed: null } });
+    server.error(
+      "POST",
+      "/api/books/demo/attribute",
+      503,
+      "not_ready",
+      "ANTHROPIC_API_KEY not set; required for anthropic/hybrid",
+    );
+    renderWithProviders(<AttributePanel book={fresh} />);
+
+    await user.click(await screen.findByRole("button", { name: "change" }));
+    await user.click(screen.getByRole("button", { name: /speaker-finding provider/ }));
+    await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: /Claude online, paid/ }));
+    const key = await startKey();
+    await waitFor(() => expect(key).toBeEnabled());
+    await user.click(key);
+
+    expect(await screen.findByText("Using Claude online needs an Anthropic key, and none is set.")).toBeInTheDocument();
+    expect(screen.queryByText(/still starting|isn't ready to take new work/)).not.toBeInTheDocument();
+    expect(server.calls.filter((c) => c.method === "POST" && c.url === "/api/books/demo/attribute")).toHaveLength(1);
   });
 
   it("with Claude as the server default, 'this PC' reads with the LOCAL model and never says pull claude", async () => {
@@ -246,7 +270,7 @@ describe("AttributePanel — re-run for chapters (Advanced)", () => {
     await user.click(screen.getByRole("button", { name: /re-run provider/ }));
     await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: /Claude online, paid/ }));
     await user.click(screen.getByRole("button", { name: "re-run for chapter 2" }));
-    expect(await screen.findByText(/provider=anthropic is paid/)).toBeInTheDocument();
+    expect(await screen.findByText(/uses Claude online, which costs money/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "confirm the paid run" }));
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[0]).toEqual({ chapters: [2], provider: "anthropic", model: "claude-test" });

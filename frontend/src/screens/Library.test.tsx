@@ -191,7 +191,7 @@ describe("Library", () => {
 
     // the 402 escalates: the dialog re-titles and spells out the paid segments
     expect(await screen.findByRole("dialog", { name: "Discard paid renders?" })).toBeInTheDocument();
-    const discard = screen.getByRole("button", { name: /discard 7 paid segment\(s\) & delete/ });
+    const discard = screen.getByRole("button", { name: /discard 7 paid lines & delete/ });
     await user.click(discard);
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -217,8 +217,9 @@ describe("Library", () => {
     await user.click(within(dialog).getByRole("button", { name: "delete book" }));
 
     // the refusal names the live job; deleting is impossible until it's canceled
-    expect(await screen.findByText("conflicting_job")).toBeInTheDocument();
-    expect(screen.getByText(/a render job is running for this book/)).toBeInTheDocument();
+    // plain words: what is running, never the raw code
+    expect(await screen.findByText(/Recording is running for this book/)).toBeInTheDocument();
+    expect(screen.queryByText("conflicting_job")).not.toBeInTheDocument();
     // the danger key is GONE — no delete/retry/discard control remains, only close
     expect(screen.queryByRole("button", { name: "delete book" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry delete|discard/ })).not.toBeInTheDocument();
@@ -244,7 +245,8 @@ describe("Library", () => {
     await user.click(await screen.findByRole("button", { name: "delete book" }));
 
     // every surviving path is spelled out — the user must know what may need a manual sweep
-    expect(await screen.findByText("partial_delete")).toBeInTheDocument();
+    expect(await screen.findByText("partly deleted")).toBeInTheDocument();
+    expect(screen.queryByText("partial_delete")).not.toBeInTheDocument();
     expect(screen.getByText("books/b1/normalized.json")).toBeInTheDocument();
     expect(screen.getByText("output/b1/render")).toBeInTheDocument();
 

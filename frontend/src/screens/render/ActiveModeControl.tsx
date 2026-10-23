@@ -1,6 +1,7 @@
 import { ApiError } from "../../api/client";
 import { useSwitchRenderMode } from "../../api/hooks";
 import type { ActiveJobSummary, ArchivedRenderMode, RenderSummaryOut } from "../../api/types";
+import { PlainError } from "../../components/PlainError";
 import { stepName } from "../../lib/jobCopy";
 import { ARCHIVE_LABEL } from "../../lib/render";
 
@@ -53,16 +54,9 @@ export function ActiveModeControl({
               : "record the other version once and you can switch between them instantly"}
         </span>
       </div>
-      {apiErr &&
-        (apiErr.code === "conflicting_job" ? (
-          <div className="refusal mt-2">
-            <span className="tag">busy</span>
-            <p>{apiErr.message}</p>
-          </div>
-        ) : (
-          <div className="errline mt-2">{apiErr.message}</div>
-        ))}
-      {sw.error && !apiErr && <div className="errline mt-2">{String(sw.error)}</div>}
+      {sw.error && (
+        <PlainError className="mt-2" error={sw.error} title={apiErr?.code === "conflicting_job" ? "busy" : "couldn't switch"} />
+      )}
     </div>
   );
 }

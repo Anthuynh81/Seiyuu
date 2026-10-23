@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { useRenameVoice } from "../../api/hooks";
 import type { VoiceOut } from "../../api/types";
+import { PlainErrorLine } from "../../components/PlainError";
 
 /* -------------------------------------------------- rename (name is a safe, cache-free label) */
 
@@ -49,7 +50,7 @@ export function NameRow({ voice }: { voice: VoiceOut }) {
       <button className="key quiet px-2 py-[2px]" disabled={rename.isPending} onClick={save}>
         save
       </button>
-      {rename.error && <span className="mono text-[10px] text-clip">{rename.error.message}</span>}
+      <PlainErrorLine className="mono text-[10px] text-clip" error={rename.error} fallback="Couldn't rename it" />
     </h3>
   );
 }

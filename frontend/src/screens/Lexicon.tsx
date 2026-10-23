@@ -1,92 +1,127 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import {
+  useAssignment,
   useBooks,
   useLexicon,
   usePreviewLexicon,
   useSaveLexicon,
   useSuggestRespellings,
+  useVoices,
 } from "../api/hooks";
-import type { LexiconEntry, SuggestedTerm } from "../api/types";
-import { useScreenBook } from "../app/currentBook";
+import type { LexiconEntry, SuggestedTerm, VoiceOut } from "../api/types";
+import { useScreenBook, withBook } from "../app/currentBook";
 import { NextStep } from "../components/NextStep";
+import { PlainError } from "../components/PlainError";
 import { TalkSelect } from "../components/Select";
-import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig } from "../lib/lexicon";
+import { Tip } from "../components/Tooltip";
+import { explainFailure, failureOf, plural, SCREENS, term as uiTerm } from "../lib/glossary";
+import { applyRespellings, blankEntry, cleanForSave, duplicateTerms, entriesSig, hearItLine } from "../lib/lexicon";
 import { ADD_A_BOOK } from "../lib/nextStep";
+import { PlayableRow } from "./review/PlayableRow";
 
 const sameTerm = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
-/* A per-book pronunciation dictionary: term -> respelling (spoken on every engine), with an
-   optional IPA that only the Kokoro engine uses. Editing re-synthesizes only the segments whose
-   text changes; the affected-segment count is shown before and after a save. */
+/* A per-book pronunciation dictionary: word -> how to say it (spoken on every engine), with an
+   optional phonetic spelling (IPA, under Advanced) that only the Kokoro engine uses. Saving
+   re-records only the lines whose text changes; the count is shown before and after a save.
+   Deep link: ?book=<id>&term=<word> (Listen's "Fix pronunciation", audio checks) opens that
+   book with the word waiting in a new row. */
+
+const HEAR_TIP =
+  "▶ plays a sentence with your respelling in the narrator's voice. It's approximate: the recording applies the word the same way, but the voice may read the sentence a little differently.";
+
+const UNCAST_REASON = "cast the voices first to hear it in the narrator's voice";
 
 function EntryRow({
   entry,
   onChange,
   onRemove,
   duplicate,
+  advanced,
+  narrator,
+  sample,
 }: {
   entry: LexiconEntry;
   onChange: (next: LexiconEntry) => void;
   onRemove: () => void;
   duplicate: boolean;
+  advanced: boolean;
+  narrator: VoiceOut | undefined;
+  sample: string | undefined;
 }) {
   const set = (patch: Partial<LexiconEntry>) => onChange({ ...entry, ...patch });
+  const line = hearItLine(entry, sample);
+  const word = entry.term.trim();
   return (
-    <tr>
-      <td>
+    <PlayableRow
+      colSpan={advanced ? 6 : 5}
+      cells={
+        <td>
+          <input
+            className={`taginput ${duplicate ? "border-clip" : ""}`}
+            value={entry.term}
+            placeholder="as written"
+            aria-label="word"
+            onChange={(e) => set({ term: e.target.value })}
+          />
+        </td>
+      }
+      picker={
         <input
-          className={`taginput ${duplicate ? "border-clip" : ""}`}
-          value={entry.term}
-          placeholder="as written"
-          aria-label="term"
-          onChange={(e) => set({ term: e.target.value })}
-        />
-      </td>
-      <td>
-        <input
-          className="taginput"
+          className="taginput w-full"
           value={entry.respelling}
           placeholder="say it like this"
-          aria-label="respelling"
+          aria-label="say it like"
           onChange={(e) => set({ respelling: e.target.value })}
         />
-      </td>
-      <td>
-        <input
-          className="taginput"
-          value={entry.ipa ?? ""}
-          placeholder="IPA (Kokoro only)"
-          aria-label="ipa"
-          onChange={(e) => set({ ipa: e.target.value || null })}
-        />
-      </td>
-      <td>
-        <input
-          className="taginput"
-          value={entry.note ?? ""}
-          placeholder="note"
-          aria-label="note"
-          onChange={(e) => set({ note: e.target.value || null })}
-        />
-      </td>
-      <td className="text-center">
-        <input
-          type="checkbox"
-          checked={entry.case_sensitive}
-          aria-label="case sensitive"
-          title="match the exact capitalization"
-          onChange={(e) => set({ case_sensitive: e.target.checked })}
-        />
-      </td>
-      <td>
-        <button className="key quiet" onClick={onRemove} aria-label="remove">
-          ✕
-        </button>
-      </td>
-    </tr>
+      }
+      // the ▶ speaks a sentence with the respelling swapped in, in the narrator's voice
+      voice={line ? narrator : undefined}
+      text={line}
+      who={`“${word}” in a sentence`}
+      unavailable={!narrator ? UNCAST_REASON : !line ? "type how to say it first" : undefined}
+      after={
+        <>
+          {advanced && (
+            <td>
+              <input
+                className="taginput"
+                value={entry.ipa ?? ""}
+                placeholder="IPA (Kokoro only)"
+                aria-label="phonetic spelling (IPA)"
+                onChange={(e) => set({ ipa: e.target.value || null })}
+              />
+            </td>
+          )}
+          <td>
+            <input
+              className="taginput"
+              value={entry.note ?? ""}
+              placeholder="note"
+              aria-label="note"
+              onChange={(e) => set({ note: e.target.value || null })}
+            />
+          </td>
+          <td className="text-center">
+            <input
+              type="checkbox"
+              checked={entry.case_sensitive}
+              aria-label="match capitals exactly"
+              title="only change the word when its capital letters match exactly"
+              onChange={(e) => set({ case_sensitive: e.target.checked })}
+            />
+          </td>
+          <td>
+            <button className="key quiet" onClick={onRemove} aria-label="remove">
+              ✕
+            </button>
+          </td>
+        </>
+      }
+    />
   );
 }
 
@@ -99,7 +134,13 @@ export function Lexicon() {
   // no ?book=: the book this viewer last worked on (if imported), else the first imported one
   const bookId = useScreenBook(books.data ? ingested.map((b) => b.book_id) : undefined, ingested[0]?.book_id);
 
+  const card = ingested.find((b) => b.book_id === bookId);
+
   const lexicon = useLexicon(bookId);
+  // "hear it in a sentence" speaks in the book's narrator voice — known once the book is cast
+  const assignment = useAssignment(bookId, !!card?.assigned);
+  const voices = useVoices({ enabled: !!assignment.data });
+  const narrator = voices.data?.voices.find((v) => v.voice_id === assignment.data?.narrator_voice_id);
   const save = useSaveLexicon(bookId ?? "");
   const preview = usePreviewLexicon(bookId ?? "");
   const suggestAI = useSuggestRespellings(bookId ?? "");
@@ -107,6 +148,10 @@ export function Lexicon() {
   const [rows, setRows] = useState<LexiconEntry[]>([]);
   const [savedInfo, setSavedInfo] = useState<{ affected: number; total: number } | null>(null);
   const [allowPaid, setAllowPaid] = useState(false);
+  // Advanced (the IPA column): open by default only when an entry already uses it. The
+  // viewer's choice belongs to ONE book: switching books goes back to that default, so a
+  // book whose entries carry IPA never opens with it hidden.
+  const [advancedChoice, setAdvancedChoice] = useState<{ book: string | undefined; open: boolean } | null>(null);
 
   // Re-seed the editable rows whenever the server copy (or the selected book) changes.
   const serverSig = lexicon.data ? entriesSig(lexicon.data.entries) : null;
@@ -143,7 +188,7 @@ export function Lexicon() {
     if (!have) setFocusTermRow((n) => n + 1);
   }, [bookId, wantTerm, lexicon.data]);
   useEffect(() => {
-    if (focusTermRow) tableRef.current?.querySelector<HTMLInputElement>('input[aria-label="respelling"]')?.focus();
+    if (focusTermRow) tableRef.current?.querySelector<HTMLInputElement>('input[aria-label="say it like"]')?.focus();
   }, [focusTermRow]);
   // the hint asks for a respelling only while the word's row is still waiting for one
   const termWaiting = !!wantTerm && rows.some((r) => sameTerm(r.term, wantTerm) && !r.respelling.trim());
@@ -151,6 +196,12 @@ export function Lexicon() {
   const dupes = duplicateTerms(rows);
   const dirty = serverSig !== null && entriesSig(rows) !== serverSig;
   const canSave = dirty && dupes.length === 0 && !save.isPending;
+
+  const advanced =
+    (advancedChoice?.book === bookId ? advancedChoice.open : null) ?? rows.some((r) => !!r.ipa?.trim());
+  // the book's own sentence for a word, when the hard-name finder saw it
+  const sampleFor = (word: string) =>
+    lexicon.data?.suggestions.find((s) => sameTerm(s.term, word))?.sample;
 
   const suggestions = useMemo<SuggestedTerm[]>(() => {
     const have = new Set(rows.map((r) => r.term.trim().toLowerCase()).filter(Boolean));
@@ -167,8 +218,8 @@ export function Lexicon() {
   if (!bookId) {
     return (
       <section className="screen">
-        <h1>Pronunciation</h1>
-        <p className="sub">No ingested books yet. Add one in the Library first.</p>
+        <h1>{SCREENS.lexicon}</h1>
+        <p className="sub">No imported books yet. Add one in the {SCREENS.library} first.</p>
         <NextStep step={ADD_A_BOOK} />
       </section>
     );
@@ -204,11 +255,12 @@ export function Lexicon() {
 
   const aiError = suggestAI.error instanceof ApiError ? suggestAI.error : null;
   const needsPaidConfirm = aiError?.status === 402;
+  const changed = (n: number, total: number) => `${n} of ${total} ${plural("block", total)}`;
 
   return (
     <section className="screen">
       <h1 className="flex items-baseline gap-3.5">
-        Pronunciation
+        {SCREENS.lexicon}
         <TalkSelect
           className="bookpick"
           ariaLabel="book"
@@ -218,9 +270,9 @@ export function Lexicon() {
         />
       </h1>
       <p className="sub">
-        Fix mispronounced names and invented words for this book. A respelling is spoken by every
-        engine; an optional IPA is used only by Kokoro. Editing re-synthesizes only the segments
-        whose text changes.
+        Fix mispronounced names and invented words for this book: type each word as it is written
+        and how to say it. Every voice uses it. Saving re-records only the{" "}
+        {plural("segment", 2)} that contain a changed word, the next time you record.
       </p>
       {termWaiting && (
         <p className="mono -mt-1 mb-3 text-[11px] text-ink-2">
@@ -228,27 +280,26 @@ export function Lexicon() {
         </p>
       )}
 
-      {lexicon.isError && (
-        <div className="refusal">
-          <span className="tag">error</span>
-          <p>{(lexicon.error as Error).message}</p>
-        </div>
-      )}
+      {lexicon.isError && <PlainError error={lexicon.error} title="couldn't load the dictionary" />}
 
       <div className="panel m-0">
         <div className="panel-h">
-          <b>Entries</b>
+          <b>Words</b>
           <span className="tag ml-2">{cleanForSave(rows).length}</span>
         </div>
         <div className="overflow-x-auto px-3.5 pt-2">
           <table ref={tableRef} className="w-full border-collapse">
             <thead>
               <tr className="mono text-left text-[11px] text-ink-3">
-                <th className="px-1.5 py-1 font-semibold">term</th>
-                <th className="px-1.5 py-1 font-semibold">respelling</th>
-                <th className="px-1.5 py-1 font-semibold">ipa (kokoro)</th>
+                <th className="px-1.5 py-1 font-semibold">word</th>
+                <th className="px-1.5 py-1 font-semibold">
+                  <Tip content={HEAR_TIP}>
+                    <span tabIndex={0}>say it like · ▶ approximate</span>
+                  </Tip>
+                </th>
+                {advanced && <th className="px-1.5 py-1 font-semibold">IPA (Kokoro only)</th>}
                 <th className="px-1.5 py-1 font-semibold">note</th>
-                <th className="px-1.5 py-1 font-semibold">case</th>
+                <th className="px-1.5 py-1 font-semibold">{uiTerm("caseSensitive")}</th>
                 <th />
               </tr>
             </thead>
@@ -260,12 +311,15 @@ export function Lexicon() {
                   duplicate={dupes.includes(e.term)}
                   onChange={(next) => update(i, next)}
                   onRemove={() => remove(i)}
+                  advanced={advanced}
+                  narrator={narrator}
+                  sample={sampleFor(e.term)}
                 />
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="sub px-1.5 py-2.5">
-                    no entries yet — add a term below or pick from suggestions
+                  <td colSpan={advanced ? 6 : 5} className="sub px-1.5 py-2.5">
+                    no words yet — add one below or pick a suggested name
                   </td>
                 </tr>
               )}
@@ -275,13 +329,13 @@ export function Lexicon() {
 
         <div className="mt-3 flex flex-wrap items-center gap-2.5 px-3.5 pb-3.5">
           <button className="key quiet" onClick={() => addRow()}>
-            + add term
+            + add a word
           </button>
           <button
             className="key quiet"
             disabled={!dirty || dupes.length > 0 || preview.isPending}
             onClick={() => preview.mutate(cleanForSave(rows))}
-            title="how many segments this change would re-synthesize"
+            title={`how many ${plural("block", 2)} this change would re-record`}
           >
             preview impact
           </button>
@@ -292,41 +346,61 @@ export function Lexicon() {
           <span className="flex-1" />
           <button
             className="key quiet"
+            aria-expanded={advanced}
+            onClick={() => setAdvancedChoice({ book: bookId, open: !advanced })}
+            title="a phonetic spelling (IPA) for words a respelling can't capture — only the Kokoro voices use it"
+          >
+            {advanced ? "hide advanced" : "advanced: IPA"}
+          </button>
+          <button
+            className="key quiet"
             disabled={suggestAI.isPending}
             onClick={onSuggestAI}
-            title="ask the LLM to propose grapheme respellings — for the terms above, or (if none) for the book's likely hard names. Advisory: you still review and save."
+            title="ask the AI to suggest how to say the words above, or (if there are none) the book's likely hard names. Only suggestions: you still review and save."
           >
             {suggestAI.isPending ? "asking AI…" : "✨ suggest with AI"}
           </button>
 
           {dupes.length > 0 && (
-            <span className="mono text-[11px] text-clip">duplicate term: {dupes.join(", ")}</span>
+            <span className="mono text-[11px] text-clip">listed twice: {dupes.join(", ")}</span>
           )}
           {preview.data && !preview.isPending && (
             <span className="mono text-[11px] text-ink-2">
-              would re-synthesize {preview.data.affected_blocks} of {preview.data.total_speakable_blocks} segments
+              would re-record {changed(preview.data.affected_blocks, preview.data.total_speakable_blocks)}
             </span>
           )}
           {savedInfo && !dirty && (
             <span className="mono text-[11px] text-ink-2">
-              saved · {savedInfo.affected} of {savedInfo.total} segments will re-synthesize on next render
+              saved · {changed(savedInfo.affected, savedInfo.total)} will be re-recorded the next time you record
+              {savedInfo.affected > 0 && card?.rendered && (
+                <>
+                  {" · "}
+                  <Link className="link" to={withBook("/render", bookId)}>
+                    re-record the changed chapters on {SCREENS.render} →
+                  </Link>
+                </>
+              )}
             </span>
-          )}
-          {save.isError && (
-            <span className="mono text-[11px] text-clip">{(save.error as Error).message}</span>
           )}
           {suggestAI.data && !suggestAI.isPending && (
-            <span className="mono text-[11px] text-ink-2">
-              {suggestAI.data.suggestions.length} respelling
-              {suggestAI.data.suggestions.length === 1 ? "" : "s"} from {suggestAI.data.provider}/
-              {suggestAI.data.model} — review and save
-            </span>
+            <Tip content={`${suggestAI.data.provider} · ${suggestAI.data.model}`}>
+              <span className="mono text-[11px] text-ink-2" tabIndex={0}>
+                {suggestAI.data.suggestions.length} suggestion
+                {suggestAI.data.suggestions.length === 1 ? "" : "s"} from the AI — review and save
+              </span>
+            </Tip>
           )}
-          {aiError && <span className="mono text-[11px] text-clip">{aiError.message}</span>}
         </div>
+        {save.isError && <PlainError className="mx-3.5 mb-3.5" error={save.error} title="couldn't save" />}
+        {aiError && !needsPaidConfirm && (
+          <PlainError className="mx-3.5 mb-3.5" error={aiError} title="couldn't suggest" />
+        )}
 
         {needsPaidConfirm && (
           <div className="mt-2 flex flex-wrap items-center gap-2 px-3.5 pb-3.5">
+            <p className="w-full text-[12.5px] text-ink" title={aiError?.message}>
+              {explainFailure(failureOf(aiError)).summary} Nothing has been spent yet.
+            </p>
             <label className="mono flex items-center gap-[5px] text-[11px]">
               <input
                 type="checkbox"

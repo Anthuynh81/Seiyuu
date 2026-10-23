@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 
 import { TalkDialog } from "../../components/Dialog";
+import { PlainErrorLine } from "../../components/PlainError";
+import type { FlowFailure } from "../../lib/money";
 import type { WholeBookDetail } from "../../lib/render";
 
 /* -------------------------------------------------- whole-book confirm (one sheet) */
@@ -32,7 +34,7 @@ export function ConfirmFullDialog({
   /** the recording request is in flight */
   busy: boolean;
   /** why the last request was refused, in plain words */
-  error: string | null;
+  error: FlowFailure | null;
   onConfirm: () => void;
   onRemint: () => void;
   onCancel: () => void;
@@ -76,7 +78,7 @@ export function ConfirmFullDialog({
             ))}
         </>
       )}
-      {error && <div className="errline mb-0 mt-3">{error}</div>}
+      {error && <PlainErrorLine as="div" className="errline mb-0 mt-3" error={error.error} fallback={error.lead} />}
     </TalkDialog>
   );
 }

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { ApiError } from "../api/client";
 import {
   useAddBookToSeries,
   useBooks,
@@ -14,6 +13,7 @@ import {
 } from "../api/hooks";
 import type { LinkSuggestion, Series } from "../api/types";
 import { TalkSelect } from "../components/Select";
+import { failureLine, SCREENS } from "../lib/glossary";
 import { applicableCount, confirmedOverrides, defaultConfirmed } from "../lib/series";
 
 /* Series / library voice consistency (F5). Reuse a returning character's voice across the books
@@ -23,11 +23,8 @@ import { applicableCount, confirmedOverrides, defaultConfirmed } from "../lib/se
    confirmed voices into the book's cast via the draft overrides seam; an explicit "save cast to
    series" writes this book's voices back so the series learns its cast progressively. */
 
-function errText(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
-  if (e instanceof Error) return e.message;
-  return String(e);
-}
+/** A refusal in plain words (lib/glossary); unknown ones keep the server's own words. */
+const errText = (e: unknown): string => failureLine(e, "Couldn't do that");
 
 function bookLabel(books: { book_id: string; title: string | null }[], id: string): string {
   return books.find((b) => b.book_id === id)?.title ?? id;
@@ -61,12 +58,12 @@ function CreateSeries({ bookId, disabled }: { bookId: string; disabled: boolean 
           onClick={() =>
             create.mutate({ name: name.trim(), bookId }, { onSuccess: () => setName("") })
           }
-          title={disabled ? "cast this book first (Character Review)" : undefined}
+          title={disabled ? `cast this book first (${SCREENS.review})` : undefined}
         >
           {create.isPending ? "creating…" : "create series"}
         </button>
         {disabled && (
-          <span className="mono text-[11px] text-ink-3">cast this book in Character Review first</span>
+          <span className="mono text-[11px] text-ink-3">cast this book on {SCREENS.review} first</span>
         )}
         {create.error && (
           <span className="mono text-[11px] text-clip">{errText(create.error)}</span>
@@ -132,8 +129,8 @@ function SuggestionsPanel({
 
       {!attributed && (
         <div className="refusal m-3">
-          <span className="tag">stage_prerequisite</span>
-          <p>this book has no attribution yet — run it from Render &amp; Jobs to match characters</p>
+          <span className="tag">speakers not found yet</span>
+          <p>find the speakers in this book on {SCREENS.render} first, then its returning characters can be matched</p>
         </div>
       )}
       {suggestions.isPending && attributed && (
@@ -205,7 +202,7 @@ function SuggestionsPanel({
             </span>
             {applied !== null && !draft.isPending && (
               <span className="mono text-[11px] text-ok">
-                applied · {applied} inherited into this book&apos;s cast (review in Character Review)
+                applied · {applied} inherited into this book&apos;s cast (check it on {SCREENS.review})
               </span>
             )}
             {draft.error && <span className="mono text-[11px] text-clip">{errText(draft.error)}</span>}
@@ -290,7 +287,7 @@ function SeriesDetail({
                 title={
                   assigned
                     ? "fold this book's character voices back into the series links"
-                    : "cast this book first (Character Review)"
+                    : `cast this book first (${SCREENS.review})`
                 }
               >
                 {saveCast.isPending ? "saving…" : "save cast to series"}

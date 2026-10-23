@@ -23,7 +23,8 @@ import {
   type Blocker,
   type Reader,
 } from "../../lib/attribute";
-import { explainJobError } from "../../lib/jobErrors";
+import { SCREENS } from "../../lib/glossary";
+import { explainJobError, failureOf } from "../../lib/jobErrors";
 import { bookHref } from "../../lib/nextStep";
 
 /** "Full cast: find the speakers" — the attribute step, wherever the user meets it (a Library
@@ -99,15 +100,6 @@ function ReaderPicker({
 /** A refusal from the enqueue, in plain words; a 402 gets the explicit paid confirm. */
 function AttributeError({ error, onConfirmPaid }: { error: unknown; onConfirmPaid: () => void }) {
   if (!(error instanceof ApiError)) return null;
-  // the synchronous refusals (Ollama pre-flight 503s, render_active, ...) read in plain words
-  const explained = explainJobError({ code: error.code, message: error.message });
-  if (explained.known) {
-    return (
-      <div className="mt-1.5">
-        <JobErrorText explained={explained} />
-      </div>
-    );
-  }
   if (error.code === "payment_confirmation_required") {
     // never auto-confirmed: the user clicks, and only then is confirm_paid sent
     return (
@@ -118,11 +110,16 @@ function AttributeError({ error, onConfirmPaid }: { error: unknown; onConfirmPai
             confirm the paid run
           </button>
         </p>
-        <p className="mono mt-0.5 text-[10.5px] text-ink-3">{error.message}</p>
       </div>
     );
   }
-  return <p className="mono mt-1.5 text-[11px] text-clip">{error.message}</p>;
+  // every other refusal (Ollama pre-flight 503s, render_active, ...) reads in plain words,
+  // with its recourse (e.g. Cancel recording) and the raw message under Details
+  return (
+    <div className="mt-1.5">
+      <JobErrorText explained={explainJobError(failureOf(error))} />
+    </div>
+  );
 }
 
 function BlockerNote({ blocker, id }: { blocker: Blocker; id: string }) {
@@ -183,7 +180,7 @@ export function AttributePanel({
         <span className="mono text-[11.5px] text-ink-2">
           {book.active_job.state === "queued"
             ? "waiting for the job ahead of it — it starts on its own"
-            : "follow it in the bar at the bottom — Character Review and the read-along unlock when it lands"}
+            : `follow it in the bar at the bottom — ${SCREENS.review} and the read-along unlock when it lands`}
         </span>
       </div>
     );
@@ -304,7 +301,7 @@ function RerunBody({
         <i className="led ok" aria-hidden />
         <b id={headId}>Speakers found</b>
         <Link className="link ml-auto text-xs" to={bookHref("review", book.book_id)}>
-          check them in Character Review
+          check them on {SCREENS.review}
         </Link>
       </div>
       <details className="fine attr-adv" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>

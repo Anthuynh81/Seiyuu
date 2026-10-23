@@ -1,9 +1,11 @@
 import { useRef, useState } from "react";
 
 import { ApiError } from "../../api/client";
-import { useCloneVoice } from "../../api/hooks";
+import { useBooks, useCloneVoice } from "../../api/hooks";
 import { TalkDialog } from "../../components/Dialog";
 import { TalkSelect } from "../../components/Select";
+import { PlainError } from "../../components/PlainError";
+import { explainFailure, failureOf, staleBooks } from "../../lib/glossary";
 import { readStored, writeStored } from "../../lib/storage";
 
 export function CloneDialog({ onClose }: { onClose: () => void }) {
@@ -16,6 +18,12 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
   const [attestedBy, setAttestedBy] = useState(() => readStored("seiyuu.attestedBy") ?? "");
   const err = clone.error instanceof ApiError ? clone.error : null;
   const recloneBlocked = err?.code === "reclone_blocked";
+  // the consent step names the blast radius BEFORE anything is replaced: the recorded books
+  // that flip back to un-recorded (the backend's dry-run scan), by title
+  const books = useBooks();
+  const stale = recloneBlocked ? staleBooks(err!.detail) : [];
+  const titleOf = (id: string) => books.data?.books.find((b) => b.book_id === id)?.title ?? id;
+  const reclone = recloneBlocked ? explainFailure(failureOf(err)) : null;
 
   const submit = (replace = false) => {
     if (!file) return;
@@ -76,14 +84,32 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
       <div className="tag mt-2 normal-case tracking-[0.02em] text-ink-3">
         one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate
       </div>
-      {err && !recloneBlocked && <div className="errline mt-3">{err.message}</div>}
-      {recloneBlocked && (
-        <div className="refusal mt-3">
-          <span className="tag">reclone_blocked</span>
-          <p>
-            {err!.message} —{" "}
+      {clone.error && !recloneBlocked && <PlainError className="mt-3" error={clone.error} title="couldn't clone" />}
+      {reclone && (
+        <div className="refusal mt-3" role="alert">
+          <span className="tag">already cloned</span>
+          <p className="joberr-sum">{reclone.summary}</p>
+          {stale.length > 0 ? (
+            <>
+              <p className="joberr-fix">
+                {stale.length === 1 ? "This recorded book goes" : `These ${stale.length} recorded books go`} back to
+                not recorded, and need re-recording:
+              </p>
+              <ul className="m-0 list-none p-0" aria-label="books that need re-recording">
+                {stale.map((id) => (
+                  <li key={id} className="border-b border-hairline py-1 text-ink-2 last:border-b-0">
+                    <b>{titleOf(id)}</b>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="joberr-fix">No recorded book uses it yet.</p>
+          )}
+          <p className="joberr-fix">
+            Its saved lines are cleared, and any paid lines are billed again when re-recorded.{" "}
             <button className="link" onClick={() => submit(true)}>
-              replace it (purges its cached audio; paid segments re-bill)
+              replace it
             </button>
           </p>
         </div>

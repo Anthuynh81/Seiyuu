@@ -11,7 +11,7 @@ describe("classifyRenderFailure — the quote ticket's state machine", () => {
   });
 
   it("quote_expired WITHOUT a live ticket is a plain error — nothing to re-mint from", () => {
-    expect(classifyRenderFailure(err("quote_expired"), false)).toEqual({ kind: "error", message: "msg" });
+    expect(classifyRenderFailure(err("quote_expired"), false)).toMatchObject({ kind: "error", message: "msg" });
   });
 
   it("cost_drift stamps DRIFT — the user must see the new price, not a silent retry", () => {
@@ -39,14 +39,13 @@ describe("classifyRenderFailure — the quote ticket's state machine", () => {
   });
 
   it("ceiling_exceeded (and any other gate code) surfaces as an error, never a retry", () => {
-    expect(classifyRenderFailure(err("ceiling_exceeded", "over the cap"), true)).toEqual({
-      kind: "error",
-      message: "over the cap",
-    });
+    const e = err("ceiling_exceeded", "over the cap");
+    // the error itself rides along so the screen explains it through the glossary
+    expect(classifyRenderFailure(e, true)).toEqual({ kind: "error", message: "over the cap", error: e });
   });
 
   it("non-ApiError failures degrade to a string error", () => {
-    expect(classifyRenderFailure(new TypeError("network down"), true)).toEqual({
+    expect(classifyRenderFailure(new TypeError("network down"), true)).toMatchObject({
       kind: "error",
       message: "TypeError: network down",
     });

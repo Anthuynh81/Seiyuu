@@ -175,7 +175,7 @@ describe("SuggestCastPanel preview table", () => {
     // nothing differs from the saved cast: apply is a no-op until something changes
     expect(screen.getByRole("button", { name: "nothing to apply" })).toBeDisabled();
 
-    await user.click(screen.getByRole("checkbox", { name: /re-cast the 1 existing \(re-renders their audio\)/ }));
+    await user.click(screen.getByRole("checkbox", { name: /re-cast the 1 existing \(their lines are recorded again\)/ }));
     expect(within(rowOf(/Bob/)).getByText("will change")).toBeInTheDocument();
     expect(within(rowOf(/Alice/)).getByText("keeps your pick")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "apply cast" })).toBeEnabled();

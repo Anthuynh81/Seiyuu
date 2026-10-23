@@ -7,6 +7,7 @@ import {
   cleanForSave,
   duplicateTerms,
   entriesSig,
+  hearItLine,
 } from "./lexicon";
 
 const entry = (over: Partial<LexiconEntry>): LexiconEntry => ({ ...blankEntry(), ...over });
@@ -69,5 +70,39 @@ describe("applyRespellings", () => {
   it("returns rows unchanged when there are no suggestions", () => {
     const rows = [entry({ term: "A", respelling: "B" })];
     expect(applyRespellings(rows, [])).toEqual(rows);
+  });
+});
+
+describe("hearItLine", () => {
+  const e = (term: string, respelling: string, case_sensitive = false) => ({
+    term,
+    respelling,
+    ipa: null,
+    note: null,
+    case_sensitive,
+  });
+
+  it("swaps every whole-word occurrence into the book's own sentence", () => {
+    expect(hearItLine(e("Kvothe", "KVOH-thee"), "Kvothe met kvothe's friend, not Kvothen.")).toBe(
+      "KVOH-thee met KVOH-thee's friend, not Kvothen.",
+    );
+  });
+
+  it("respects match capitals exactly", () => {
+    expect(hearItLine(e("Kvothe", "KVOH-thee", true), "Kvothe and kvothe.")).toBe("KVOH-thee and kvothe.");
+  });
+
+  it("falls back to a frame sentence when the book has none (or it lacks the word)", () => {
+    expect(hearItLine(e("Elodin", "EL-oh-din"))).toBe("This is how you say EL-oh-din.");
+    expect(hearItLine(e("Elodin", "EL-oh-din"), "Nothing here.")).toBe("This is how you say EL-oh-din.");
+  });
+
+  it("treats regex characters in a word literally", () => {
+    expect(hearItLine(e("C.J.", "see jay"), "Ask C.J. now.")).toBe("Ask see jay now.");
+  });
+
+  it("is undefined until the row has a word and a respelling", () => {
+    expect(hearItLine(e("Kvothe", " "))).toBeUndefined();
+    expect(hearItLine(e(" ", "x"))).toBeUndefined();
   });
 });

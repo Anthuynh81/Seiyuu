@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { ApiError } from "../../api/client";
+import { failureLine } from "../../lib/glossary";
 import { useCreateVoice, useKokoroPresets } from "../../api/hooks";
 import type { VoiceCreate, VoiceOut } from "../../api/types";
 import { TalkDialog } from "../../components/Dialog";
@@ -53,7 +53,7 @@ export function AddVoiceDialog({
       { preset_id: "af_nicole", weight: 40 },
     ],
   );
-  const error = create.error instanceof ApiError ? create.error.message : create.error?.message;
+  const error = create.error ? failureLine(create.error, "Couldn't add the voice") : undefined;
 
   const demo = useDemoPlayer();
   const catalog =

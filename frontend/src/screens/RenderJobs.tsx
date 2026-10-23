@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 
-import { ApiError } from "../api/client";
 import {
   useBook,
   useBookJobs,
@@ -21,11 +20,13 @@ import type { RenderMode } from "../api/types";
 import { useScreenBook } from "../app/currentBook";
 import { TalkDialog } from "../components/Dialog";
 import { NextStep } from "../components/NextStep";
+import { PlainError } from "../components/PlainError";
 import { TalkSelect } from "../components/Select";
 import { StaleAudioBanner } from "../components/StaleAudio";
+import { failureLine, SCREENS } from "../lib/glossary";
 import { stepName } from "../lib/jobCopy";
 import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
-import { classifyRenderFailure } from "../lib/money";
+import { classifyRenderFailure, type FlowFailure } from "../lib/money";
 import { ADD_A_BOOK, RENDER_ANCHOR } from "../lib/nextStep";
 import {
   choiceForVoice,
@@ -181,7 +182,7 @@ export function RenderJobs() {
         onSuccess: (job) => setChain({ watch: job.job_id, queue: rest }),
         onError: (e) => {
           setChain(null);
-          setChainNote(`stopped before ${MAKES[next]}: ${e instanceof ApiError ? e.message : String(e)}`);
+          setChainNote(`stopped before ${MAKES[next]}: ${failureLine(e)}`);
         },
       },
     );
@@ -231,7 +232,7 @@ export function RenderJobs() {
   const [ticket, setTicket] = useState<TicketState>({ kind: "none" });
   // The one whole-book sheet (free: its own key; paid: the live ticket inside it).
   const [sheet, setSheet] = useState<WholeBookDetail | null>(null);
-  const [flowError, setFlowError] = useState<string | null>(null);
+  const [flowError, setFlowError] = useState<FlowFailure | null>(null);
   // A quote prices exactly one setup. ANY change to what would be recorded — the book, mode,
   // chapters, emotion, a forced re-record, the narrator or speed — leaves a live ticket
   // describing different work: drop it (and any open sheet) so the user gets a fresh price.
@@ -290,7 +291,7 @@ export function RenderJobs() {
         },
         onError: (e) => {
           if (priced !== pricingNow.current) return;
-          setFlowError(e instanceof ApiError ? e.message : String(e));
+          setFlowError({ error: e, lead: "Couldn't get the price" });
         },
       },
     );
@@ -335,7 +336,7 @@ export function RenderJobs() {
               }
               break;
             case "error":
-              setFlowError(action.message);
+              setFlowError({ error: action.error, lead: "Couldn't start the recording" });
           }
         },
       },
@@ -363,12 +364,12 @@ export function RenderJobs() {
   );
 
   if (books.isPending) return <section className="screen"><div className="loadline">reading the shelf…</div></section>;
-  if (books.isError) return <section className="screen"><h1>Render &amp; Jobs</h1><div className="errline">{books.error.message}</div></section>;
+  if (books.isError) return <section className="screen"><h1>{SCREENS.render}</h1><PlainError error={books.error} title="couldn't load your books" /></section>;
   if (!bookId || !books.data?.books.length) {
     return (
       <section className="screen">
-        <h1>Render &amp; Jobs</h1>
-        <p className="sub">No books yet. Add one in the Library first.</p>
+        <h1>{SCREENS.render}</h1>
+        <p className="sub">No books yet. Add one in the {SCREENS.library} first.</p>
         <NextStep step={ADD_A_BOOK} />
       </section>
     );
@@ -390,7 +391,7 @@ export function RenderJobs() {
   return (
     <section className="screen">
       <h1 className="flex items-baseline gap-3.5">
-        Render &amp; Jobs
+        {SCREENS.render}
         <TalkSelect
           className="bookpick"
           ariaLabel="book"
@@ -402,7 +403,7 @@ export function RenderJobs() {
       <p className="sub">
         Free recordings start with one click; paid voices always show their exact price first.
       </p>
-      {book.isError && <div className="errline">{book.error.message}</div>}
+      {book.isError && <PlainError error={book.error} title="couldn't load this book" />}
       <StageRail
         status={status}
         activeJob={book.data?.active_job ?? null}
@@ -424,7 +425,7 @@ export function RenderJobs() {
           <div className="modewrap" id={RENDER_ANCHOR.record} tabIndex={-1} role="group" aria-label="how it sounds">
             <span className="tag">version</span>
             <button className={`chap ${mode === "multivoice" ? "on" : ""}`} disabled={!status?.assigned}
-              title={status?.assigned ? "every character gets their own voice" : "cast the voices first (Character Review)"}
+              title={status?.assigned ? "every character gets their own voice" : `cast the voices first (${SCREENS.review})`}
               onClick={() => setModeChoice("multivoice")}>
               {MODE_LABEL.multivoice}
             </button>
@@ -555,7 +556,7 @@ export function RenderJobs() {
             </div>
           )}
           {estimate.isPending && ready && <div className="loadline">estimating against the saved audio…</div>}
-          {estimate.isError && <div className="errline">{estimate.error.message}</div>}
+          {estimate.isError && <PlainError error={estimate.error} title="couldn't estimate" />}
           {estimate.data && (
             <>
               <EstimateCard
@@ -624,7 +625,7 @@ export function RenderJobs() {
             )}
             {chainNote && <div className="mono mx-3.5 my-2 text-[11px] text-ink-2">{chainNote}</div>}
             {(assemble.error || master.error) && !chainNote && (
-              <div className="errline m-3">{(assemble.error ?? master.error)?.message}</div>
+              <PlainError className="m-3" error={assemble.error ?? master.error} title="couldn't start" />
             )}
             {/* the version Listen plays (and the .m4b is built from), beside its downloads */}
             {summary.data && (

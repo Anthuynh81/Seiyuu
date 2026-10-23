@@ -9,7 +9,10 @@ import { KIND_STAGE, STAGES } from "../api/types";
 import { TalkDialog } from "../components/Dialog";
 import { JobErrorText } from "../components/JobErrorText";
 import { NextStep } from "../components/NextStep";
+import { PlainError } from "../components/PlainError";
 import { SetupChecklist } from "../components/SetupChecklist";
+import { failureLine, JOB_DOING } from "../lib/glossary";
+import { engineName } from "../lib/health";
 import { failedStepLine, liveJobLine } from "../lib/jobCopy";
 import { explainJobError, unresolvedFailure } from "../lib/jobErrors";
 import { ADD_ANCHOR, nextStep } from "../lib/nextStep";
@@ -142,7 +145,9 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
             </button>
           ) : paid ? (
             <button className="key danger" disabled={del.isPending} onClick={() => run(true)}>
-              {del.isPending ? "deleting…" : `discard ${paid.paid_segment_count} paid segment(s) & delete`}
+              {del.isPending
+                ? "deleting…"
+                : `discard ${paid.paid_segment_count} paid line${paid.paid_segment_count === 1 ? "" : "s"} & delete`}
             </button>
           ) : (
             <button className="key danger" disabled={del.isPending} onClick={() => run(false)}>
@@ -154,17 +159,17 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
     >
       {conflict ? (
         <div className="refusal">
-          <span className="tag">conflicting_job</span>
+          <span className="tag">busy</span>
           <p>
-            a {conflict.kind} job is {conflict.state} for this book — cancel it in the transport bar below, then
-            delete.
+            {JOB_DOING[conflict.kind] ?? "A job"} is {conflict.state === "queued" ? "waiting its turn" : "running"} for
+            this book — cancel it in the bar at the bottom, then delete.
           </p>
         </div>
       ) : partial ? (
         <div className="refusal">
-          <span className="tag">partial_delete</span>
+          <span className="tag">partly deleted</span>
           <p>
-            the delete only partly completed — these paths survived and may need a retry or a manual sweep:
+            the delete only partly completed — these files survived and may need a retry or removing by hand:
             <br />
             {partial.survivors.map((s) => (
               <span key={s} className="mono block text-caution">{s}</span>
@@ -174,22 +179,23 @@ function DeleteBookDialog({ book, onClose }: { book: BookCardT; onClose: () => v
       ) : paid ? (
         <>
           <p className="mb-2.5 mt-0 text-ink-2">
-            <b className="text-clip">{paid.paid_segment_count}</b> paid cloud segment(s) were rendered
-            for <b>{title}</b> — deleting the book discards them, and reproducing them costs real money
+            <b className="text-clip">{paid.paid_segment_count}</b> paid cloud line
+            {paid.paid_segment_count === 1 ? " was" : "s were"} recorded for <b>{title}</b> — deleting the book
+            discards them, and recording them again costs real money
             {paid.estimated_usd !== null && ` (~$${paid.estimated_usd.toFixed(2)})`}.
           </p>
           <div className="mono text-[11px] text-ink-3">
-            engines: {paid.engines.join(", ") || "—"}
+            voice engines: {paid.engines.map(engineName).join(", ") || "—"}
             {paid.paid_voice_ids.length > 0 && ` · voices: ${paid.paid_voice_ids.join(", ")}`}
           </div>
         </>
       ) : (
         <p className="m-0 text-ink-2">
-          Permanently delete <b>{title}</b> — its ingest, attribution, casting, and any rendered/assembled audio.
-          This cannot be undone.
+          Permanently delete <b>{title}</b> — the imported text, the speakers found, the casting, and every
+          recording and audiobook file made from it. This cannot be undone.
         </p>
       )}
-      {otherErr && <div className="errline mt-3">{otherErr.message}</div>}
+      {otherErr && <PlainError className="mt-3" error={otherErr} title="couldn't delete" />}
     </TalkDialog>
   );
 }
@@ -341,7 +347,7 @@ function UploadSlot({ books, jobs }: { books: BookCardT[] | undefined; jobs: Job
   const submit = (file: File | undefined) => {
     if (file) ingest.mutate(file);
   };
-  const error = ingest.error instanceof ApiError ? ingest.error.message : ingest.error?.message;
+  const error = ingest.error ? failureLine(ingest.error, "Couldn't add the book") : undefined;
   // one plain line for screen readers, in a region that is always mounted so every change is
   // announced; the panel with its link and disclosure sits outside it
   const outcome = ingest.isPending
@@ -423,7 +429,7 @@ export function Library() {
         position on the signal path. Progress lives in the transport bar — cards only say what stage owns the book.
       </p>
       {books.isPending && <div className="loadline">reading the shelf…</div>}
-      {books.isError && !backendDown && <div className="errline">{books.error.message}</div>}
+      {books.isError && !backendDown && <PlainError error={books.error} title="couldn't load your books" />}
       {(empty || backendDown) && (
         <div className="panel">
           <div className="panel-h">
