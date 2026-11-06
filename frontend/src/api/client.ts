@@ -34,6 +34,31 @@ function backendDown(status: number, cause: string): ApiError {
   return new ApiError(status, BACKEND_DOWN, BACKEND_DOWN_MESSAGE, { cause });
 }
 
+/** Code for an expired Cloudflare Access login on the hosted app. Only hosting can cause it:
+    the backend has no other 401, and running locally needs no login. */
+export const SIGNED_OUT = "signed_out";
+
+export const SIGNED_OUT_MESSAGE = "Your sign-in has expired. Sign in again to keep using Seiyuu.";
+
+let signedOut = false;
+const signedOutListeners = new Set<() => void>();
+
+function setSignedOut(value: boolean): void {
+  if (signedOut === value) return;
+  signedOut = value;
+  for (const listener of signedOutListeners) listener();
+}
+
+/** For useSyncExternalStore: any request can discover the expiry, and one notice answers them all. */
+export function subscribeSignedOut(listener: () => void): () => void {
+  signedOutListeners.add(listener);
+  return () => signedOutListeners.delete(listener);
+}
+
+export function isSignedOut(): boolean {
+  return signedOut;
+}
+
 // The backend's catch-all handler answers EVERY failure with the JSON envelope, so a
 // 500/502/504 whose body is empty or not JSON came from the dev proxy (Vite answers 500
 // with an empty body when uvicorn is down), not from Seiyuu.
@@ -80,12 +105,19 @@ function isAbort(err: unknown, init?: RequestInit): boolean {
 export async function apiWithStatus<T>(path: string, init?: RequestInit): Promise<{ data: T; status: number }> {
   let res: Response;
   try {
-    res = await fetch(path, init);
+    // Unfollowed: an expired login redirects to Cloudflare's site, and following that fails
+    // exactly like a backend that's off. No API route redirects.
+    res = await fetch(path, { redirect: "manual", ...init });
   } catch (err) {
     // a superseded query's abort is not an outage — let react-query see the real abort
     if (isAbort(err, init)) throw err;
     throw backendDown(0, err instanceof Error ? err.message : String(err));
   }
+  if (res.type === "opaqueredirect" || res.status === 401) {
+    setSignedOut(true);
+    throw new ApiError(401, SIGNED_OUT, SIGNED_OUT_MESSAGE);
+  }
+  if (res.ok) setSignedOut(false); // signed back in, say in another tab
   if (!res.ok) throw await toApiError(res);
   if (res.status === 204) return { data: undefined as T, status: res.status };
   return { data: (await res.json()) as T, status: res.status };

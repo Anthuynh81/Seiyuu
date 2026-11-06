@@ -78,7 +78,7 @@ export function NavRail() {
       </div>
       <div className="foot">
         <HealthPill />
-        <div>api /api → 127.0.0.1:8000</div>
+        <div>api /api → {import.meta.env.DEV ? "127.0.0.1:8000" : window.location.host}</div>
       </div>
     </nav>
   );

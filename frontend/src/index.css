@@ -557,6 +557,7 @@ details.fine summary:hover { color: var(--tungsten); }
 .failbanner-top b { font-size: 12.5px; font-weight: 600; }
 .failbanner-top .key { margin-left: auto; padding: 2px 10px; font-size: 11px; }
 .failbanner .joberr { margin-top: 4px; }
+.signedout { margin: 0 0 16px; max-width: 1200px; }
 
 /* next step: the one primary action (a real link styled as a key) and its plain reason */
 .nextstep { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
