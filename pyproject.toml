@@ -36,6 +36,7 @@ dependencies = [
     "pymupdf>=1.28.0",
     "rapidfuzz>=3.9",
     "pyloudnorm>=0.2.0",
+    "pyjwt[crypto]>=2.15.1",
 ]
 
 [project.scripts]

@@ -21,6 +21,7 @@ from seiyuu.cli import (  # noqa: E402, F401
     ingest,
     lexicon,
     render,
+    serve,
     voices,
 )
 

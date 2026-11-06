@@ -131,7 +131,8 @@ Backend `src/seiyuu/`:
 - `api/routes/` — one router per surface: books, render (estimate/quote/render/
   words/audio), jobs, review (characters/segments/edits), voices, series, lexicon,
   engines, system; shared guards in `common.py`. ALL response models live in
-  `api/schemas.py`; the paid-cost gate in `api/money.py`.
+  `api/schemas.py`; the paid-cost gate in `api/money.py`. Hosting: `api/access.py` (Cloudflare
+  Access token check), `api/origin.py` (cross-site refusal), `api/frontend.py` (serves the UI).
 - Stages: `ingest/` (epub.py, pdf.py + shared core) · `attribute/` (pipeline, spans,
   aliases, providers/) · `normalize/` (profiles, lexicon; normalize_text is memoized)
   · `render/` (pipeline, cache=SegmentKey, models=RenderManifest, gate, align) ·
@@ -147,7 +148,7 @@ Frontend `frontend/src/`:
   money, scope, words). `components/` = shared primitives.
 Test map: API routes → `tests/test_api_m6b*.py` (`test_api_m6b6.py` pins the exact
 route list — new endpoints must be added there); read-along words →
-`test_api_segment_words.py`; CLI → `test_cli*.py`; each stage → `test_<stage>*.py`;
+`test_api_segment_words.py`; hosting → `test_api_hosting.py`; CLI → `test_cli*.py`; each stage → `test_<stage>*.py`;
 frontend → co-located `*.test.tsx`.
 
 ## Commands
@@ -156,6 +157,7 @@ frontend → co-located `*.test.tsx`.
 - `ollama serve` / `ollama pull <model>` — local LLM management (setup docs)
 - `uv run uvicorn seiyuu.api.main:app --reload` — backend (M6+)
 - `npm run dev` (in frontend/) — UI dev server (M6+)
+- `uv run seiyuu serve` — API + built UI on 127.0.0.1:8767, for the Cloudflare Tunnel (README)
 
 ## Workflow Preferences
 - Work milestone by milestone per SPEC.md; don't start later milestones early.

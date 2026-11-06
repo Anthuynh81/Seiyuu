@@ -44,6 +44,13 @@ def envelope(
     )
 
 
+def http_exception_envelope(exc: StarletteHTTPException) -> JSONResponse:
+    # Framework-raised 404 (unmatched path) / 405 (wrong method) must keep the
+    # envelope contract too; headers pass through so 405's Allow survives.
+    code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
+    return envelope(exc.status_code, code, str(exc.detail), headers=exc.headers)
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
@@ -75,10 +82,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        # Framework-raised 404 (unmatched path) / 405 (wrong method) must keep the
-        # envelope contract too; headers pass through so 405's Allow survives.
-        code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
-        return envelope(exc.status_code, code, str(exc.detail), headers=exc.headers)
+        return http_exception_envelope(exc)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

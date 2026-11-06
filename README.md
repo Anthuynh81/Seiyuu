@@ -202,6 +202,30 @@ endpoints). To reach it from another device on your LAN (e.g. the Listen screen 
 tablet), add that machine's address in `.env`:
 `API_ALLOWED_HOSTS=localhost,127.0.0.1,testserver,192.168.1.20`
 
+### Hosting through Cloudflare Tunnel
+
+`seiyuu serve` runs the API and the built UI together on `127.0.0.1:8767` (change it with
+`API_PORT` or `--port`; the host can't be changed). Build the UI first with
+`npm --prefix frontend run build`. The app is only reachable while this command is running.
+
+To put it on a public hostname, on a PC that already runs a tunnel:
+
+1. Create a Cloudflare Access app for the hostname, with an Allow policy listing specific
+   emails. Everyone on the list shares one library and can spend any configured paid API key.
+2. Add these to `.env`, then restart. Set all three or none: a partial set stops the app from
+   starting, and until all three are set the public hostname is refused.
+   ```
+   API_PUBLIC_HOST=seiyuu.example.com
+   API_ACCESS_TEAM=<the part before .cloudflareaccess.com>
+   API_ACCESS_AUD=<that Access app's Application Audience tag>
+   ```
+3. Add a route on the tunnel from the hostname to `http://localhost:8767`.
+
+Every request through the tunnel needs a valid Access token (`api/access.py`), including the
+UI's own files and any future WebSocket. Requests from this PC don't. Requests from another
+site are refused either way (`api/origin.py`). Keep the API docs at `/docs` local: they don't
+answer on the public hostname.
+
 The UI has seven screens: **Library** (books, status, estimates), **Listen** (real-audio
 read-along with a word-karaoke highlight and chapter auto-advance), **Character Review**
 (reassign / rename / merge the cast, casting, spoiler-safe), **Pronunciation** (the per-book
