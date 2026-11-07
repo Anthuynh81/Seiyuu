@@ -162,6 +162,39 @@ reclaimed by process death and the single-GPU discipline holds. Once configured,
 `--engine indextts2` (or the Voice Studio engine picker) and render as usual; output rides the same
 whisper validation and per-segment cost/cache paths as every other engine.
 
+#### Qwen3-TTS (optional)
+
+Qwen3-TTS 1.7B (Apache-2.0) clones a voice from a short clip and can also **design** one from a
+written description. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
+2.8/cu128 and transformers 5.15.1), through [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts):
+
+```bash
+mkdir qwen3-tts && cd qwen3-tts
+uv venv --python 3.11
+# constraints.txt pins torch==2.8.0+cu128, torchaudio==2.8.0+cu128 and transformers==5.15.1
+# (transformers 5.22 breaks the speech tokenizer: "property upsample ... has no setter")
+uv pip install --python .venv\Scripts\python.exe -c constraints.txt --extra-index-url https://download.pytorch.org/whl/cu128 faster-qwen3-tts
+.venv\Scripts\python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
+hf download Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --local-dir models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+```
+
+Then in `.env`: `QWEN3TTS_WORKER_PYTHON=...\qwen3-tts\.venv\Scripts\python.exe` and
+`QWEN3TTS_MODELS_DIR=...\qwen3-tts\models`. `QWEN3TTS_BACKEND=stock` falls back to the reference
+`qwen_tts` package (no CUDA graphs) if the fast path misbehaves. A voice is cloned in Qwen's ICL
+mode when its `meta.json` binds a transcript (`settings.qwen3tts.ref_text_digest`, a digest of
+`reference.wav` plus the `reference.txt` beside it, so the transcript is part of the segment cache
+key); otherwise from the speaker embedding alone. `scripts/design_voices.py` writes both. A
+`reference.txt` dropped in by hand is ignored, and one that no longer matches its digest fails
+the render loudly rather than mixing clone modes in one book.
+
+To design voices from written descriptions (nothing enters your voice library; the staged clips
+land under `--out`):
+
+```bash
+uv run python scripts/design_voices.py cast.json --out output/designed/<book>
+```
+
 ## Usage
 
 ### CLI (the whole pipeline)

@@ -158,8 +158,12 @@ class SubprocessTransport:
         cwd: str | None,
         boot_timeout: float,
         name: str = "indextts2",
+        protocol: int | None = None,
     ) -> None:
         self._name = name  # engine id in error messages (the Qwen3-TTS worker reuses this class)
+        # When set, the boot handshake must announce exactly this protocol version: a worker file
+        # from another checkout (or an older env) is refused instead of misreading requests.
+        self._protocol = protocol
         self._proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -205,6 +209,11 @@ class SubprocessTransport:
         reply = self._read(timeout)
         if reply.get("event") != "ready":
             raise WorkerError(f"{self._name} worker did not announce readiness: {reply}")
+        if self._protocol is not None and reply.get("protocol") != self._protocol:
+            raise WorkerError(
+                f"{self._name} worker speaks protocol {reply.get('protocol')!r}, "
+                f"expected {self._protocol}: the worker file and the adapter are out of step"
+            )
 
     def _read(self, timeout: float) -> dict[str, Any]:
         try:

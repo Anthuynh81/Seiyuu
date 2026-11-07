@@ -15,15 +15,21 @@ Output/determinism truths (checked against the installed faster-qwen3-tts / qwen
 - 24 kHz mono float out of the codec -> written as 16-bit PCM; already canonical, no resample.
 - autoregressive -> ``requires_validation`` (it can drop, repeat or add words: laughs, fillers).
 - no API takes a seed and every step samples, so the worker seeds torch right before each call.
-- ICL clone (reference + its transcript ``reference.txt``) when the voice has a transcript, else
-  x-vector clone (speaker embedding only). Either way ``non_streaming_mode=True`` (prefill the
-  whole line): the clone default feeds text step by step and drifts toward rushing.
+- ICL clone (reference + its transcript ``reference.txt``) when the voice's meta BINDS a
+  transcript (``settings["qwen3tts"]["ref_text_digest"]``, a digest of the clip's bytes + the
+  text), else x-vector clone (speaker embedding only). The digest rides the segment
+  settings_hash, so switching mode or transcript always changes the SegmentKey; a reference.txt
+  the meta doesn't vouch for is ignored, and one that no longer matches fails loudly. Either way
+  ``non_streaming_mode=True`` (prefill the whole line): the clone default feeds text step by step
+  and drifts toward rushing.
 - a line wrapped in quote marks is sent without them (upstream issue #80: those lines are the
   ones most often spoken in the wrong voice); the whisper check still compares the full text.
 - no emotion knob: ``map_emotion`` yields nothing for this engine (neutral, cache-stable).
 - ``model_version`` fingerprints the Base checkpoint dir (computed WITHOUT spawning the worker,
   so the offline cost estimate builds the same SegmentKey the render will), plus the precision,
-  the backend when it is not the default, and the language when it is not English.
+  the worker's generation-cap recipe, the backend when it is not the default, the language when
+  it is not English and the KV-cache size when it is not 2048 (the cap that cuts long lines
+  depends on it).
 
 OOM/death safety mirrors IndexTTS-2: a reply flagged ``oom`` (or a dead/hung/timed-out worker)
 triggers a synchronous kill + restart + retry before a loud SynthesisError.
@@ -51,7 +57,14 @@ from seiyuu.engines.indextts2_engine import (
     WorkerTransport,
 )
 
+# Importing the worker MODULE is safe (its top level is stdlib only; it spawns nothing): the cap
+# recipe and protocol version then have one source of truth.
+from seiyuu.engines.qwen3tts_worker import CAP_RECIPE, PROTOCOL_VERSION
+
 QWEN3TTS_SAMPLE_RATE = 24000  # mirrored from the worker so cost/estimate never spawn it
+DEFAULT_MAX_SEQ_LEN = 2048
+# meta.settings["qwen3tts"] key binding reference.txt to the voice (see reference_text_digest).
+REF_TEXT_DIGEST_KEY = "ref_text_digest"
 BASE_CHECKPOINT = "Qwen3-TTS-12Hz-1.7B-Base"
 DESIGN_CHECKPOINT = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 QWEN3TTS_BACKENDS = ("fast", "stock")
@@ -70,8 +83,17 @@ def qwen3tts_config(cfg: Any) -> dict[str, Any]:
         "models_dir": getattr(cfg, "qwen3tts_models_dir", None),
         "backend": getattr(cfg, "qwen3tts_backend", "fast"),
         "language": getattr(cfg, "qwen3tts_language", "English"),
-        "max_seq_len": getattr(cfg, "qwen3tts_max_seq_len", 2048),
+        "max_seq_len": getattr(cfg, "qwen3tts_max_seq_len", DEFAULT_MAX_SEQ_LEN),
     }
+
+
+def reference_text_digest(reference_sha256: str, text: str) -> float:
+    """The value a voice's ``meta.settings["qwen3tts"]["ref_text_digest"]`` holds to clone in ICL
+    mode: a digest of the reference clip's bytes AND its transcript, so the transcript is part of
+    the segment settings_hash and is bound to the exact clip it describes. 48 bits, so it is exact
+    as a float (VoiceMeta.settings holds floats)."""
+    digest = hashlib.sha256(f"{reference_sha256}\n{text.strip()}".encode()).hexdigest()
+    return float(int(digest[:12], 16))
 
 
 # --- weights fingerprint (offline; no worker, no SDK) ----------------------------------------
@@ -131,7 +153,7 @@ def weights_fingerprint(model_dir: Path | str | None) -> str:
 class Qwen3TTSEngine(TTSEngine):
     engine_id = "qwen3tts"
     requires_validation = True  # autoregressive talker: output must pass whisper
-    clones_from_library = True  # renders from voices/{voice_id}/reference.wav (+ reference.txt)
+    clones_from_library = True  # renders from voices/{voice_id}/reference.wav (+ bound .txt)
 
     def __init__(
         self,
@@ -212,16 +234,20 @@ class Qwen3TTSEngine(TTSEngine):
     @property
     def model_version(self) -> str:
         # Keyed to the on-disk Base checkpoint (what renders), NOT the pip version. bf16 is the
-        # only precision this adapter runs. The stock backend is not bit-exact with the CUDA-graph
-        # fast path, and the language changes the prompt, so both mark the version when they
-        # differ from the defaults. Memoized: the fingerprint walks the weights dir.
+        # only precision this adapter runs. The generation cap decides where a long line is cut,
+        # so its recipe is always part of the version. The stock backend is not bit-exact with
+        # the CUDA-graph fast path, the language changes the prompt and the KV-cache size bounds
+        # the cap, so each marks the version when it differs from the default. Memoized: the
+        # fingerprint walks the weights dir.
         if self._model_version is None:
             base_dir = self._models_dir / BASE_CHECKPOINT if self._models_dir else None
-            version = f"{weights_fingerprint(base_dir)}-bf16"
+            version = f"{weights_fingerprint(base_dir)}-bf16-cap{CAP_RECIPE}"
             if self._backend != "fast":
                 version += f"-{self._backend}"
             if self._language.lower() != "english":
                 version += f"-{self._language.lower()}"
+            if self._max_seq_len != DEFAULT_MAX_SEQ_LEN:
+                version += f"-kv{self._max_seq_len}"
             self._model_version = version
         return self._model_version
 
@@ -290,7 +316,12 @@ class Qwen3TTSEngine(TTSEngine):
         env["TRANSFORMERS_OFFLINE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         return SubprocessTransport(
-            argv, env=env, cwd=None, boot_timeout=self._load_timeout, name="qwen3tts"
+            argv,
+            env=env,
+            cwd=None,
+            boot_timeout=self._load_timeout,
+            name="qwen3tts",
+            protocol=PROTOCOL_VERSION,
         )
 
     def _ensure_started(self) -> WorkerTransport:
@@ -333,16 +364,34 @@ class Qwen3TTSEngine(TTSEngine):
             self._ref_hashes[key] = digest
         return digest
 
-    def _reference_text(self, reference: Path) -> str | None:
-        """The reference clip's exact transcript (``reference.txt`` beside it), or None for
-        x-vector mode. A transcript OLDER than the clip is ignored: re-cloning a voice replaces
-        reference.wav but knows nothing of reference.txt, and ICL with the wrong transcript is
-        worse than no transcript. (The design script writes the clip first, then its text.)"""
-        path = reference.with_name("reference.txt")
-        if not path.is_file() or path.stat().st_mtime_ns < reference.stat().st_mtime_ns:
+    def _reference_text(self, voice: str, reference: Path, settings: dict[str, Any]) -> str | None:
+        """The reference clip's exact transcript (``reference.txt`` beside it) for ICL mode, or
+        None for x-vector mode.
+
+        ICL only when the voice's settings carry ``ref_text_digest`` (it rides the SegmentKey's
+        settings_hash, so the cache always sees the mode and the transcript). Without one, a
+        reference.txt is ignored: dropping one in by hand would otherwise switch the mode under
+        an unchanged key, and a book would mix cached x-vector lines with new ICL ones. With
+        one, the transcript must match it for THIS clip; a missing, edited or stale (re-cloned
+        clip) transcript fails loudly, because ICL with the wrong transcript is worse than none
+        and silently dropping to x-vector would again change the output under the same key."""
+        bound = settings.get(REF_TEXT_DIGEST_KEY)
+        if bound is None:
             return None
-        text = path.read_text(encoding="utf-8").strip()
-        return text or None
+        path = reference.with_name("reference.txt")
+        text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+        if not text:
+            raise SynthesisError(
+                f"qwen3tts: voice {voice!r} binds a reference transcript but {path} is missing "
+                "or empty; restage the voice (scripts/design_voices.py) or re-clone it"
+            )
+        if reference_text_digest(self._reference_sha256(reference), text) != float(bound):
+            raise SynthesisError(
+                f"qwen3tts: voice {voice!r}: {path.name} does not match the transcript its "
+                "meta binds (edited by hand, or reference.wav changed); restage the voice "
+                "(scripts/design_voices.py) or re-clone it"
+            )
+        return text
 
     def _run(self, message: dict[str, Any], checkpoint: str, what: str) -> tuple[np.ndarray, int]:
         """Send one generation request; on a worker OOM/death/timeout kill + restart it (fresh
@@ -389,7 +438,7 @@ class Qwen3TTSEngine(TTSEngine):
             "text": text,  # the worker strips a wrapping quote pair before the model sees it
             "reference_wav": str(reference),
             "reference_sha256": self._reference_sha256(reference),
-            "ref_text": self._reference_text(reference),  # None -> x-vector clone
+            "ref_text": self._reference_text(voice, reference, settings),  # None -> x-vector
             "seed": settings.get("seed"),
         }
         # Whitelisted per-voice tunables; OMITTED when a voice sets none.

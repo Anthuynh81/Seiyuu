@@ -42,7 +42,8 @@ import sys
 import traceback
 from typing import Any, TextIO
 
-# Bumped when the request/reply shape changes; the adapter checks it at boot.
+# Bumped when the request/reply shape changes. The adapter refuses a worker that announces any
+# other version at boot (SubprocessTransport(protocol=...)).
 PROTOCOL_VERSION = 1
 
 # The 12 Hz codec decodes to 24 kHz (1920 samples per frame -> 12.5 frames per second). That is
@@ -94,6 +95,10 @@ _CAP_CHARS_PER_SECOND = 8.0
 _CAP_MIN_FRAMES = 64
 _PROMPT_OVERHEAD_TOKENS = 16
 _PROMPT_CHARS_PER_TOKEN = 3.0
+# The cap decides where a long line is cut off, so it changes output: bump CAP_RECIPE whenever
+# max_new_tokens_for or a constant above changes. The adapter folds it (and the KV-cache size)
+# into model_version, so audio cut by an old cap is never served from the cache under a new one.
+CAP_RECIPE = 2
 
 
 def max_new_tokens_for(

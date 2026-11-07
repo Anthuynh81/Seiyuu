@@ -6,6 +6,7 @@ records requests and writes the handoff WAV, so the readback path runs end to en
 
 import hashlib
 import os
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,16 +16,21 @@ import soundfile as sf
 from seiyuu.api.registry import ENGINE_FACTS, EngineRegistry
 from seiyuu.engines import get_engine_class, list_engine_ids, voices_dir_kwargs
 from seiyuu.engines.base import SynthesisError
+from seiyuu.engines.indextts2_engine import SubprocessTransport, WorkerError
 from seiyuu.engines.qwen3tts_engine import (
     BASE_CHECKPOINT,
     QWEN3TTS_SAMPLE_RATE,
+    REF_TEXT_DIGEST_KEY,
     Qwen3TTSEngine,
     models_present,
     qwen3tts_config,
+    reference_text_digest,
     weights_fingerprint,
 )
+from seiyuu.engines.qwen3tts_worker import CAP_RECIPE, PROTOCOL_VERSION
 from seiyuu.gpu import GpuResourceManager
 from seiyuu.normalize import normalize_text, profile_for
+from seiyuu.render.cache import SegmentKey
 from seiyuu.settings import Settings
 
 
@@ -145,10 +151,36 @@ def test_model_version_fingerprints_the_base_checkpoint(tmp_path):
     models = _models(tmp_path)
     fp = weights_fingerprint(models / BASE_CHECKPOINT)
     assert fp.startswith("qwen3tts-") and len(fp) == len("qwen3tts-") + 12
-    assert _engine(tmp_path).model_version == f"{fp}-bf16"
-    assert _engine(tmp_path, backend="stock").model_version == f"{fp}-bf16-stock"
-    assert _engine(tmp_path, language="Auto").model_version == f"{fp}-bf16-auto"
+    v = f"{fp}-bf16-cap{CAP_RECIPE}"
+    assert _engine(tmp_path).model_version == v
+    assert _engine(tmp_path, backend="stock").model_version == f"{v}-stock"
+    assert _engine(tmp_path, language="Auto").model_version == f"{v}-auto"
     assert models_present(models) and not models_present(tmp_path / "nope")
+
+
+def test_model_version_marks_the_kv_cache_size(tmp_path):
+    # max_seq_len bounds the per-line generation cap, so a different size cuts long lines
+    # differently: it must not share cache entries with the default.
+    _models(tmp_path)
+    default = _engine(tmp_path).model_version
+    assert _engine(tmp_path, max_seq_len=1024).model_version == f"{default}-kv1024"
+    assert _engine(tmp_path, max_seq_len=4096).model_version == f"{default}-kv4096"
+
+
+def test_cap_recipe_is_bumped_with_the_cap():
+    # Re-tuning the cap changes where long lines are cut. If this fails, bump CAP_RECIPE in
+    # qwen3tts_worker.py (it is part of model_version) and update the pinned values here.
+    from seiyuu.engines import qwen3tts_worker as w
+
+    pinned = (
+        w._CAP_FLOOR_SECONDS,
+        w._CAP_CHARS_PER_SECOND,
+        w._CAP_MIN_FRAMES,
+        w._PROMPT_OVERHEAD_TOKENS,
+        w._PROMPT_CHARS_PER_TOKEN,
+        w.max_new_tokens_for("x" * 900, 1024, prompt_frames=190, prompt_chars=220),
+    )
+    assert (w.CAP_RECIPE, pinned) == (2, (4.0, 8.0, 64, 16, 3.0, 443))
 
 
 def test_fingerprint_ignores_hub_bookkeeping_but_not_configs(tmp_path):
@@ -202,6 +234,43 @@ def test_worker_argv_and_env(monkeypatch, tmp_path):
     assert argv[argv.index("--max-seq-len") + 1] == "3072"
     assert captured["env"]["HF_HUB_OFFLINE"] == "1"
     assert captured["name"] == "qwen3tts"
+    assert captured["protocol"] == PROTOCOL_VERSION  # the boot handshake checks it
+
+
+def _stub_worker(tmp_path, protocol):
+    script = tmp_path / f"stub_worker_{protocol}.py"
+    script.write_text(
+        "import json, sys\n"
+        f'print(json.dumps({{"ok": True, "event": "ready", "protocol": {protocol}}}), flush=True)\n'
+        "for line in sys.stdin:\n"
+        '    print(json.dumps({"ok": True}), flush=True)\n',
+        encoding="utf-8",
+    )
+    return [sys.executable, str(script)]
+
+
+def test_boot_refuses_a_worker_on_another_protocol(tmp_path):
+    with pytest.raises(WorkerError, match="protocol 999, expected 1"):
+        SubprocessTransport(
+            _stub_worker(tmp_path, 999),
+            env={**os.environ},
+            cwd=None,
+            boot_timeout=30.0,
+            name="qwen3tts",
+            protocol=1,
+        )
+    transport = SubprocessTransport(
+        _stub_worker(tmp_path, 1),
+        env={**os.environ},
+        cwd=None,
+        boot_timeout=30.0,
+        name="qwen3tts",
+        protocol=1,
+    )
+    try:
+        assert transport.request({"cmd": "ping"}, timeout=30.0) == {"ok": True}
+    finally:
+        transport.close()
 
 
 def test_default_factory_explains_missing_setup(tmp_path):
@@ -240,20 +309,63 @@ def test_synthesize_loads_base_then_sends_one_clone_request(tmp_path):
     assert [r["cmd"] for r in transports[0].requests] == ["load", "synthesize", "synthesize"]
 
 
-def test_reference_transcript_selects_icl_unless_older_than_the_clip(tmp_path):
+def _bound(tmp_path, text, voice_id="hero_1a2b"):
+    """The settings a voice whose meta binds ``text`` as its reference transcript renders with."""
+    ref = tmp_path / "voices" / voice_id / "reference.wav"
+    sha = hashlib.sha256(ref.read_bytes()).hexdigest()
+    return {"seed": 1, REF_TEXT_DIGEST_KEY: reference_text_digest(sha, text)}
+
+
+def test_a_bound_transcript_selects_icl(tmp_path):
     _voice(tmp_path, transcript="I keep a small notebook.")
     transport = FakeTransport(_happy)
     engine = _engine(tmp_path, lambda: transport)
-    engine.synthesize("Hi.", "hero_1a2b", {"seed": 1})
+    engine.synthesize("Hi.", "hero_1a2b", _bound(tmp_path, "I keep a small notebook."))
     assert transport.requests[-1]["ref_text"] == "I keep a small notebook."
+    assert "gen" not in transport.requests[-1]  # the digest is never forwarded as a tunable
+    digest = _bound(tmp_path, "x")[REF_TEXT_DIGEST_KEY]
+    assert digest == float(int(digest)) and digest < 2**53  # exact in VoiceMeta's float settings
 
-    # a re-clone replaces reference.wav but not the transcript: the stale text is ignored
-    ref = tmp_path / "voices" / "hero_1a2b" / "reference.wav"
-    txt = ref.with_name("reference.txt")
-    st = txt.stat()
-    os.utime(txt, ns=(st.st_atime_ns, st.st_mtime_ns - 10_000_000_000))
-    engine.synthesize("Hi.", "hero_1a2b", {"seed": 1})
-    assert transport.requests[-1]["ref_text"] is None
+
+def test_an_unbound_transcript_is_ignored_so_the_key_always_sees_the_mode(tmp_path):
+    # A reference.txt dropped in by hand must not flip the clone mode under an unchanged key:
+    # cached x-vector lines and new ICL lines would then mix in one book.
+    _voice(tmp_path)
+    transport = FakeTransport(_happy)
+    engine = _engine(tmp_path, lambda: transport)
+    settings = {"seed": 7}
+    key = SegmentKey.build(
+        engine="qwen3tts", engine_model_version="v", voice_id="hero_1a2b",
+        settings=settings, seed=7, normalized_text="Hello there.",
+    )  # fmt: skip
+    engine.synthesize("Hello there.", "hero_1a2b", settings)
+    (tmp_path / "voices" / "hero_1a2b" / "reference.txt").write_text("Other.", encoding="utf-8")
+    engine.synthesize("Hello there.", "hero_1a2b", settings)
+    assert [r["ref_text"] for r in transport.requests if r["cmd"] == "synthesize"] == [None, None]
+    # ICL needs the digest in the voice's settings, which changes the key
+    bound = _bound(tmp_path, "Other.")
+    key_icl = SegmentKey.build(
+        engine="qwen3tts", engine_model_version="v", voice_id="hero_1a2b",
+        settings=bound, seed=7, normalized_text="Hello there.",
+    )  # fmt: skip
+    assert key_icl.key_hash != key.key_hash
+
+
+def test_a_transcript_that_no_longer_matches_its_binding_fails_loudly(tmp_path):
+    _voice(tmp_path, transcript="I keep a small notebook.")
+    engine = _engine(tmp_path, lambda: FakeTransport(_happy))
+    settings = _bound(tmp_path, "I keep a small notebook.")
+    txt = tmp_path / "voices" / "hero_1a2b" / "reference.txt"
+    txt.write_text("I keep a large notebook.\n", encoding="utf-8")  # edited by hand
+    with pytest.raises(SynthesisError, match="does not match"):
+        engine.synthesize("Hi.", "hero_1a2b", settings)
+    txt.write_text("I keep a small notebook.\n", encoding="utf-8")
+    _write_wav(str(txt.with_name("reference.wav")), seconds=0.7)  # clip replaced, text kept
+    with pytest.raises(SynthesisError, match="does not match"):
+        engine.synthesize("Hi.", "hero_1a2b", settings)
+    txt.unlink()
+    with pytest.raises(SynthesisError, match="missing"):
+        engine.synthesize("Hi.", "hero_1a2b", settings)
 
 
 def test_whitelisted_tunables_only(tmp_path):
