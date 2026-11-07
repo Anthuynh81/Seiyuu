@@ -71,7 +71,9 @@ def _abbreviations(text: str) -> str:
 # The line start already pauses, so the run and its orphan marks are simply dropped. Needs a
 # word after, so a wordless beat ("“……!? ……!!”") is never emptied.
 _LEADING_ORPHAN = re.compile(
-    r"^([“‘\"(\[]?)"  # line start, or just inside an opening quote/bracket (kept)
+    # line start (whitespace is only stripped later), or just inside an opening quote/bracket
+    # (kept)
+    r"^\s*([“‘\"'«(\[]?)"
     r"\s*(?:\.{3,}|[—–])(?:\s*(?:\.{3,}|[—–]))*"  # the run (NFKC already made "…" dots)
     r"\s*[?!]+\s*(?=[^\W_])"  # the orphan marks, then a word
 )

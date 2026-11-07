@@ -91,6 +91,11 @@ KOKORO_PUNCTUATION = [
     ("‘…? 3 cats’", "‘three cats’"),
     ("(…? x)", "(x)"),
     ('"…? Yes"', '"Yes"'),
+    ("'...? No.'", "'No.'"),
+    ("«…? Non»", "«Non»"),
+    # leading whitespace is only stripped after the punctuation pass: still the line start
+    (" “……? No.”", "“No.”"),
+    ("\n\t…? Hm", "Hm"),
     # a leading run WITHOUT an orphan measured the same as the comma: unchanged
     ("“…Hm?”", "“, Hm?”"),
     ("– lolololol", ", lolololol"),
