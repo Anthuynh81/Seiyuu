@@ -65,11 +65,35 @@ def _abbreviations(text: str) -> str:
     return text
 
 
-def _punctuation(text: str, *, fold_dashes: bool) -> str:
-    if fold_dashes:
-        # A pause the engine will honor; Chatterbox does this itself, so its profile skips it.
-        text = re.sub(r"\s*[—–]\s*", ", ", text)  # em/en dash
-        text = re.sub(r"\s*\.{3,}\s*|\s*…\s*", ", ", text)  # ellipsis
+# A dash/ellipsis run that opens the line (or its opening quote) followed by a bare "?"/"!"
+# ("“……? No, not at all.”"). The comma fold would leave "“, ? No, …", and Kokoro voices that
+# orphan "?" as a clause of its own: the line runs ~150 ms longer (measured on CPU, af_heart).
+# The line start already pauses, so the run and its orphan marks are simply dropped. Needs a
+# word after, so a wordless beat ("“……!? ……!!”") is never emptied.
+_LEADING_ORPHAN = re.compile(
+    r"^([“‘\"(\[]?)"  # line start, or just inside an opening quote/bracket (kept)
+    r"\s*(?:\.{3,}|[—–])(?:\s*(?:\.{3,}|[—–]))*"  # the run (NFKC already made "…" dots)
+    r"\s*[?!]+\s*(?=[^\W_])"  # the orphan marks, then a word
+)
+
+
+def _punctuation(text: str, *, mode: str) -> str:
+    """Engine-aware dash/ellipsis handling. ``mode``: 'none' leaves them (Chatterbox folds
+    them itself); 'comma' folds each to a ", " pause; 'kokoro' is 'comma' plus dropping a
+    leading run that only carries an orphan "?"/"!" (see _LEADING_ORPHAN).
+
+    Kokoro otherwise keeps the comma on purpose. Measured on real lines (CPU A/B): a native
+    "… " between two words adds only ~13 ms of pause but draws the word before it out by a
+    median 50 ms (up to 225 ms), the slow sound; a mark at the start or end of a line, or a
+    stray ", ?" mid-line, measured the same as the comma.
+    """
+    if mode == "none":
+        return text
+    if mode == "kokoro":
+        text = _LEADING_ORPHAN.sub(r"\1", text)
+    # A pause the engine will honor; Chatterbox does this itself, so its profile skips it.
+    text = re.sub(r"\s*[—–]\s*", ", ", text)  # em/en dash
+    text = re.sub(r"\s*\.{3,}\s*|\s*…\s*", ", ", text)  # ellipsis
     return text
 
 
@@ -77,15 +101,17 @@ def _collapse_whitespace(text: str) -> str:
     return _WHITESPACE.sub(" ", _NEWLINES.sub(" ", text)).strip()
 
 
-# profile -> options
+# profile -> options. `punct` is the _punctuation mode; every mode keeps the same words, so
+# all engines share one spoken-word string -> one whisper-validation reference.
 _PROFILES = {
-    "default": {"fold_dashes": True},
-    "kokoro": {"fold_dashes": True},
-    "chatterbox": {"fold_dashes": False},  # the engine's punc_norm folds these itself
+    # 'default' also feeds whisper scoring and paid ElevenLabs text: keep it on the plain fold.
+    "default": {"punct": "comma"},
+    "kokoro": {"punct": "kokoro"},
+    "chatterbox": {"punct": "none"},  # the engine's punc_norm folds these itself
     # IndexTTS-2 has no confirmed dash/ellipsis folding of its own, so keep the shared default
     # (fold to a comma pause). Explicit entry documents the decision; revisit if auditions show
-    # it double-folds. Same spoken-word string as every engine -> one whisper-validation reference.
-    "indextts2": {"fold_dashes": True},
+    # it double-folds. The Kokoro-only cleanup was measured on Kokoro only, so it stays there.
+    "indextts2": {"punct": "comma"},
 }
 
 
@@ -108,5 +134,5 @@ def apply_profile(text: str, profile: str, *, lexicon: "CompiledLexicon | None" 
     text = expand_decades(text)
     text = expand_ordinals(text)
     text = expand_numbers(text)
-    text = _punctuation(text, fold_dashes=opts["fold_dashes"])
+    text = _punctuation(text, mode=opts["punct"])
     return _collapse_whitespace(text)
