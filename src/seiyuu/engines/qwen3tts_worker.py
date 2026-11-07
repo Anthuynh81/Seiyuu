@@ -84,17 +84,36 @@ def model_text(text: str) -> str:
     return inner or text
 
 
-def max_new_tokens_for(text: str, max_seq_len: int) -> int:
+# Generation cap calibration (3080 Ti smoke, 2026-11-07): designed and cloned English speech ran
+# 17-22 characters/s, and a non-streaming ICL prompt measured 9 + reference frames + ~4.5
+# characters per text token (both texts are prefilled). The cap allows 4 s plus one second per 8
+# characters (over 2x the measured duration of any line past a few words), and the prompt estimate
+# rounds tokens up (3 characters each) so it never undershoots.
+_CAP_FLOOR_SECONDS = 4.0
+_CAP_CHARS_PER_SECOND = 8.0
+_CAP_MIN_FRAMES = 64
+_PROMPT_OVERHEAD_TOKENS = 16
+_PROMPT_CHARS_PER_TOKEN = 3.0
+
+
+def max_new_tokens_for(
+    text: str, max_seq_len: int, *, prompt_frames: int = 0, prompt_chars: int = 0
+) -> int:
     """Generation cap for one line: a runaway (looping, babbling) never runs to the 2048 default.
 
-    Allows 6 s plus one second per 6 characters, about 2.5x slower than a normal ~15 chars/s read,
-    so real speech never hits it. Clipped to 3/4 of the static KV cache so the prompt (reference
-    codes plus both texts) still fits; past max_seq_len the fast path silently stops, which the
-    whisper check would then flag as cut off.
+    ``prompt_frames`` (the ICL reference's codec frames) and ``prompt_chars`` (the reference
+    transcript or the design description) size the prompt that shares the static KV cache. The
+    fast path stops SILENTLY when prompt + generation reaches ``max_seq_len``; bounding the cap by
+    the room left keeps the cap the binding stop, so ``hit_cap`` stays truthful.
     """
-    seconds = 6.0 + len(text) / 6.0
+    seconds = _CAP_FLOOR_SECONDS + len(text) / _CAP_CHARS_PER_SECOND
     frames = math.ceil(seconds * FRAMES_PER_SECOND)
-    return max(64, min(frames, int(max_seq_len * 0.75)))
+    prompt = (
+        _PROMPT_OVERHEAD_TOKENS
+        + prompt_frames
+        + math.ceil((prompt_chars + len(text)) / _PROMPT_CHARS_PER_TOKEN)
+    )
+    return max(_CAP_MIN_FRAMES, min(frames, max_seq_len - 1 - prompt))
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -173,19 +192,34 @@ class ModelHandle:
         """The underlying ``qwen_tts.Qwen3TTSModel`` (the fast wrapper keeps it at ``.model``)."""
         return self._tts if self._backend == "stock" else self._tts.model  # type: ignore[union-attr]
 
-    def _gen_kwargs(self, text: str, gen: dict[str, Any] | None) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens_for(text, self._max_seq_len)}
+    def _gen_kwargs(
+        self,
+        text: str,
+        gen: dict[str, Any] | None,
+        *,
+        prompt_frames: int = 0,
+        prompt_chars: int = 0,
+    ) -> dict[str, Any]:
+        cap = max_new_tokens_for(
+            text, self._max_seq_len, prompt_frames=prompt_frames, prompt_chars=prompt_chars
+        )
+        kwargs: dict[str, Any] = {"max_new_tokens": cap}
         for k, v in (gen or {}).items():
             if k in _GEN_KEYS:
                 kwargs[k] = int(v) if k in _INT_GEN_KEYS else float(v)
         return kwargs
 
-    def _clone_prompt(self, reference_wav: str, reference_sha256: str | None, ref_text: str) -> Any:
+    def _clone_prompt(
+        self, reference_wav: str, reference_sha256: str | None, ref_text: str
+    ) -> tuple[Any, int]:
+        """The encoded clone prompt and how many codec frames of reference it puts in the
+        prompt (0 in x-vector mode; the padded clip's length in ICL mode)."""
         xvec = not ref_text
         key = (reference_sha256 or reference_wav, ref_text, xvec)
-        prompt = self._prompts.get(key)
-        if prompt is not None:
-            return prompt
+        cached = self._prompts.get(key)
+        if cached is not None:
+            return cached
+        frames = 0
         if xvec:
             # x-vector mode: speaker embedding only, no transcript, no reference codes.
             prompt = self._qwen.create_voice_clone_prompt(
@@ -198,14 +232,15 @@ class ModelHandle:
             audio, sr = sf.read(reference_wav, dtype="float32", always_2d=False)
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
-            pad = np.zeros(int(_REFERENCE_PAD_SECONDS * sr), dtype=np.float32)
+            padded = np.concatenate([audio, np.zeros(int(_REFERENCE_PAD_SECONDS * sr), np.float32)])
             prompt = self._qwen.create_voice_clone_prompt(
-                ref_audio=(np.concatenate([audio, pad]), int(sr)),
+                ref_audio=(padded, int(sr)),
                 ref_text=ref_text,
                 x_vector_only_mode=False,
             )
-        self._prompts[key] = prompt
-        return prompt
+            frames = math.ceil(padded.size / float(sr) * FRAMES_PER_SECOND)
+        self._prompts[key] = (prompt, frames)
+        return prompt, frames
 
     @staticmethod
     def _seed(seed: int | None) -> None:
@@ -233,8 +268,11 @@ class ModelHandle:
 
         self.load("base")
         with redirect_stdout(sys.stderr):
-            prompt = self._clone_prompt(reference_wav, reference_sha256, (ref_text or "").strip())
-            kwargs = self._gen_kwargs(text, gen)
+            ref_text = (ref_text or "").strip()
+            prompt, ref_frames = self._clone_prompt(reference_wav, reference_sha256, ref_text)
+            kwargs = self._gen_kwargs(
+                text, gen, prompt_frames=ref_frames, prompt_chars=len(ref_text)
+            )
             self._seed(seed)
             # non_streaming_mode=True prefills the whole line before decoding. The clone default
             # (False) feeds text step by step, which drifts toward rushing on longer lines.
@@ -260,7 +298,7 @@ class ModelHandle:
 
         self.load("design")
         with redirect_stdout(sys.stderr):
-            kwargs = self._gen_kwargs(text, gen)
+            kwargs = self._gen_kwargs(text, gen, prompt_chars=len(instruct))
             self._seed(seed)
             wavs, sr = self._tts.generate_voice_design(  # type: ignore[union-attr]
                 text=text,

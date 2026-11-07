@@ -36,13 +36,22 @@ def test_model_text_strips_a_wrapping_quote_pair(text, expected):
     assert w.model_text(text) == expected
 
 
-def test_max_new_tokens_scales_with_text_and_respects_the_kv_cache():
-    short = w.max_new_tokens_for("Yes.", 2048)
-    long = w.max_new_tokens_for("word " * 100, 2048)
-    assert 64 <= short < long
-    assert short == int(np.ceil((6 + 4 / 6) * 12.5))
-    assert w.max_new_tokens_for("x" * 5000, 2048) == 1536  # 3/4 of the static cache
-    assert w.max_new_tokens_for("x" * 5000, 4096) == 3072
+def test_max_new_tokens_scales_with_text():
+    assert w.max_new_tokens_for("Yes.", 2048) == 64  # the floor (4.5 s would be 57 frames)
+    assert w.max_new_tokens_for("x" * 200, 2048) == int(np.ceil((4 + 200 / 8) * 12.5))
+    # over 2x the measured pace: a 473-char line spoke in 23.3 s (291 frames) on the 3080 Ti
+    assert w.max_new_tokens_for("x" * 473, 2048, prompt_frames=174, prompt_chars=226) > 2 * 291
+
+
+def test_max_new_tokens_leaves_room_for_the_prompt_in_the_static_cache():
+    text = "x" * 3000
+    alone = w.max_new_tokens_for(text, 2048)
+    assert alone == 2048 - 1 - (16 + 1000)  # the target text itself is prefilled
+    with_ref = w.max_new_tokens_for(text, 2048, prompt_frames=200, prompt_chars=300)
+    assert with_ref == alone - 200 - 100
+    assert w.max_new_tokens_for(text, 4096) == 4096 - 1 - 1016
+    # never below the floor, even when the prompt alone overflows the cache
+    assert w.max_new_tokens_for("x" * 9000, 2048) == 64
 
 
 def test_write_wav_is_int16_mono_24k_and_flags_the_cap(tmp_path):
@@ -311,6 +320,20 @@ def test_icl_clone_pads_the_reference_and_caches_by_content(fake_fast, tmp_path)
         text="Hi.", reference_wav=ref, out_path=out, reference_sha256="v2", ref_text="Tx."
     )
     assert len(qwen.prompts) == 2
+
+
+def test_the_cap_counts_the_prompt_that_shares_the_cache(fake_fast, tmp_path):
+    handle = w.ModelHandle(str(tmp_path), max_seq_len=400)
+    ref = _reference(tmp_path, seconds=1.0)  # + 0.5 s pad = 19 codec frames in the ICL prompt
+    text = "x" * 300
+    out = str(tmp_path / "o.wav")
+    handle.synthesize(text=text, reference_wav=ref, out_path=out, ref_text="Tx.")
+    handle.synthesize(text=text, reference_wav=ref, out_path=out)  # x-vector: no ref in prompt
+    icl, xvec = (c["max_new_tokens"] for c in handle._tts.calls)
+    assert icl == 400 - 1 - (16 + 19 + 101) == 263
+    assert xvec == 400 - 1 - (16 + 100)
+    handle.design(text=text, instruct="y" * 60, out_path=out)
+    assert handle._tts.calls[-1]["max_new_tokens"] == 400 - 1 - (16 + 120)
 
 
 def test_design_call_shape(fake_fast, tmp_path):
