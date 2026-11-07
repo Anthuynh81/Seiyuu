@@ -42,6 +42,11 @@ class PauseProfile:
     (“Yes,” he said, “I know.” is three clips with no gap between them): each clip's own edge
     silence is trimmed down to these, so the split reads like the comma it replaces (~0.32 s)
     instead of ~0.8 s of Kokoro clip edges mid-sentence. Never exposed in the API/CLI.
+
+    `trim_block_edges` (off by default) does the same at joins BETWEEN blocks, down to
+    `block_tail_keep` / `block_head_keep`, before the gap is added. Kokoro clips carry ~0.33 s
+    of lead and ~0.5 s of tail silence, so a 0.6 s paragraph gap measures ~1.4 s untrimmed;
+    trimmed it is ~0.9 s. Speech itself is untouched. A silent beat keeps its own edges.
     """
 
     paragraph: float = 0.6
@@ -52,6 +57,9 @@ class PauseProfile:
     chapter_lead_out: float = 1.0
     join_tail_keep: float = 0.20
     join_head_keep: float = 0.12
+    trim_block_edges: bool = False
+    block_tail_keep: float = 0.20
+    block_head_keep: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,33 @@ def _leading_silence(samples: np.ndarray) -> int:
     return len(samples)
 
 
+def _trim_tail(prev: np.ndarray, prev_raw: np.ndarray, keep: float) -> np.ndarray:
+    """``prev`` (the placed, possibly gained clip) with its tail silence, measured on
+    ``prev_raw``, cut down to ``keep`` seconds and a short fade-out. A silent clip (a beat)
+    and a tail already within ``keep`` come back unchanged."""
+    tail = _leading_silence(prev_raw[::-1])
+    drop = 0 if tail >= len(prev_raw) else max(0, tail - round(keep * CANONICAL_SAMPLE_RATE))
+    if not drop:
+        return prev
+    prev = prev[: len(prev) - drop].copy()
+    fade = min(_EDGE_FADE, len(prev))
+    prev[len(prev) - fade :] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return prev
+
+
+def _trim_head(cur_raw: np.ndarray, keep: float) -> np.ndarray:
+    """``cur_raw`` with its lead silence cut down to ``keep`` seconds and a short fade-in; a
+    silent clip (a beat) and a lead already within ``keep`` come back unchanged."""
+    head = _leading_silence(cur_raw)
+    drop = 0 if head >= len(cur_raw) else max(0, head - round(keep * CANONICAL_SAMPLE_RATE))
+    if not drop:
+        return cur_raw
+    cur_raw = cur_raw[drop:].copy()
+    fade = min(_EDGE_FADE, len(cur_raw))
+    cur_raw[:fade] *= np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    return cur_raw
+
+
 def _trim_join(
     prev: np.ndarray, prev_raw: np.ndarray, cur_raw: np.ndarray, pauses: PauseProfile
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -108,21 +143,12 @@ def _trim_join(
     the silence measured). Silence is measured on the raw clips (before voice gain); ``prev``
     is the previous clip as already placed (possibly gained). A silent beat on either side
     keeps every edge: that held silence is deliberate."""
-    tail = _leading_silence(prev_raw[::-1])
-    head = _leading_silence(cur_raw)
-    if tail >= len(prev_raw) or head >= len(cur_raw):
+    if _leading_silence(prev_raw) >= len(prev_raw) or _leading_silence(cur_raw) >= len(cur_raw):
         return prev, cur_raw
-    drop_tail = max(0, tail - round(pauses.join_tail_keep * CANONICAL_SAMPLE_RATE))
-    drop_head = max(0, head - round(pauses.join_head_keep * CANONICAL_SAMPLE_RATE))
-    if drop_tail:
-        prev = prev[: len(prev) - drop_tail].copy()
-        fade = min(_EDGE_FADE, len(prev))
-        prev[len(prev) - fade :] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
-    if drop_head:
-        cur_raw = cur_raw[drop_head:].copy()
-        fade = min(_EDGE_FADE, len(cur_raw))
-        cur_raw[:fade] *= np.linspace(0.0, 1.0, fade, dtype=np.float32)
-    return prev, cur_raw
+    return (
+        _trim_tail(prev, prev_raw, pauses.join_tail_keep),
+        _trim_head(cur_raw, pauses.join_head_keep),
+    )
 
 
 def _is_dialogue(seg, narrator_voice_id: str | None) -> bool:
@@ -162,7 +188,10 @@ def _chapter_samples(
         cur_dialogue = _is_dialogue(seg, narrator_voice_id)
         # A multi-voice paragraph yields several segments sharing one block_id; only insert a
         # pause when the BLOCK changes (single-voice has one segment per block, so identical).
-        if prev is not None and seg.block_id != prev_block_id:
+        block_join = prev is not None and seg.block_id != prev_block_id
+        if block_join and pauses.trim_block_edges and prev_raw is not None:
+            parts[-1] = _trim_tail(parts[-1], prev_raw, pauses.block_tail_keep)
+        if block_join:
             if pending_scene_break:
                 gap = pauses.scene_break
             elif prev is BlockType.HEADING:
@@ -189,6 +218,8 @@ def _chapter_samples(
         if prev_raw is not None and seg.block_id == prev_block_id:
             # a quote-boundary split inside one block: no gap here, so trim the clip edges
             parts[-1], samples = _trim_join(parts[-1], prev_raw, samples, pauses)
+        elif block_join and pauses.trim_block_edges:
+            samples = _trim_head(samples, pauses.block_head_keep)
         prev_raw = samples
         factor = (voice_gains or {}).get(seg.voice_id) if seg.voice_id else None
         if factor is not None:
