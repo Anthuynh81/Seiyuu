@@ -18,8 +18,11 @@ from seiyuu.engines.audio import AudioFile, silence, to_canonical
 
 # A line with nothing to pronounce ("……", "───", "♪♪", an emoji) renders as this much silence
 # instead of reaching an engine: Kokoro returns no audio for it and LLM-style engines may invent
-# speech. The assembler's paragraph gaps still surround it, so it reads as a held beat.
-SILENT_BEAT_SECONDS = 0.6
+# speech. The assembler's gaps on both sides and the neighbours' own clip edges supply most of
+# the beat: at 0.6 s a Kokoro beat totalled ~2.6 s (as long as a scene break, the longest
+# silences in a chapter); at 0.2 s it is ~1.7-2.2 s on Kokoro (~0.8 s of clip edges) and
+# ~1.1 s on IndexTTS (~0.2 s), still clearly longer than a plain join.
+SILENT_BEAT_SECONDS = 0.2
 
 
 def nothing_to_say(text: str) -> bool:

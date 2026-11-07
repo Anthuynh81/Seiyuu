@@ -9,6 +9,7 @@ import soundfile as sf
 
 from factories import make_book
 from fake_engine import FakeEngine
+from seiyuu.assemble import PauseProfile
 from seiyuu.attribute.models import (
     AttributedChapter,
     AttributionReport,
@@ -53,6 +54,13 @@ def test_engine_returns_silence_without_calling_the_model():
     assert eng.calls == []
     assert audio.duration_seconds == pytest.approx(SILENT_BEAT_SECONDS)
     assert not np.any(audio.samples)
+
+
+def test_beat_is_shorter_than_the_gaps_around_it():
+    # The assembler's gaps (and the neighbours' clip edges) already surround a beat; at 0.6 s
+    # the whole beat ran as long as a scene break. Keep the beat itself under every join gap.
+    pauses = PauseProfile()
+    assert SILENT_BEAT_SECONDS < min(pauses.dialogue, pauses.paragraph)
 
 
 def test_empty_text_still_refused():
