@@ -42,16 +42,19 @@ export const ENGINE_NAMES: Record<string, string> = {
   kokoro: "Kokoro",
   chatterbox: "Chatterbox",
   indextts2: "IndexTTS-2",
+  qwen3tts: "Qwen3-TTS",
   elevenlabs: "ElevenLabs",
 };
 
 export const engineName = (id: string) => ENGINE_NAMES[id] ?? id;
 
-/** Engines whose weights the warm-up job can NOT fetch: IndexTTS-2's checkpoints are a
-    separate manual download (the worker refuses to start without them). */
+/** Engines whose weights the warm-up job can NOT fetch: IndexTTS-2 and Qwen3-TTS weights are a
+    separate manual download (their workers refuse to start without them). */
 const MANUAL_INSTALL: Record<string, string> = {
   indextts2:
     "Needs a manual install: download the IndexTTS-2 checkpoints and set INDEXTTS2_CHECKPOINTS_DIR in .env, then restart the backend.",
+  qwen3tts:
+    "Needs a manual install: set up the Qwen3-TTS env and checkpoints, set QWEN3TTS_WORKER_PYTHON and QWEN3TTS_MODELS_DIR in .env, then restart the backend.",
 };
 
 /** The manual-install instructions for an engine the warm-up job can't fetch, if any. */

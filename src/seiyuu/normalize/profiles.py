@@ -114,6 +114,9 @@ _PROFILES = {
     # (fold to a comma pause). Explicit entry documents the decision; revisit if auditions show
     # it double-folds. The Kokoro-only cleanup was measured on Kokoro only, so it stays there.
     "indextts2": {"punct": "comma"},
+    # Qwen3-TTS ignores ellipses and dashes entirely (upstream discussion #75: they make "absolutely
+    # no difference"), so fold them to the comma pause it does honor — the shared default.
+    "qwen3tts": {"punct": "comma"},
 }
 
 

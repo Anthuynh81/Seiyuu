@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -155,6 +156,22 @@ class Settings(BaseSettings):
     # A real speech clip for the gated GPU smoke test (and the emotion audition script). Optional:
     # unset falls back to a synthetic tone, which proves plumbing but not voice quality.
     indextts2_test_reference: Path | None = None
+
+    # Qwen3-TTS: a third local cloning engine, also a subprocess worker in its OWN env (it pins
+    # torch 2.8/cu128 + transformers 5.15.1). The models dir holds the downloaded checkpoint dirs
+    # Qwen3-TTS-12Hz-1.7B-Base (renders) and Qwen3-TTS-12Hz-1.7B-VoiceDesign (voice design).
+    # Unset (None) until set up; the adapter fails loudly with an actionable message.
+    qwen3tts_worker_python: Path | None = None
+    qwen3tts_models_dir: Path | None = None
+    # "fast" = faster-qwen3-tts (CUDA-graph decoding); "stock" = the reference qwen_tts package
+    # (slower, the fallback if graph capture misbehaves). Different model_version: not bit-exact.
+    qwen3tts_backend: Literal["fast", "stock"] = "fast"
+    qwen3tts_language: str = "English"  # English, Auto, Chinese, Japanese, ... (case-insensitive)
+    # The fast path's static KV cache: reference codes + both texts + the generated frames.
+    qwen3tts_max_seq_len: int = 2048
+    qwen3tts_worker_load_timeout: float = 600.0  # first load also captures the CUDA graphs
+    qwen3tts_worker_request_timeout: float = 600.0
+    qwen3tts_worker_max_restarts: int = 1  # kill + restart + retry on OOM / a dead or hung worker
 
     # Per-segment emotion (F2). Opt-in, default OFF: when off, render/estimate IGNORE the
     # attribution's segment_emotions and settings stay byte-identical to a no-emotion render

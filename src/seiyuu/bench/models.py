@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 # Only LOCAL engines are ever benchmarked: a benchmark is an automatic loop, and paid APIs must
 # never run in an automatic code path (CLAUDE.md). Anything else is refused before construction.
-LOCAL_ENGINES: tuple[str, ...] = ("kokoro", "chatterbox", "indextts2")
+LOCAL_ENGINES: tuple[str, ...] = ("kokoro", "chatterbox", "indextts2", "qwen3tts")
 
 
 class SegmentKind(StrEnum):

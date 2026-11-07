@@ -31,6 +31,7 @@ ENGINE_FACTS: dict[str, dict[str, bool]] = {
     "kokoro": {"paid": False, "supports_cloning": False},
     "chatterbox": {"paid": False, "supports_cloning": True},
     "indextts2": {"paid": False, "supports_cloning": True},
+    "qwen3tts": {"paid": False, "supports_cloning": True},
     "elevenlabs": {"paid": True, "supports_cloning": True},
 }
 
@@ -56,9 +57,9 @@ class EngineRegistry:
             return engine
 
     def _construct_kwargs(self, engine_id: str) -> dict:
-        # Consent invariant — see module docstring. Cloning engines (chatterbox, indextts2) must
-        # see the SAME voices_dir the VoiceLibrary uses; voices_dir_kwargs tolerates an unknown
-        # (test-injected) id by returning {}.
+        # Consent invariant — see module docstring. Cloning engines (chatterbox, indextts2,
+        # qwen3tts) must see the SAME voices_dir the VoiceLibrary uses; voices_dir_kwargs
+        # tolerates an unknown (test-injected) id by returning {}.
         kwargs: dict = dict(voices_dir_kwargs(engine_id, self._settings.voices_dir))
         if engine_id == "indextts2":
             # Explicit kwargs so the injected Settings governs the out-of-process worker config
@@ -71,6 +72,17 @@ class EngineRegistry:
                 load_timeout=self._settings.indextts2_worker_load_timeout,
                 request_timeout=self._settings.indextts2_worker_request_timeout,
                 max_restarts=self._settings.indextts2_worker_max_restarts,
+            )
+            return kwargs
+        if engine_id == "qwen3tts":
+            # Same reasoning as indextts2: the injected Settings must govern the worker config.
+            from seiyuu.engines.qwen3tts_engine import qwen3tts_config
+
+            kwargs.update(
+                **qwen3tts_config(self._settings),
+                load_timeout=self._settings.qwen3tts_worker_load_timeout,
+                request_timeout=self._settings.qwen3tts_worker_request_timeout,
+                max_restarts=self._settings.qwen3tts_worker_max_restarts,
             )
             return kwargs
         if engine_id == "chatterbox":
@@ -114,6 +126,11 @@ def weights_cached(engine_id: str) -> bool | None:
             return checkpoints_present(get_settings().indextts2_checkpoints_dir)
         except OSError:
             return None
+    if engine_id == "qwen3tts":
+        # Qwen3-TTS checkpoints are local dirs under QWEN3TTS_MODELS_DIR (not the HF hub cache).
+        from seiyuu.engines.qwen3tts_engine import models_present, qwen3tts_config
+
+        return models_present(qwen3tts_config(get_settings())["models_dir"])
     needle = _HF_NEEDLES.get(engine_id)
     if needle is None:
         return None

@@ -271,8 +271,8 @@ def _auto_clone(library: Any, engine_id: str) -> Any | None:
 def engine_preflight(engine_id: str, cfg: Any | None = None) -> str | None:
     """Why ``engine_id`` can't run on this machine (actionable), or None if it looks runnable.
 
-    Cheap and SDK-free: a find_spec for in-process SDKs, file checks for the IndexTTS-2 worker
-    (its python + checkpoints live outside this venv)."""
+    Cheap and SDK-free: a find_spec for in-process SDKs, file checks for the IndexTTS-2 and
+    Qwen3-TTS workers (their python + weights live outside this venv)."""
     if engine_id in _SDK_MODULES and importlib.util.find_spec(_SDK_MODULES[engine_id]) is None:
         return f"{engine_id}: SDK package {_SDK_MODULES[engine_id]!r} is not installed in this venv"
     if engine_id == "indextts2":
@@ -292,6 +292,25 @@ def engine_preflight(engine_id: str, cfg: Any | None = None) -> str | None:
             return (
                 f"indextts2: checkpoints not found at {cfg.indextts2_checkpoints_dir}; download "
                 "them and set INDEXTTS2_CHECKPOINTS_DIR"
+            )
+    if engine_id == "qwen3tts":
+        from seiyuu.engines.qwen3tts_engine import BASE_CHECKPOINT, models_present, qwen3tts_config
+
+        if cfg is None:
+            from seiyuu.settings import get_settings
+
+            cfg = get_settings()
+        paths = qwen3tts_config(cfg)
+        py = paths["worker_python"]
+        if py is None or not Path(py).is_file():
+            return (
+                f"qwen3tts: worker python not configured or missing ({py}); set "
+                "QWEN3TTS_WORKER_PYTHON in .env to the Qwen3-TTS env's python.exe"
+            )
+        if not models_present(paths["models_dir"]):
+            return (
+                f"qwen3tts: {BASE_CHECKPOINT} not found under {paths['models_dir']}; download "
+                "it and set QWEN3TTS_MODELS_DIR"
             )
     return None
 
