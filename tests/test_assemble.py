@@ -2,6 +2,7 @@ import subprocess
 
 import numpy as np
 import pytest
+import soundfile as sf
 from click.testing import CliRunner
 
 from factories import make_book
@@ -158,6 +159,129 @@ def test_no_narrator_id_disables_dialogue_pacing(tmp_path) -> None:
     samples = _chapter_samples(chapter, tmp_path, PAUSES)  # narrator_voice_id defaults to None
     parts = [PAUSES.chapter_lead_in, 1.0, PAUSES.paragraph, 1.0, PAUSES.chapter_lead_out]
     assert len(samples) == sum(round(s * CANONICAL_SAMPLE_RATE) for s in parts)
+
+
+SR = CANONICAL_SAMPLE_RATE
+
+
+def edged_wav(book_dir, name, edge: float, *, level: float = 0.3, floor: float = 0.0) -> str:
+    """A 1 s constant 'voiced' clip with `edge` seconds of edge silence (at `floor`) per side."""
+    pad = np.full(round(edge * SR), floor, dtype=np.float32)
+    samples = np.concatenate([pad, np.full(SR, level, dtype=np.float32), pad])
+    rel = f"cache/{name}.wav"
+    AudioFile(samples=samples).save(book_dir / rel)
+    return rel
+
+
+def read_clip(book_dir, rel) -> np.ndarray:
+    return sf.read(str(book_dir / rel), dtype="float32")[0]
+
+
+def test_quote_split_join_trims_edge_silence(tmp_path) -> None:
+    # “Yes,” he said — two clips of ONE block, each with 0.5 s of edge silence: the join keeps
+    # 0.20 s of the first clip's tail + 0.12 s of the second's head (a comma-length pause).
+    a = edged_wav(tmp_path, "a", 0.5)
+    b = edged_wav(tmp_path, "b", 0.5)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="alice"),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
+    voiced = np.flatnonzero(samples)
+    first_end = round((PAUSES.chapter_lead_in + 0.5 + 1.0) * SR)
+    gap = np.diff(voiced).max() - 1  # the only run of silence between voiced samples
+    assert gap == round(PAUSES.join_tail_keep * SR) + round(PAUSES.join_head_keep * SR)
+    assert voiced[0] == round((PAUSES.chapter_lead_in + 0.5) * SR)
+    assert voiced[np.argmax(np.diff(voiced))] == first_end - 1
+    parts = [PAUSES.chapter_lead_in, 0.5, 1.0, PAUSES.join_tail_keep]
+    parts += [PAUSES.join_head_keep, 1.0, 0.5, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * SR) for s in parts)
+
+
+def test_quote_split_join_never_trims_more_than_the_silence(tmp_path) -> None:
+    # 0.1 s edges are already under both keeps: nothing to trim, bit-identical concatenation.
+    a = edged_wav(tmp_path, "a", 0.1)
+    b = edged_wav(tmp_path, "b", 0.1)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)
+    lead, out = np.zeros(round(PAUSES.chapter_lead_in * SR)), np.zeros(SR)
+    expected = np.concatenate([lead, read_clip(tmp_path, a), read_clip(tmp_path, b), out])
+    np.testing.assert_array_equal(samples, expected.astype(np.float32))
+
+
+def test_silent_beat_inside_a_block_keeps_both_facing_edges(tmp_path) -> None:
+    # He paused. “……” Then he said — a beat inside the block is a deliberate held silence, so
+    # neither join next to it is trimmed.
+    a = edged_wav(tmp_path, "a", 0.5)
+    beat = "cache/beat.wav"
+    AudioFile(samples=np.zeros(round(0.2 * SR), dtype=np.float32)).save(tmp_path / beat)
+    c = edged_wav(tmp_path, "c", 0.5)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a),
+            seg("ch001_b0001", BlockType.PARAGRAPH, beat),
+            seg("ch001_b0001", BlockType.PARAGRAPH, c),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)
+    parts = [PAUSES.chapter_lead_in, 2.0, 0.2, 2.0, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * SR) for s in parts)
+
+
+def test_joins_between_blocks_are_not_trimmed(tmp_path) -> None:
+    a = edged_wav(tmp_path, "a", 0.5)
+    b = edged_wav(tmp_path, "b", 0.5)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a),
+            seg("ch001_b0002", BlockType.PARAGRAPH, b),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES)
+    expected = np.concatenate(
+        [
+            np.zeros(round(PAUSES.chapter_lead_in * SR)),
+            read_clip(tmp_path, a),
+            np.zeros(round(PAUSES.paragraph * SR)),
+            read_clip(tmp_path, b),
+            np.zeros(round(PAUSES.chapter_lead_out * SR)),
+        ]
+    )
+    np.testing.assert_array_equal(samples, expected.astype(np.float32))
+
+
+def test_join_silence_is_measured_before_voice_gain(tmp_path) -> None:
+    # A -56 dBFS tail is silence on the raw clip; a x4 voice gain would lift it over the -50
+    # dBFS threshold, so measuring after the gain would wrongly keep it.
+    a = edged_wav(tmp_path, "a", 0.5, floor=0.0015)
+    b = edged_wav(tmp_path, "b", 0.5)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="loud"),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr", {"loud": 4.0})
+    parts = [PAUSES.chapter_lead_in, 0.5, 1.0, PAUSES.join_tail_keep]
+    parts += [PAUSES.join_head_keep, 1.0, 0.5, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * SR) for s in parts)
 
 
 def test_loudnorm_filter_two_pass_includes_measured() -> None:
