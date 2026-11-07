@@ -6,6 +6,7 @@ import {
   ApiError,
   BACKEND_START_COMMAND,
   isBackendDown,
+  isSignedOut,
   postForm,
   postFormWithStatus,
   postJson,
@@ -106,6 +107,64 @@ describe("postForm", () => {
     const recorded = server.formBodyOf("POST", "/api/voices/clone");
     expect(recorded.get("name")).toBe("Narrator");
     expect((recorded.get("file") as File).name).toBe("ref.wav");
+  });
+});
+
+describe("signed_out", () => {
+  const expectSignedOut = async (path: string) => {
+    const err = (await api(path).catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(401);
+    expect(err.code).toBe("signed_out");
+    expect(isBackendDown(err)).toBe(false);
+    expect(isSignedOut()).toBe(true);
+  };
+
+  it("an unfollowed redirect to the login page is signed out, not an outage", async () => {
+    const redirect = new Response(null, { status: 200 });
+    Object.defineProperty(redirect, "type", { value: "opaqueredirect" });
+    const { calls } = mockApi().on("GET", "/api/books", () => redirect);
+    await expectSignedOut("/api/books");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("the backend's own 401 is signed out", async () => {
+    mockApi().error("GET", "/api/books", 401, "signed_out", "Sign in again to use Seiyuu.");
+    await expectSignedOut("/api/books");
+  });
+
+  it("Cloudflare's non-JSON 401 is signed out", async () => {
+    mockApi().on("GET", "/api/books", () => new Response("<html>denied</html>", { status: 401 }));
+    await expectSignedOut("/api/books");
+  });
+
+  it("doesn't follow redirects, on requests with their own options too", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await postJson("/api/x", { a: 1 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/x",
+      expect.objectContaining({ redirect: "manual", method: "POST" }),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("a later success clears it", async () => {
+    mockApi().error("GET", "/api/books", 401, "signed_out", "Sign in again");
+    await api("/api/books").catch(() => undefined);
+    expect(isSignedOut()).toBe(true);
+    mockApi().get("/api/books", { books: [] });
+    await api("/api/books");
+    expect(isSignedOut()).toBe(false);
+  });
+
+  it("a refused 403 is not mistaken for an expired login", async () => {
+    mockApi().get("/api/ok", {});
+    await api("/api/ok");
+    mockApi().error("POST", "/api/books", 403, "bad_origin", "another site");
+    const err = (await api("/api/books", { method: "POST" }).catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("bad_origin");
+    expect(isSignedOut()).toBe(false);
   });
 });
 

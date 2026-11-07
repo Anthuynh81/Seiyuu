@@ -229,12 +229,34 @@ class Settings(BaseSettings):
     # "testserver" Host. For LAN use (e.g. Listen on a tablet) add the machine's
     # IP/hostname in .env: API_ALLOWED_HOSTS=localhost,127.0.0.1,testserver,192.168.1.20
     api_allowed_hosts: str = "localhost,127.0.0.1,testserver"
+    # `seiyuu serve`: its port on 127.0.0.1, and the built UI it serves.
+    api_port: int = Field(8767, ge=1, le=65535)
+    frontend_dist: Path = REPO_ROOT / "frontend" / "dist"
+    # Public hosting through Cloudflare Tunnel + Access (api/access.py). All three or none: the
+    # hostname is only answered once its login can be checked, and half a config won't start.
+    # The team is the part before .cloudflareaccess.com; the AUD tag is that Access app's own.
+    api_public_host: str = ""
+    api_access_team: str = ""
+    api_access_aud: str = ""
 
     # Engine borrowing (F1). Max seconds an audition waits for a running render to lend its
     # resident engine between segments before falling back to a soft gpu_busy_retry; also
     # the safety timeout the parked render waits for the borrower's done signal. ~30s
     # absorbs a Chatterbox segment + its CPU whisper validation without spurious refusals.
     borrow_grant_timeout_s: float = Field(30.0, gt=0)
+
+    @property
+    def public_host(self) -> str:
+        """The bare lowercase hostname, however it was written."""
+        host = self.api_public_host.strip().lower().split("://", 1)[-1]
+        return host.split("/", 1)[0].split(":", 1)[0]
+
+    @property
+    def access_issuer(self) -> str:
+        """https://<team>.cloudflareaccess.com, whether the team was written short or in full."""
+        team = self.api_access_team.strip().lower().rstrip("/").split("://", 1)[-1]
+        team = team.removesuffix(".cloudflareaccess.com")
+        return f"https://{team}.cloudflareaccess.com" if team else ""
 
     @property
     def elevenlabs_effective_price_per_1k_chars(self) -> float:

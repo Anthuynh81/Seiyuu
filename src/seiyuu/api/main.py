@@ -17,9 +17,12 @@ from fastapi import FastAPI
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from seiyuu import __version__
+from seiyuu.api.access import AccessGuard, Verifier, build_verifier
 from seiyuu.api.concurrency import AuditionSlot, BorrowBroker, HeavyWorkGate
 from seiyuu.api.errors import register_error_handlers
+from seiyuu.api.frontend import install_frontend
 from seiyuu.api.handlers import build_handlers
+from seiyuu.api.origin import OriginGuard
 from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.routes import books as books_routes
 from seiyuu.api.routes import engines as engines_routes
@@ -42,11 +45,14 @@ logger = logging.getLogger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
-def create_app(*, settings: Settings | None = None) -> FastAPI:
+def create_app(
+    *, settings: Settings | None = None, access_verifier: Verifier | None = None
+) -> FastAPI:
     """App factory. ``settings`` is injectable for tests; production resolves the
     process-wide singleton at construction (the host allowlist — middleware must
     exist before startup) and at startup (everything else); ``get_settings()`` is
-    cached, so both paths see the same instance."""
+    cached, so both paths see the same instance. ``access_verifier`` replaces the one
+    built from settings (tests sign their own tokens)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -130,8 +136,18 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
             "every request to the API. Set it to a comma-separated list of hosts "
             f"(default: {default!r}) or unset it to use the default."
         )
+    # The public hostname is only answered once its login can be checked: build_verifier refuses
+    # a partial config, so public_host here means a verifier exists.
+    verifier = access_verifier or build_verifier(host_cfg)
+    public_host = host_cfg.public_host if verifier is not None else ""
+    if public_host:
+        allowed_hosts.append(public_host)
+    # Starlette runs the last added middleware first: Host, then the login, then Origin.
+    app.add_middleware(OriginGuard)
+    app.add_middleware(AccessGuard, public_host=public_host, verifier=verifier)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
     register_error_handlers(app)
+    install_frontend(app, host_cfg.frontend_dist)
     app.include_router(system_routes.router, prefix="/api")
     app.include_router(engines_routes.router, prefix="/api")
     app.include_router(jobs_routes.router, prefix="/api")

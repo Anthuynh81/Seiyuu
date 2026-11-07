@@ -5,6 +5,7 @@ import { Route, Routes } from "react-router-dom";
 import { fetchDepartedJobs, recentJobsQuery, useLiveJobs } from "./api/hooks";
 import { JobNotices } from "./app/JobNotices";
 import { NavRail } from "./app/NavRail";
+import { SignedOutNotice } from "./app/SignedOutNotice";
 import { TransportBar } from "./app/TransportBar";
 import { Lexicon } from "./screens/Lexicon";
 import { Library } from "./screens/Library";
@@ -82,6 +83,7 @@ export default function App() {
       <JobCompletionWatcher />
       <NavRail />
       <main className="main">
+        <SignedOutNotice />
         <Routes>
           <Route path="/" element={<Library />} />
           <Route path="/listen" element={<Listen />} />
