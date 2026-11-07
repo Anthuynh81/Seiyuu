@@ -309,7 +309,10 @@ def test_silent_beat_inside_a_block_keeps_both_facing_edges(tmp_path) -> None:
     assert len(samples) == sum(round(s * SR) for s in parts)
 
 
-def test_joins_between_blocks_are_not_trimmed(tmp_path) -> None:
+def test_joins_between_blocks_are_not_trimmed_when_trim_block_edges_is_off(tmp_path) -> None:
+    # Off, a block join is the clips' own edges plus the gap (the pre-trim behaviour).
+    from dataclasses import replace
+
     a = edged_wav(tmp_path, "a", 0.5)
     b = edged_wav(tmp_path, "b", 0.5)
     chapter = RenderedChapter(
@@ -320,7 +323,7 @@ def test_joins_between_blocks_are_not_trimmed(tmp_path) -> None:
             seg("ch001_b0002", BlockType.PARAGRAPH, b),
         ],
     )
-    samples = _chapter_samples(chapter, tmp_path, PAUSES)
+    samples = _chapter_samples(chapter, tmp_path, replace(PAUSES, trim_block_edges=False))
     expected = np.concatenate(
         [
             np.zeros(round(PAUSES.chapter_lead_in * SR)),
@@ -470,23 +473,6 @@ def test_assemble_cli_without_render(tmp_path) -> None:
     result = CliRunner().invoke(main, ["assemble", "nope", "--output-dir", str(tmp_path / "out")])
     assert result.exit_code != 0
     assert "seiyuu render" in result.output
-
-
-def test_block_edges_are_untouched_unless_trim_block_edges(tmp_path) -> None:
-    # Off (the default), a paragraph join is the clips' own edges plus the gap, as before.
-    a = edged_wav(tmp_path, "a", 0.5)
-    b = edged_wav(tmp_path, "b", 0.4)
-    chapter = RenderedChapter(
-        index=1,
-        title="T",
-        segments=[
-            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="narr"),
-            seg("ch001_b0002", BlockType.PARAGRAPH, b, voice="narr"),
-        ],
-    )
-    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
-    gap = np.diff(np.flatnonzero(samples)).max() - 1
-    assert gap == round(0.5 * SR) + round(PAUSES.paragraph * SR) + round(0.4 * SR)
 
 
 def test_trim_block_edges_cuts_both_edges_then_adds_the_gap(tmp_path) -> None:

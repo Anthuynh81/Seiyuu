@@ -43,7 +43,7 @@ class PauseProfile:
     silence is trimmed down to these, so the split reads like the comma it replaces (~0.32 s)
     instead of ~0.8 s of Kokoro clip edges mid-sentence. Never exposed in the API/CLI.
 
-    `trim_block_edges` (off by default) does the same at joins BETWEEN blocks, down to
+    `trim_block_edges` (on by default) does the same at joins BETWEEN blocks, down to
     `block_tail_keep` / `block_head_keep`, before the gap is added. Kokoro clips carry ~0.33 s
     of lead and ~0.5 s of tail silence, so a 0.6 s paragraph gap measures ~1.4 s untrimmed;
     trimmed it is ~0.9 s. Speech itself is untouched. A silent beat keeps its own edges.
@@ -57,7 +57,7 @@ class PauseProfile:
     chapter_lead_out: float = 1.0
     join_tail_keep: float = 0.20
     join_head_keep: float = 0.12
-    trim_block_edges: bool = False
+    trim_block_edges: bool = True
     block_tail_keep: float = 0.20
     block_head_keep: float = 0.10
 
@@ -170,7 +170,7 @@ def _chapter_samples(
 ) -> np.ndarray:
     """Concatenate a chapter's segment audio with pause silences. Clips of one block (a
     quote-boundary split) join with no gap and their facing edge silence trimmed (_trim_join);
-    single-voice renders have one clip per block, so they are never trimmed.
+    with ``trim_block_edges`` the edges facing each gap between blocks are trimmed too.
 
     ``voice_gains`` maps voice_id -> linear gain (inter-voice loudness matching); voices not
     in it are copied through untouched, so an empty/None map is bit-identical to no matching.
