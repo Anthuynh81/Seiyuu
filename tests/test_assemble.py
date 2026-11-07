@@ -202,6 +202,74 @@ def test_quote_split_join_trims_edge_silence(tmp_path) -> None:
     assert len(samples) == sum(round(s * SR) for s in parts)
 
 
+def test_quote_split_join_keeps_tail_then_head_with_faded_cuts(tmp_path) -> None:
+    # Different floors tell the kept edges apart (zeros can't): exactly join_tail_keep of the
+    # first clip's -54 dBFS tail, then join_head_keep of the second clip's -60 dBFS head, and
+    # each cut ramps to zero over 5 ms so a cut in the noise floor can't click.
+    a = edged_wav(tmp_path, "a", 0.5, floor=0.002)
+    b = edged_wav(tmp_path, "b", 0.5, floor=0.001)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="alice"),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
+    clip_a, clip_b = read_clip(tmp_path, a), read_clip(tmp_path, b)
+    edge, fade = round(0.5 * SR), SR // 200
+    tail_keep, head_keep = round(PAUSES.join_tail_keep * SR), round(PAUSES.join_head_keep * SR)
+    start = round(PAUSES.chapter_lead_in * SR) + edge + SR  # just past the first clip's voice
+    assert samples[start - 1] == clip_a[edge + SR - 1]  # the voice itself is untouched
+
+    tail = samples[start : start + tail_keep]
+    expected_tail = np.full(tail_keep, clip_a[-1], dtype=np.float32)
+    expected_tail[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    np.testing.assert_allclose(tail, expected_tail, rtol=1e-6, atol=0)
+    assert tail[-1] == 0.0 and tail[-fade - 1] == clip_a[-1]
+
+    head = samples[start + tail_keep : start + tail_keep + head_keep]
+    expected_head = np.full(head_keep, clip_b[0], dtype=np.float32)
+    expected_head[:fade] *= np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    np.testing.assert_allclose(head, expected_head, rtol=1e-6, atol=0)
+    assert head[0] == 0.0 and head[fade] == clip_b[0]
+    assert clip_a[-1] != clip_b[0]  # the floors really differ, so a swap would show
+    assert samples[start + tail_keep + head_keep] == clip_b[edge]  # then the second voice
+
+
+def test_quote_split_join_keeps_quiet_speech_above_the_threshold(tmp_path) -> None:
+    # A decaying speech tail at -40 dBFS (well under the voice, over the -50 dBFS line) is
+    # speech: all 0.3 s of it survives, and only the true silence after it is trimmed.
+    voiced, quiet, gap = SR, round(0.3 * SR), round(0.5 * SR)
+    a = "cache/a.wav"
+    AudioFile(
+        samples=np.concatenate(
+            [
+                np.full(voiced, 0.3, dtype=np.float32),
+                np.full(quiet, 0.01, dtype=np.float32),
+                np.zeros(gap, dtype=np.float32),
+            ]
+        )
+    ).save(tmp_path / a)
+    b = edged_wav(tmp_path, "b", 0.5)
+    chapter = RenderedChapter(
+        index=1,
+        title="T",
+        segments=[
+            seg("ch001_b0001", BlockType.PARAGRAPH, a, voice="alice"),
+            seg("ch001_b0001", BlockType.PARAGRAPH, b, voice="narr"),
+        ],
+    )
+    samples = _chapter_samples(chapter, tmp_path, PAUSES, "narr")
+    start = round(PAUSES.chapter_lead_in * SR) + voiced
+    clip_a = read_clip(tmp_path, a)
+    np.testing.assert_array_equal(samples[start : start + quiet], clip_a[voiced : voiced + quiet])
+    parts = [PAUSES.chapter_lead_in, 1.0, 0.3, PAUSES.join_tail_keep]
+    parts += [PAUSES.join_head_keep, 1.0, 0.5, PAUSES.chapter_lead_out]
+    assert len(samples) == sum(round(s * SR) for s in parts)
+
+
 def test_quote_split_join_never_trims_more_than_the_silence(tmp_path) -> None:
     # 0.1 s edges are already under both keeps: nothing to trim, bit-identical concatenation.
     a = edged_wav(tmp_path, "a", 0.1)
