@@ -512,6 +512,30 @@ describe("Review", () => {
     expect(await screen.findByText("who says this line?")).toHaveAttribute("title", "ch001_b0002 [0]");
   });
 
+  it("Design voices (Qwen) opens the cast-plan panel and closes a Kokoro preview", async () => {
+    const user = userEvent.setup();
+    const server = setupReview();
+    server
+      .post("/api/books/b1/assignment/suggest", {
+        assignment: ASSIGNMENT,
+        would_create_voice_ids: ["v-alice"],
+        would_recast_voice_ids: [],
+        edit_warnings: [],
+      })
+      .error("GET", "/api/books/b1/cast-plan", 404, "not_found", "no cast plan yet");
+    renderWithProviders(<Review />);
+
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
+    expect(await screen.findByText(/1 new/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Design voices (Qwen)" }));
+    const panel = await screen.findByRole("region", { name: "design voices" });
+    expect(within(panel).getByRole("button", { name: "Describe the cast" })).toBeInTheDocument();
+    expect(screen.queryByText(/1 new/)).not.toBeInTheDocument(); // one way of casting at a time
+    expect(screen.getByRole("button", { name: "Design voices (Qwen)" })).toBeDisabled();
+    await user.click(within(panel).getByRole("button", { name: "close" }));
+    expect(screen.queryByRole("region", { name: "design voices" })).not.toBeInTheDocument();
+  });
+
   it("first cast: one Suggest a cast button (no hash auto-cast) previews, and apply drafts with strategy=smart", async () => {
     const user = userEvent.setup();
     const server = setupReview();
@@ -523,7 +547,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    const suggest = await screen.findByRole("button", { name: "Suggest a cast" });
+    const suggest = await screen.findByRole("button", { name: "Quick draft (Kokoro)" });
     // the collision-blind hash caster is gone from the UI (it stays in the CLI)
     expect(screen.queryByRole("button", { name: "auto-cast" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "re-draft" })).not.toBeInTheDocument();
@@ -570,7 +594,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     const table = await screen.findByRole("table", { name: "proposed voices" });
     expect(within(table).getByRole("button", { name: /voice for Bob/ })).toHaveTextContent("new voice for Bob");
 
@@ -618,7 +642,7 @@ describe("Review", () => {
     server.error("POST", "/api/books/b1/assignment/suggest", 422, "invalid", "not enough distinct voices for this cast");
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     expect(await screen.findByText("couldn't suggest a cast")).toBeInTheDocument();
     expect(screen.getByText(/not enough distinct voices/)).toBeInTheDocument();
     expect(server.calls.filter((c) => c.url.includes("/assignment/suggest"))).toHaveLength(1);
@@ -647,7 +671,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     const table = await screen.findByRole("table", { name: "proposed voices" });
     await user.click(within(table).getByRole("button", { name: /voice for Bob/ }));
     await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Narrator · kokoro" }));
@@ -687,7 +711,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />, { route: "/review?book=b1" });
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     await waitFor(() => expect(server.lastCall("POST", "/api/books/b1/assignment/suggest")).toBeDefined());
     await user.click(screen.getByRole("button", { name: /Book One/ }));
     await user.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Book Two" }));
@@ -695,7 +719,7 @@ describe("Review", () => {
 
     release();
     // let the late reply settle, then check it opened nothing on Book Two
-    await waitFor(() => expect(screen.getByRole("button", { name: "Suggest a cast" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Quick draft (Kokoro)" })).toBeEnabled());
     await gate;
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByRole("table", { name: "proposed voices" })).not.toBeInTheDocument();
@@ -713,7 +737,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     const table = await screen.findByRole("table", { name: "proposed voices" });
     server.error("POST", "/api/books/b1/assignment/suggest", 422, "invalid", "that voice can't be used here");
     await user.click(within(table).getByRole("button", { name: /voice for Bob/ }));
@@ -749,7 +773,7 @@ describe("Review", () => {
     });
     renderWithProviders(<Review />);
 
-    const suggest = await screen.findByRole("button", { name: "Suggest a cast" });
+    const suggest = await screen.findByRole("button", { name: "Quick draft (Kokoro)" });
     await user.click(suggest);
     await screen.findByRole("table", { name: "proposed voices" });
     expect(suggest).toBeDisabled();
@@ -776,7 +800,7 @@ describe("Review", () => {
     );
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     await user.click(await screen.findByRole("checkbox", { name: /use AI trait hints/ }));
     await user.click(screen.getByRole("button", { name: "apply cast" }));
 
@@ -951,7 +975,7 @@ describe("Review cast reset", () => {
 
     // the saved cast has loaded once reset is offered
     await screen.findByRole("button", { name: "reset cast…" });
-    expect(screen.getByRole("button", { name: "Suggest a cast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Quick draft (Kokoro)" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "re-draft" })).not.toBeInTheDocument();
     // draft/final are kept (they matter for paid final casts) but tucked into a disclosure
     const advanced = screen.getByText(/advanced · cast stage: draft/);
@@ -973,7 +997,7 @@ describe("Review cast reset", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     await screen.findByRole("table", { name: "proposed voices" });
     expect(server.jsonBodyOf("POST", "/api/books/b1/assignment/suggest")).toMatchObject({ stage: "final" });
     // nothing differs from the saved cast until re-cast is ticked (with its re-recording warning)
@@ -1065,7 +1089,7 @@ describe("Review cast reset", () => {
     });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     expect(await screen.findByText("Your 1 pick is kept")).toBeInTheDocument();
     // the existing create/recast summary is unchanged
     // "already cast" counts the saved cast (Alice and Bob), not the voices that exist
@@ -1392,7 +1416,7 @@ describe("Review: hear a voice where you cast it", () => {
       });
     renderWithProviders(<Review />);
 
-    await user.click(await screen.findByRole("button", { name: "Suggest a cast" }));
+    await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     const table = await screen.findByRole("table", { name: "proposed voices" });
     await user.click(within(table).getByRole("button", { name: "hear Alice's proposed voice" }));
     await waitFor(() => expect(auditionPosts(server, "v-alice")).toHaveLength(1));

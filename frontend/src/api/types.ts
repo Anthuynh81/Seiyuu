@@ -487,6 +487,55 @@ export interface ClonedVoiceOut extends VoiceOut {
   clone_note: string | null;
 }
 
+/** Qwen-first casting: the per-book cast plan (GET/PUT /api/books/{id}/cast-plan). */
+export const NARRATOR_ROW = "__narrator__";
+
+export interface PlanRow {
+  character_id: string; // NARRATOR_ROW for the narrator
+  name: string;
+  line_count: number;
+  gender: string | null;
+  age: string | null;
+  description: string; // voice only; becomes the VoiceDesign prompt
+  sample_lines: string[];
+  sample_index: number;
+  same_as: string | null; // share this row's voice; designs nothing
+  keep_current: boolean; // skip designing; keep today's voice
+  takes: number;
+  edited: boolean;
+  drafted_by: string | null;
+  design_id: string | null;
+  voice_id: string | null;
+}
+
+export interface CastPlan {
+  book_id: string;
+  provider_id: string;
+  model_id: string;
+  prompt_version: string;
+  first_person: boolean;
+  protagonist_suggestion: string | null;
+  narrator: PlanRow;
+  rows: PlanRow[];
+  notes: string[];
+}
+
+export interface RowUpdate {
+  character_id: string;
+  description?: string;
+  sample_index?: number;
+  same_as?: string;
+  clear_same_as?: boolean;
+  keep_current?: boolean;
+  gender?: string;
+  age?: string;
+}
+
+export interface CastDesignedOut {
+  plan: CastPlan;
+  assignment: VoiceAssignment;
+}
+
 /** Voice design (Qwen3-TTS VoiceDesign): POST /api/designs and friends. */
 export interface DesignCreate {
   name: string;

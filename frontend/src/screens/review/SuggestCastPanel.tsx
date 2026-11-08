@@ -41,7 +41,7 @@ function inputFor({ narrator, accent, overrides }: Choices): SuggestInput {
   return { ...(narrator !== KEEP ? { narrator_voice_id: narrator } : {}), accent, overrides };
 }
 
-/** The ONE "Suggest a cast" flow: a preview table of the smart caster's proposal (nothing
+/** The ONE "Quick draft (Kokoro)" flow (formerly "Suggest a cast"): a preview table of the smart caster's proposal (nothing
     written). Every row can be changed — a change becomes an override and re-requests the
     preview, so the table always shows what an apply writes. Narrator and accent feed the same
     request. A change is only kept once the server accepts it: a refused one is rolled back and

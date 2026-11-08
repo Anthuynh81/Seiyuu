@@ -50,6 +50,7 @@ import { RosterRow } from "./review/RosterRow";
 import { AttributePanel } from "./render/AttributePanel";
 import { SegmentPair } from "./review/SegmentPair";
 import { rememberAiApply } from "../lib/applyTiming";
+import { CastPlanPanel } from "./review/CastPlanPanel";
 import { SuggestCastPanel } from "./review/SuggestCastPanel";
 import { PlayableRow } from "./review/PlayableRow";
 import { ViewMenu } from "./review/ViewMenu";
@@ -155,10 +156,13 @@ export function Review() {
   // the "reset cast…" confirm (a keep_existing:false draft) — the only path that drops hand picks
   const [resetOpen, setResetOpen] = useState(false);
   useEffect(() => setResetOpen(false), [bookId]);
-  // "Suggest a cast": the last preview the server returned. Held here (not read off the
+  // "Quick draft (Kokoro)": the last preview the server returned. Held here (not read off the
   // mutation) so the table stays up while a row/narrator/accent change re-requests it; the
   // per-call onSuccess only fires for the LATEST request, so an out-of-order reply never wins.
   const [castPreview, setCastPreview] = useState<SuggestCastResponse | null>(null);
+  // Qwen-first casting (the default way to cast): the cast-plan panel
+  const [designOpen, setDesignOpen] = useState(false);
+  useEffect(() => setDesignOpen(false), [bookId]);
   const resetSuggest = suggestCast.reset;
   useEffect(() => {
     setCastPreview(null);
@@ -180,6 +184,7 @@ export function Review() {
       },
     );
   const openSuggest = () => {
+    setDesignOpen(false);
     setCastPreview(null); // a fresh suggestion: the panel remounts with no leftover changes
     draftCast.reset();
     requestPreview({});
@@ -689,7 +694,7 @@ export function Review() {
                 </div>
               )}
               <div className="caststrip">
-                {/* One "Suggest a cast" in both states, at the same position, so it keeps its
+                {/* One "Quick draft (Kokoro)" in both states, at the same position, so it keeps its
                     identity when the saved cast loads under the pointer. It also replaces the old
                     re-draft: with re-cast off, applying a suggestion fills newly found characters
                     and keeps every existing voice and hand pick. */}
@@ -699,6 +704,18 @@ export function Review() {
                     applying
                   </span>
                 )}
+                <Tip content="design a voice for every character from how the book describes them (Qwen3-TTS) — you review the descriptions first">
+                  <button
+                    className={casting ? "key px-[9px] py-[3px]" : "key ml-auto px-3 py-[3px]"}
+                    disabled={designOpen}
+                    onClick={() => {
+                      closeSuggest();
+                      setDesignOpen(true);
+                    }}
+                  >
+                    Design voices (Qwen)
+                  </button>
+                </Tip>
                 <Tip
                   content={
                     castPreview
@@ -709,13 +726,13 @@ export function Review() {
                   }
                 >
                   <button
-                    className={casting ? "key quiet px-[9px] py-[3px]" : "key ml-auto px-3 py-[3px]"}
+                    className="key quiet px-[9px] py-[3px]"
                     // while a preview is open its own controls change it; a fresh suggestion here
                     // would silently throw away the user's row, narrator and accent changes
                     disabled={suggestCast.isPending || castPreview !== null}
                     onClick={openSuggest}
                   >
-                    {suggestCast.isPending && !castPreview ? "thinking…" : "Suggest a cast"}
+                    {suggestCast.isPending && !castPreview ? "thinking…" : "Quick draft (Kokoro)"}
                   </button>
                 </Tip>
                 {casting && (
@@ -802,6 +819,7 @@ export function Review() {
                   )}
                 </div>
               )}
+              {designOpen && bookId && <CastPlanPanel bookId={bookId} onClose={() => setDesignOpen(false)} />}
               {castPreview && (
                 <SuggestCastPanel
                   preview={castPreview}
