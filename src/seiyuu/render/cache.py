@@ -74,20 +74,24 @@ class SegmentCache:
     def __init__(self, cache_dir: Path) -> None:
         self.cache_dir = Path(cache_dir)
 
-    def path_for(self, key: SegmentKey) -> Path:
-        return self.cache_dir / f"{key.key_hash}.wav"
+    def path_for(self, key: SegmentKey, *, variant: str | None = None) -> Path:
+        """``{key_hash}.wav``; a ``variant`` names a sibling file for the same key whose
+        content is fixed by something outside the key (a silent beat's length), so changing
+        that thing writes a new file instead of rewriting one other manifests point to."""
+        name = f"{key.key_hash}.{variant}" if variant else key.key_hash
+        return self.cache_dir / f"{name}.wav"
 
     def get(self, key: SegmentKey) -> Path | None:
         path = self.path_for(key)
         return path if path.is_file() else None
 
-    def put(self, key: SegmentKey, audio: AudioFile) -> Path:
+    def put(self, key: SegmentKey, audio: AudioFile, *, variant: str | None = None) -> Path:
         # Crash-atomic: get() checks only existence and the key never changes, so a process
         # killed mid-write must never leave a truncated wav at the final name — it would
         # poison this segment forever (silently short audio, or a deterministic re-fail).
         # Same temp+fsync+replace as repository.atomic; the temp keeps a .wav suffix so
         # libsndfile picks the format, and get() never matches it.
-        path = self.path_for(key)
+        path = self.path_for(key, variant=variant)
         tmp = path.with_name(f"{path.stem}.part.wav")
         try:
             audio.save(tmp)

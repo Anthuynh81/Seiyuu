@@ -9,6 +9,7 @@ import soundfile as sf
 
 from factories import make_book
 from fake_engine import FakeEngine
+from seiyuu.assemble import PauseProfile
 from seiyuu.attribute.models import (
     AttributedChapter,
     AttributionReport,
@@ -53,6 +54,13 @@ def test_engine_returns_silence_without_calling_the_model():
     assert eng.calls == []
     assert audio.duration_seconds == pytest.approx(SILENT_BEAT_SECONDS)
     assert not np.any(audio.samples)
+
+
+def test_beat_is_shorter_than_the_gaps_around_it():
+    # The assembler's gaps (and the neighbours' clip edges) already surround a beat; at 0.6 s
+    # the whole beat ran as long as a scene break. Keep the beat itself under every join gap.
+    pauses = PauseProfile()
+    assert SILENT_BEAT_SECONDS < min(pauses.dialogue, pauses.paragraph)
 
 
 def test_empty_text_still_refused():
@@ -174,8 +182,8 @@ def test_wordless_dialogue_is_not_a_scene_break(text):
 
 
 def test_stale_engine_audio_for_a_wordless_line_is_replaced(tmp_path):
-    """An older render cached real engine audio for the line (maybe invented speech), with a
-    verdict and read-along words: the next render, without force, rewrites the silent beat and
+    """Whatever sits at the beat's file (here engine audio, maybe invented speech, with a
+    verdict and read-along words): the next render, without force, rewrites the silent beat and
     drops both sidecars instead of serving the old audio."""
     eng = FakeEngine()
     eng.requires_validation = True
@@ -220,3 +228,71 @@ def test_wordless_lines_are_free_to_quote_and_need_no_approval(tmp_path):
     result = render_book(_book("“……”", "───"), eng, "v", tmp_path / "out", seed=1)
     assert len(result.manifest.chapters[0].segments) == 2
     assert eng.calls == []
+
+
+def _two_chapter_book() -> NormalizedBook:
+    def chapter(n: int, texts: tuple[str, ...]) -> Chapter:
+        return Chapter(
+            title=f"C{n}",
+            blocks=[
+                Block(id=f"ch{n:03d}_b{i:04d}", type=BlockType.PARAGRAPH, text=t)
+                for i, t in enumerate(texts, start=1)
+            ],
+        )
+
+    return NormalizedBook(
+        book_meta=BookMeta(
+            book_id="beat-book-0000000", title="B", source_path="b.epub", source_sha256="0" * 64
+        ),
+        chapters=[chapter(1, ("Before.", "“……”", "After.")), chapter(2, ("Hi.", "“……”", "Bye."))],
+    )
+
+
+def test_new_beat_length_never_rewrites_a_beat_other_chapters_point_to(tmp_path, monkeypatch):
+    """One wordless line has one key, so every chapter with it shares the cache entry. A scoped
+    render after the beat length changes must not rewrite the file the other chapters'
+    manifests point to, or their recorded durations (player offsets, totals) go stale."""
+    book, eng, out = _two_chapter_book(), FakeEngine(), tmp_path / "out"
+    monkeypatch.setattr("seiyuu.render.pipeline.SILENT_BEAT_SECONDS", 0.6)  # an older length
+    render_book(book, eng, "v", out, seed=1)
+    monkeypatch.undo()
+
+    result = render_book(book, eng, "v", out, seed=1, chapters=(2,))
+
+    beats = [ch.segments[1] for ch in result.manifest.chapters]
+    for beat in beats:
+        assert beat.duration_seconds == pytest.approx(sf.info(str(out / beat.wav)).duration)
+    assert [b.duration_seconds for b in beats] == [0.6, pytest.approx(SILENT_BEAT_SECONDS)]
+    assert beats[0].wav != beats[1].wav
+
+
+def test_older_audio_under_the_key_is_left_alone_and_never_served(tmp_path):
+    """Before the line was a beat, a render may have cached real engine audio (maybe invented
+    speech) at {key_hash}.wav. The beat is written beside it; the old file and its verdict
+    stay as the manifests that point at them describe them."""
+    eng, out = FakeEngine(), tmp_path / "out"
+    first = render_book(_book("───"), eng, "v", out, seed=1)
+    beat_wav = out / first.manifest.chapters[0].segments[0].wav
+    legacy = beat_wav.with_name(f"{beat_wav.name.split('.')[0]}.wav")
+    assert legacy != beat_wav
+    sf.write(str(legacy), np.full(48_000, 0.3, dtype=np.float32), 24_000)
+    verdict = legacy.with_name(f"{legacy.stem}.validation.json")
+    verdict.write_text("{}", encoding="utf-8")
+
+    again = render_book(_book("───"), eng, "v", out, seed=1)
+
+    seg = again.manifest.chapters[0].segments[0]
+    assert out / seg.wav == beat_wav
+    assert sf.info(str(beat_wav)).duration == pytest.approx(SILENT_BEAT_SECONDS)
+    assert sf.info(str(legacy)).duration == pytest.approx(2.0) and verdict.exists()
+
+
+def test_estimate_counts_a_beat_as_recorded_only_at_the_current_length(tmp_path, monkeypatch):
+    eng, out = FakeEngine(), tmp_path / "out"
+    render_book(_book("“……”"), eng, "v", out, seed=1)
+    est = estimate_render_cost_single(_book("“……”"), eng, "v", out, seed=1)
+    assert (est.cached_segments, est.free_segments) == (1, 0)
+    # a new beat length is a new file the next render writes: no longer recorded
+    monkeypatch.setattr("seiyuu.render.pipeline.SILENT_BEAT_SECONDS", 0.6)
+    est = estimate_render_cost_single(_book("“……”"), eng, "v", out, seed=1)
+    assert (est.cached_segments, est.free_segments) == (0, 1)

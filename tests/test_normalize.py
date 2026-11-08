@@ -1,7 +1,10 @@
 """Text normalization: pure-function fixtures, idempotency, and the tricky fiction cases."""
 
+import re
+
 import pytest
 
+from seiyuu.engines import nothing_to_say
 from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.normalize.numbers import roman_to_int
 
@@ -74,6 +77,105 @@ def test_chatterbox_profile_leaves_dashes_kokoro_folds():
     text = "Wait—stop."
     assert normalize_text(text, profile="kokoro") == "Wait, stop."
     assert normalize_text(text, profile="chatterbox") == "Wait—stop."
+
+
+# A leading dash/ellipsis run that only carries an orphan "?"/"!" is dropped for Kokoro (it
+# voiced the orphan as its own clause); the comma fold stays everywhere else.
+KOKORO_PUNCTUATION = [
+    # the leading orphan: dropped, opening quote/bracket kept
+    ("“……? No, not at all.”", "“No, not at all.”"),
+    ("“…!? The collector!?”", "“The collector!?”"),
+    ("……? Hm", "Hm"),
+    ("— ? Wait", "Wait"),
+    ("“… ? ok”", "“ok”"),
+    ("‘…? 3 cats’", "‘three cats’"),
+    ("(…? x)", "(x)"),
+    ('"…? Yes"', '"Yes"'),
+    ("'...? No.'", "'No.'"),
+    ("«…? Non»", "«Non»"),
+    # leading whitespace is only stripped after the punctuation pass: still the line start
+    (" “……? No.”", "“No.”"),
+    ("\n\t…? Hm", "Hm"),
+    # a leading run WITHOUT an orphan measured the same as the comma: unchanged
+    ("“…Hm?”", "“, Hm?”"),
+    ("– lolololol", ", lolololol"),
+    ("— URGENT —", ", URGENT,"),
+    # only at the line start: a quote opening mid-line keeps the fold
+    ("He said, “…? Yes.”", "He said, “, ? Yes.”"),
+    ("? …Correct!", "?, Correct!"),
+    # mid-sentence ellipses keep the comma (a native "…" drew the word before it out)
+    ("I… I don't", "I, I don't"),
+    ("I…I drew it?!", "I, I drew it?!"),
+    ("well… we", "well, we"),
+    ("word  …   word", "word, word"),
+    ("No…… no.", "No, no."),
+    ("blink… It was", "blink, It was"),
+    ("1...3", "one, three"),
+    ("3… 2……", "three, two,"),
+    ("Mr. Kim… waited", "Mister Kim, waited"),
+    # trailing marks and mid-line orphans keep the comma (measured the same)
+    ("But…", "But,"),
+    ("then…”", "then, ”"),
+    ("doing…?”", "doing, ?”"),
+    ("wrong…!", "wrong, !"),
+    ("Wow?!…", "Wow?!,"),
+    ("but—", "but,"),
+    ("“Ugh—!”", "“Ugh, !”"),
+    ("What do you mean…? Oh", "What do you mean, ? Oh"),
+    # mid-sentence dashes: the comma, exactly as before
+    ("section—7th place—was", "section, seventh place, was"),
+    ("Benefits – Come", "Benefits, Come"),
+    ("pages 1–3", "pages one, three"),
+    # wordless beats are never emptied (they stay nothing_to_say -> a silent beat)
+    ("“……”", "“, ”"),
+    ("“…!”", "“, !”"),
+    ("……", ","),
+    ("“……!? ……!!”", "“, !?, !!”"),
+    ("“…?”", "“, ?”"),
+]
+
+
+@pytest.mark.parametrize("raw,expected", KOKORO_PUNCTUATION)
+def test_kokoro_punctuation(raw, expected):
+    assert normalize_text(raw, profile="kokoro") == expected
+
+
+@pytest.mark.parametrize("raw", [raw for raw, _ in KOKORO_PUNCTUATION])
+def test_kokoro_punctuation_is_idempotent(raw):
+    once = normalize_text(raw, profile="kokoro")
+    assert normalize_text(once, profile="kokoro") == once
+
+
+@pytest.mark.parametrize("raw", [raw for raw, _ in KOKORO_PUNCTUATION])
+def test_every_profile_speaks_the_same_words(raw):
+    # One spoken-word string for every engine -> one whisper-validation reference.
+    words = {
+        p: re.findall(r"[^\W_]+", normalize_text(raw, profile=p))
+        for p in ("default", "kokoro", "chatterbox", "indextts2")
+    }
+    assert len({tuple(w) for w in words.values()}) == 1, words
+
+
+@pytest.mark.parametrize(
+    "raw,plain",
+    [
+        ("“……? No, not at all.”", "“, ? No, not at all.”"),
+        ("“…Hm?”", "“, Hm?”"),
+        ("I… I don't", "I, I don't"),
+        ("But…", "But,"),
+    ],
+)
+def test_default_and_indextts2_keep_the_plain_fold(raw, plain):
+    # 'default' feeds whisper scoring and paid ElevenLabs text; neither may drift silently.
+    assert normalize_text(raw) == plain
+    assert normalize_text(raw, profile="indextts2") == plain
+
+
+@pytest.mark.parametrize("raw", ["“……”", "“…!”", "……", "“……!? ……!!”", "“…?”"])
+def test_kokoro_wordless_lines_stay_silent_beats(raw):
+    out = normalize_text(raw, profile="kokoro")
+    assert out.strip()  # never empty: engines refuse empty text before the beat check
+    assert nothing_to_say(out)
 
 
 def test_profile_for_falls_back_to_default():

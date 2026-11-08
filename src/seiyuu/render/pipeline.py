@@ -33,7 +33,7 @@ from seiyuu.engines import (
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.ingest.models import BlockType, NormalizedBook
 from seiyuu.normalize import normalize_text, profile_for
-from seiyuu.render.cache import SegmentCache, SegmentKey
+from seiyuu.render.cache import SegmentCache, SegmentKey, words_sidecar_for_wav
 from seiyuu.render.models import RenderedChapter, RenderedSegment, RenderManifest, VoiceUse
 from seiyuu.repository import atomic_write_text
 from seiyuu.validate import (
@@ -194,16 +194,37 @@ def _segment_cost(engine: TTSEngine, text: str) -> float:
     return 0.0 if nothing_to_say(text) else engine.cost_estimate(text)
 
 
+def _beat_variant() -> str:
+    """The silent beat's file-name variant: its length, so a new length is a new file."""
+    return f"beat{round(SILENT_BEAT_SECONDS * 1000)}ms"
+
+
+def _is_cached(cache: SegmentCache, key: SegmentKey, text: str) -> bool:
+    """Whether the estimate can count the line as already recorded: its wav, or for a line
+    with nothing to say, its silent beat at the current length (see _silent_beat)."""
+    if nothing_to_say(text):
+        return cache.path_for(key, variant=_beat_variant()).is_file()
+    return cache.get(key) is not None
+
+
 def _silent_beat(cache: SegmentCache, key: SegmentKey) -> tuple[Path, float]:
     """Write the silent beat for a line with nothing to say under its key; (wav, seconds).
 
-    Always rewritten, never served from cache: an older render may have cached real engine
-    audio for the line (possibly invented speech) with its verdict and read-along words, and
-    those sidecars are dropped so nothing describes audio that is no longer there."""
-    cache.validation_path(key).unlink(missing_ok=True)
-    cache.words_path(key).unlink(missing_ok=True)
+    The file name carries the beat's length (``{key_hash}.beat200ms.wav``): one wordless line
+    ("“……”") has one key and so one file shared by every chapter that has it, and a new beat
+    length rewriting that shared file would leave the manifests of chapters outside a scoped
+    render recording a duration the file no longer has. An older ``{key_hash}.wav`` (an
+    earlier beat length, or real engine audio from before the line was a beat) is left exactly
+    as the manifests that point at it describe it, and is never served for the line again.
+
+    Always rewritten, never served from cache: any verdict or read-along words beside the beat
+    file are dropped so nothing describes audio that is no longer there."""
     audio = silence(SILENT_BEAT_SECONDS)
-    return cache.put(key, audio), audio.duration_seconds
+    variant = _beat_variant()
+    wav = cache.path_for(key, variant=variant)
+    wav.with_name(f"{wav.stem}.validation.json").unlink(missing_ok=True)
+    words_sidecar_for_wav(wav).unlink(missing_ok=True)
+    return cache.put(key, audio, variant=variant), audio.duration_seconds
 
 
 def _gate_paid(
@@ -1541,7 +1562,7 @@ def estimate_render_cost(
                     paid_hashes.append(key.key_hash)  # paid identity, cached or not
                 # force: price forced-in-scope segments as work (a HIT no longer discounts them),
                 # so the quote authorizes the paid re-synthesis. Fingerprint is unchanged above.
-                if not force and cache.get(key) is not None:
+                if not force and _is_cached(cache, key, text):
                     cached += 1
                     continue
                 if cost > 0:
@@ -1606,7 +1627,7 @@ def estimate_render_cost_single(
             if cost > 0:
                 paid_hashes.append(key.key_hash)
             # force: price forced-in-scope segments as work (see estimate_render_cost).
-            if not force and cache.get(key) is not None:
+            if not force and _is_cached(cache, key, text):
                 cached += 1
                 continue
             if cost > 0:
