@@ -79,6 +79,12 @@ class WarmupParams(BaseModel):
     engine_id: str
 
 
+class DesignParams(BaseModel):
+    """A ``design`` job designs the takes of one voice design (``services/voice_design.py``)."""
+
+    design_id: str
+
+
 class AttributeParams(BaseModel):
     chapters: list[int] = Field(default_factory=list)  # [] = whole book; subsets merge
     provider: Literal["local", "anthropic"] | None = None  # None -> settings default
@@ -564,6 +570,50 @@ class ClonedVoiceOut(VoiceOut):
     whether it binds a transcript (ICL) or clones from the sound alone, and why."""
 
     clone_note: str | None = None
+
+
+class DesignCreate(BaseModel):
+    """POST /designs: describe a voice; Qwen3-TTS VoiceDesign speaks ``sample_text`` (or a
+    neutral default line) in ``takes`` different takes to choose from."""
+
+    model_config = {"extra": "forbid"}
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=3, max_length=500)
+    sample_text: str | None = Field(default=None, max_length=400)
+    takes: int = Field(default=3, ge=1, le=5)
+
+
+class DesignTakeOut(BaseModel):
+    take: int
+    seconds: float
+    wpm: float
+    in_pace: bool  # words per minute within the comfortable listening range
+    ok: bool  # passed the speech check (said exactly the line)
+    score: float
+    reason: str | None = None
+    audio_url: str
+    kept_voice_id: str | None = None  # this take already became a library voice
+
+
+class DesignOut(BaseModel):
+    design_id: str
+    name: str
+    description: str
+    text: str  # the line every take speaks
+    takes_requested: int
+    takes: list[DesignTakeOut]
+    recommended: int | None = None
+
+
+class DesignStartedOut(BaseModel):
+    design: DesignOut
+    job: JobOut
+
+
+class DesignKeep(BaseModel):
+    model_config = {"extra": "forbid"}
+    take: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class UnreadableVoice(BaseModel):

@@ -82,7 +82,7 @@ _UPLOAD_CHUNK = 1024 * 1024
 
 # The audition refusal predicate is metadata-driven, not a kind-name list (scoping doc):
 # which job kinds hold the GPU, and which touch ElevenLabs voice slots.
-GPU_JOB_KINDS = frozenset({JobKind.ATTRIBUTE, JobKind.RENDER, JobKind.WARMUP})
+GPU_JOB_KINDS = frozenset({JobKind.ATTRIBUTE, JobKind.RENDER, JobKind.WARMUP, JobKind.DESIGN})
 CLOUD_SLOT_JOB_KINDS = frozenset({JobKind.RENDER})
 
 

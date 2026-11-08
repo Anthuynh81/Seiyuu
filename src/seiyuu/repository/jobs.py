@@ -48,6 +48,9 @@ class JobKind(StrEnum):
     # M6b (user-approved): engine weight pre-load. Its subject is an engine, not a book —
     # the book_id column stores "engine:{engine_id}" (a documented overload).
     WARMUP = "warmup"
+    # Voice design (Qwen3-TTS VoiceDesign takes). Subject is a design, not a book: the book_id
+    # column stores "design:{design_id}" (the same documented overload as WARMUP).
+    DESIGN = "design"
 
 
 class JobState(StrEnum):

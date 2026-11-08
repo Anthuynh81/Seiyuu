@@ -698,7 +698,12 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/books/{book_id}/render/mode", "POST") in paths  # per-mode active pointer
     # batch read-along timings: one manifest parse per chapter instead of one per clip
     assert ("/api/books/{book_id}/chapters/{chapter}/words", "GET") in paths
-    assert len(paths) == 65
+    # voice design (Qwen3-TTS VoiceDesign): start, read, play a take, keep a take
+    assert ("/api/designs", "POST") in paths
+    assert ("/api/designs/{design_id}", "GET") in paths
+    assert ("/api/designs/{design_id}/takes/{take}.wav", "GET") in paths
+    assert ("/api/designs/{design_id}/keep", "POST") in paths
+    assert len(paths) == 69
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

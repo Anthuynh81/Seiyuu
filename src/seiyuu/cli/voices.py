@@ -398,3 +398,86 @@ def voice_clone(
         f"consent recorded: {attestation.attested_by}, "
         f"sha256 {attestation.reference_sha256[:12]}…, {attestation.attested_at[:19]}"
     )
+
+
+@voice.command("design")
+@click.argument("name")
+@click.option("--description", required=True, help='Who the voice is, e.g. "gruff old janitor".')
+@click.option("--sample-text", default=None, help="The line each take speaks (default: neutral).")
+@click.option("--takes", default=3, show_default=True, type=click.IntRange(1, 5))
+@click.option(
+    "--keep",
+    default="best",
+    show_default=True,
+    help="Which take becomes a library voice: 'best', a take number, or 'none' (listen first).",
+)
+@_voices_dir_option
+def voice_design(
+    name: str, description: str, sample_text: str | None, takes: int, keep: str,
+    voices_dir: Path | None,
+) -> None:  # fmt: skip
+    """Design a voice from a description with Qwen3-TTS VoiceDesign (GPU), then keep a take.
+
+    Each take speaks the same line with a different pinned seed and is scored by the speech
+    check and for pace. The kept take becomes a CLONED qwen3tts voice in your library. With
+    --keep none, listen to the takes (paths are printed) and keep one later in the app.
+    """
+    from seiyuu.engines import get_engine, voices_dir_kwargs
+    from seiyuu.gpu import GpuBusyError, get_gpu_manager
+    from seiyuu.normalize import normalize_text
+    from seiyuu.services import ServiceError
+    from seiyuu.services.voice_design import (
+        DEFAULT_SAMPLE_TEXT,
+        DESIGN_ENGINE,
+        design_dir,
+        keep_take,
+        run_design,
+        start_design,
+        take_path,
+    )
+    from seiyuu.settings import get_settings
+    from seiyuu.validate import Validator
+    from seiyuu.voices import VoiceLibrary
+
+    if keep not in {"best", "none"} and not (keep.isdigit() and 1 <= int(keep) <= takes):
+        raise click.ClickException(f"--keep wants 'best', 'none' or 1..{takes}, got {keep!r}")
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    text = normalize_text(sample_text or DEFAULT_SAMPLE_TEXT, profile=DESIGN_ENGINE)
+    try:
+        record = start_design(
+            cfg.data_dir, name=name, description=description, text=text, takes=takes
+        )
+        directory = design_dir(cfg.data_dir, record.design_id)
+        engine = get_engine(DESIGN_ENGINE, **voices_dir_kwargs(DESIGN_ENGINE, lib.voices_dir))
+        validator = Validator(
+            model_size=cfg.validation_model_size,
+            device="cpu",
+            compute_type="int8",
+            min_ratio=cfg.validation_min_ratio,
+        )
+        record = run_design(
+            directory,
+            engine=engine,
+            validator=validator,
+            gpu=get_gpu_manager(),
+            progress=lambda msg: click.echo(f"  {msg}"),
+        )
+    except (ServiceError, GpuBusyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"design {record.design_id}: {description!r}")
+    for t in record.takes:
+        mark = " (recommended)" if t.take == record.recommended else ""
+        check = "ok" if t.ok else f"flagged: {t.reason or 'mismatch'}"
+        click.echo(
+            f"  take {t.take}: {t.seconds:.1f} s, {t.wpm:.0f} wpm, speech check {check}{mark}"
+            f"  {take_path(directory, t.take)}"
+        )
+    if keep == "none":
+        return
+    chosen = record.recommended if keep == "best" else int(keep)
+    try:
+        meta = keep_take(directory, chosen, library=lib, name=name)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"kept take {chosen} as voice {meta.voice_id} ({meta.engine})")
