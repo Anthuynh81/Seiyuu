@@ -148,6 +148,15 @@ def build_handlers(
                 check_cancel=ctx.check_cancel,
             )
 
+    def describe_cast(ctx: JobContext) -> None:
+        from seiyuu.services.cast_plan import run_describe_cast
+
+        with gate.hold("job"):
+            # local provider: holds the GPU (Ollama) for the run, frees it in finally
+            run_describe_cast(
+                cfg, ctx.job.book_id, progress=ctx.progress, check_cancel=ctx.check_cancel
+            )
+
     def attribute(ctx: JobContext) -> None:
         params = AttributeParams.model_validate(ctx.job.params or {})
         book = _load_normalized(cfg, ctx.job.book_id)
@@ -328,6 +337,7 @@ def build_handlers(
     return {
         JobKind.WARMUP: warmup,
         JobKind.DESIGN: design,
+        JobKind.DESCRIBE_CAST: describe_cast,
         JobKind.ATTRIBUTE: attribute,
         JobKind.RENDER: render,
         JobKind.ASSEMBLE: assemble,

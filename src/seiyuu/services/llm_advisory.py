@@ -71,6 +71,10 @@ def _run(
             gpu.free_all()
 
 
+# Public name for other advisory services (e.g. the cast-plan describer).
+run_with_provider = _run
+
+
 def run_respell_suggestions(
     cfg,
     resolved: ResolvedAdvisory,

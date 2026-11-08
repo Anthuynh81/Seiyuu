@@ -51,6 +51,9 @@ class JobKind(StrEnum):
     # Voice design (Qwen3-TTS VoiceDesign takes). Subject is a design, not a book: the book_id
     # column stores "design:{design_id}" (the same documented overload as WARMUP).
     DESIGN = "design"
+    # Qwen-first casting step 1: the LLM drafts each character's voice description into
+    # output/{book}/cast_plan.json. A book job (book_id is the book).
+    DESCRIBE_CAST = "describe_cast"
 
 
 class JobState(StrEnum):

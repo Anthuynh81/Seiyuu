@@ -6,7 +6,7 @@ export interface ErrorEnvelope {
 }
 
 export type JobState = "queued" | "running" | "succeeded" | "failed" | "canceled";
-export type JobKind = "ingest" | "attribute" | "render" | "assemble" | "master" | "warmup" | "design";
+export type JobKind = "ingest" | "attribute" | "render" | "assemble" | "master" | "warmup" | "design" | "describe_cast";
 
 export interface JobOut {
   job_id: string;

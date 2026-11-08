@@ -453,3 +453,50 @@ def series_unlink(series_id: str, name: str) -> None:
     click.echo(
         f"unlinked {name!r} ({removed})" if removed else f"no link for {name!r} in {series_id!r}"
     )
+
+
+@main.command("describe-cast")
+@click.argument("book_id")
+def describe_cast(book_id: str) -> None:
+    """Draft how every character should sound (Qwen-first casting, step 1 of 2).
+
+    The local LLM writes a voice-only description per character, picks a sample line from
+    their own lines, and flags characters that are the same person. Saved as
+    output/BOOK/cast_plan.json for review; nothing is designed or assigned yet. Edited rows
+    survive a re-run. Free with the local provider (GPU via Ollama, freed at the end).
+    """
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.gpu import GpuBusyError
+    from seiyuu.services import ServiceError
+    from seiyuu.services.cast_plan import NARRATOR_ROW, run_describe_cast
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    if cfg.describe_provider == "anthropic":
+        raise click.ClickException(
+            "describe_provider=anthropic is a paid call; use the app (it asks to confirm the "
+            "spend) or set DESCRIBE_PROVIDER=local"
+        )
+    book_dir = _resolve_book_dir(
+        cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    try:
+        plan = run_describe_cast(cfg, book_dir.name, progress=lambda m: click.echo(f"  {m}"))
+    except (ServiceError, GpuBusyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    pov = "first person" if plan.first_person else "third person"
+    click.echo(f"{plan.book_id}: {len(plan.rows)} characters, {pov} ({plan.model_id})")
+    for row in [plan.narrator, *plan.rows]:
+        sample = row.sample_lines[row.sample_index] if row.sample_lines else ""
+        who = f"{row.name} [{row.character_id}]" if row.character_id != NARRATOR_ROW else "Narrator"
+        meta = ", ".join(filter(None, [row.gender, row.age, f"{row.line_count} lines"]))
+        click.echo(f"\n{who} ({meta})")
+        if row.same_as:
+            click.echo(f"  same voice as: {row.same_as}")
+        click.echo(f"  voice: {row.description}")
+        if sample:
+            click.echo(f"  line:  {sample[:120]}")
+    if plan.protagonist_suggestion:
+        click.echo(f"\nnarrator could share the protagonist's voice: {plan.protagonist_suggestion}")
+    for note in plan.notes:
+        click.echo(f"note: {note}")

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from seiyuu.attribute.models import AttributionReport, EmotionVerdict
 from seiyuu.repository import BookStatus, Job
+from seiyuu.services.cast_plan import CastPlan, RowUpdate
 from seiyuu.services.voices import VoiceReference
 from seiyuu.validate import SegmentWords
 from seiyuu.voices import VoiceAssignment, VoiceMeta
@@ -77,6 +78,10 @@ class JobsOut(BaseModel):
 
 class WarmupParams(BaseModel):
     engine_id: str
+
+
+class DescribeCastParams(BaseModel):
+    confirm_paid: bool = False  # the route already gated it; recorded for the job's history
 
 
 class DesignParams(BaseModel):
@@ -614,6 +619,20 @@ class DesignKeep(BaseModel):
     model_config = {"extra": "forbid"}
     take: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class CastPlanOut(CastPlan):
+    """GET/PUT /books/{id}/cast-plan: the drafted (and edited) per-character voice plan."""
+
+
+class DescribeCastRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    confirm_paid: bool = False  # required when describe_provider is anthropic (paid)
+
+
+class CastPlanUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+    updates: list[RowUpdate] = Field(min_length=1)
 
 
 class UnreadableVoice(BaseModel):

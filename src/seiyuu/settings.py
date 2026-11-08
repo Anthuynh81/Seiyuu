@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     cast_provider: str = "local"
     cast_model: str | None = None
     cast_prompt_version: str = "v1"
+    # Qwen-first casting (design/qwen-first-casting-2026-11-08.md): the LLM that drafts each
+    # character's voice description. Local by default (free); anthropic is paid and gated like
+    # the caster. describe_model defaults per provider, like cast_model.
+    describe_provider: str = "local"
+    describe_model: str | None = None
+    describe_prompt_version: str = "v1"
 
     # TTS defaults (M1).
     tts_engine: str = "kokoro"

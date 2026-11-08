@@ -7,6 +7,7 @@ validated :class:`ChunkAttribution` JSON only — metadata and text, never audio
 access goes through this repository layer.
 """
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,16 @@ CREATE TABLE IF NOT EXISTS alias_adjudications (
     payload                    TEXT NOT NULL,
     created_at                 TEXT NOT NULL,
     PRIMARY KEY (book_id, provider_id, model_id, adjudication_prompt_version, candidates_digest)
+);
+CREATE TABLE IF NOT EXISTS voice_sketches (
+    book_id        TEXT NOT NULL,
+    provider_id    TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    prompt_digest  TEXT NOT NULL,
+    payload        TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (book_id, provider_id, model_id, prompt_version, prompt_digest)
 )
 """
 
@@ -88,6 +99,27 @@ class AdjudicationCacheKey(BaseModel, frozen=True):
         )
 
 
+class SketchCacheKey(BaseModel, frozen=True):
+    """Per-character voice-description cache key (Qwen-first casting). ``prompt_digest`` hashes
+    the fully rendered describer prompt, i.e. all of the character's evidence, so the LLM fires
+    again only when that evidence (or the model / prompt version) changes."""
+
+    book_id: str
+    provider_id: str
+    model_id: str
+    prompt_version: str
+    prompt_digest: str
+
+    def _columns(self) -> tuple:
+        return (
+            self.book_id,
+            self.provider_id,
+            self.model_id,
+            self.prompt_version,
+            self.prompt_digest,
+        )
+
+
 class AttributionCache:
     """Repository over the per-book SQLite attribution DB. Use as a context manager."""
 
@@ -136,6 +168,23 @@ class AttributionCache:
                 _VERDICTS.dump_json(verdicts).decode(),
                 datetime.now(UTC).isoformat(),
             ),
+        )
+        self._conn.commit()
+
+    def get_sketch(self, key: SketchCacheKey) -> dict | None:
+        row = self._conn.execute(
+            "SELECT payload FROM voice_sketches WHERE "
+            "book_id=? AND provider_id=? AND model_id=? AND prompt_version=? AND prompt_digest=?",
+            key._columns(),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def put_sketch(self, key: SketchCacheKey, payload: dict) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO voice_sketches "
+            "(book_id, provider_id, model_id, prompt_version, prompt_digest, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (*key._columns(), json.dumps(payload), datetime.now(UTC).isoformat()),
         )
         self._conn.commit()
 

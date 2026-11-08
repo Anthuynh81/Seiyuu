@@ -97,16 +97,18 @@ def _vote(text: str) -> str | None:
     return None
 
 
-def count_pronoun_votes(
-    registry: CharacterRegistry, chapters: list[AttributedChapter]
-) -> dict[str, Counter[str]]:
-    """Per character id, the male/female pronoun votes that follow a lone mention of its name."""
-    narration = [
+def narration_texts(chapters: list[AttributedChapter]) -> list[str]:
+    return [
         seg.text
         for chapter in chapters
         for seg in chapter.segments
         if seg.type is SegmentType.NARRATION
     ]
+
+
+def name_patterns(registry: CharacterRegistry, narration: list[str]) -> dict[str, re.Pattern[str]]:
+    """Per character id, a regex matching its name as a proper name in ``narration`` (see the
+    module docstring: short, lowercase and common-word keys are skipped)."""
     common_words = {w for text in narration for w in _WORD.findall(text)}
     patterns: dict[str, re.Pattern[str]] = {}
     for char in registry.characters:
@@ -116,6 +118,19 @@ def count_pronoun_votes(
         if keys:
             alternatives = "|".join(map(re.escape, keys))
             patterns[char.id] = re.compile(rf"\b(?:{alternatives})\b")
+    return patterns
+
+
+def sentences(text: str) -> list[str]:
+    return _sentences(text)
+
+
+def count_pronoun_votes(
+    registry: CharacterRegistry, chapters: list[AttributedChapter]
+) -> dict[str, Counter[str]]:
+    """Per character id, the male/female pronoun votes that follow a lone mention of its name."""
+    narration = narration_texts(chapters)
+    patterns = name_patterns(registry, narration)
 
     votes: dict[str, Counter[str]] = {cid: Counter() for cid in patterns}
     for text in narration:
