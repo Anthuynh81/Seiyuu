@@ -159,9 +159,15 @@ def gather_evidence(report: AttributionReport) -> list[CharacterEvidence]:
     ]
 
 
+# Plain storytelling prose: starts with a capital letter, ends like a sentence, and carries
+# none of the marks front matter, notices and system messages use ("※ Note : ...", "[Rule 3]").
+_PROSE = re.compile(r"^[A-Z][^※\[\]{}<>#*|_:=~•]*[.!?…][\"'”’]?$")
+
+
 def narrator_samples(report: AttributionReport) -> list[str]:
     candidates = [s.strip() for t in narration_texts(report.chapters) for s in sentences(t)]
-    return _spread(_prefer_mid_length(candidates, 12, 40), MAX_LINES)
+    prose = [s for s in candidates if _PROSE.match(s)]
+    return _spread(_prefer_mid_length(prose or candidates, 12, 40), MAX_LINES)
 
 
 # -- drafting ------------------------------------------------------------------------------------

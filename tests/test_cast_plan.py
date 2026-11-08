@@ -414,3 +414,21 @@ def test_voice_sketch_schema_is_closed():
     assert set(schema["properties"]["gender"]["enum"]) == {"male", "female", "unknown"}
     assert "elderly" in schema["properties"]["age"]["enum"]
     assert SegmentType.DIALOGUE  # (import used for clarity of the fixtures above)
+
+
+def test_narrator_samples_skip_notices_and_front_matter():
+    from seiyuu.services.cast_plan import narrator_samples
+
+    report = _report()
+    report.chapters[0].segments.insert(
+        0,
+        _seg(
+            1,
+            "narration",
+            "※ Note : The company is not liable for any injuries that may occur during the "
+            "course of the employee's duties here at all.",
+        ),
+    )
+    samples = narrator_samples(report)
+    assert samples and not any("※" in s for s in samples)
+    assert all(s[0].isupper() for s in samples)
