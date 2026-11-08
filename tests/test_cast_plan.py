@@ -434,3 +434,13 @@ def test_narrator_samples_skip_notices_and_front_matter():
     samples = narrator_samples(report)
     assert samples and not any("※" in s for s in samples)
     assert all(s[0].isupper() for s in samples)
+
+
+def test_a_character_with_many_good_lines_gets_no_filler():
+    from seiyuu.services.cast_plan import MAX_LINES, _character_lines
+
+    good = [f"This is a perfectly ordinary spoken line number {i} in the book." for i in range(20)]
+    lines = _character_lines([*good, "Yes.", "No."])
+    assert len(lines) == MAX_LINES and "Yes." not in lines  # no room left: no division by zero
+    few = _character_lines([good[0], "Yes.", "No."])
+    assert few == [good[0], "Yes.", "No."]

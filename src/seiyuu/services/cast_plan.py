@@ -104,6 +104,8 @@ class RowUpdate(BaseModel):
 
 def _spread(items: list[str], k: int) -> list[str]:
     """Up to ``k`` items evenly spread over the list (deterministic), so lines span the book."""
+    if k <= 0:
+        return []
     if len(items) <= k:
         return list(items)
     step = len(items) / k
