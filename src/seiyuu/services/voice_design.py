@@ -195,8 +195,12 @@ def run_design(
     gpu: Any,
     progress: Callable[[str], None] = lambda _msg: None,
     check_cancel: Callable[[], None] = lambda: None,
+    release: bool = True,
 ) -> DesignRecord:
     """Design every requested take not yet on disk, scoring each, and recommend the best.
+
+    ``release=False`` leaves the VoiceDesign checkpoint resident for a caller designing several
+    voices in a row (the design-cast job); that caller frees the GPU itself when it is done.
 
     ``engine`` needs ``design_voice``; ``gpu`` is the GpuResourceManager (``acquire`` /
     ``free_all``). The record is saved after every take, so a canceled or failed run keeps what
@@ -238,7 +242,7 @@ def run_design(
             ).take
             save_record(directory, record)
     finally:
-        if acquired:
+        if acquired and release:
             gpu.free_all()
     return record
 
@@ -266,6 +270,7 @@ def keep_take(
     library: VoiceLibrary,
     name: str | None = None,
     voice_id: str | None = None,
+    tags: list[str] | None = None,
 ) -> VoiceMeta:
     """Make take ``take`` of the design a library voice; returns its meta.
 
@@ -299,7 +304,7 @@ def keep_take(
             attested_by=ATTESTED_BY, statement=CONSENT_TEXT, reference_sha256=sha
         ),
         source=SOURCE,
-        tags=["designed"],
+        tags=tags or ["designed"],
         settings=settings,
     )
     library.save(meta)

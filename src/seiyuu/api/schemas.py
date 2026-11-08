@@ -84,6 +84,13 @@ class DescribeCastParams(BaseModel):
     confirm_paid: bool = False  # the route already gated it; recorded for the job's history
 
 
+class CastTakeRequest(BaseModel):
+    """POST /books/{id}/cast-plan/rows/{character_id}/take: use another of the row's takes."""
+
+    model_config = {"extra": "forbid"}
+    take: int = Field(ge=1)
+
+
 class DesignParams(BaseModel):
     """A ``design`` job designs the takes of one voice design (``services/voice_design.py``)."""
 
@@ -623,6 +630,13 @@ class DesignKeep(BaseModel):
 
 class CastPlanOut(CastPlan):
     """GET/PUT /books/{id}/cast-plan: the drafted (and edited) per-character voice plan."""
+
+
+class CastDesignedOut(BaseModel):
+    """A take swap: the updated plan and the book's assignment it re-pointed."""
+
+    plan: CastPlanOut
+    assignment: VoiceAssignment
 
 
 class DescribeCastRequest(BaseModel):

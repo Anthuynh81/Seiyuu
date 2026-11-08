@@ -65,7 +65,8 @@ selected character in turn, keeps the **recommended** take as `{char_id}_designe
 Each character's design id is recorded, so later the user can open it, listen to the other
 takes, and swap in one click (the existing keep, plus re-pointing the assignment).
 
-**Time on the 3080 Ti (~30 s per take):** 19 voices × 2 takes ≈ 20 min; × 3 takes ≈ 30 min.
+**Time on the 3080 Ti:** estimated ~30 s per take; **measured ~5 s** once the model is loaded.
+The ghost book's whole cast (21 voices, 40 takes) took 3.6 min of takes after the model load.
 Resumable: a canceled job keeps every finished take (the #47 behaviour).
 
 ### 4. Narrator

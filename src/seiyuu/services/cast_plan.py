@@ -51,6 +51,7 @@ DEFAULT_NARRATOR_DESCRIPTION = (
 )
 GENERIC_DESCRIPTION = "A natural, clear adult voice with a calm, conversational tone."
 
+_HAS_WORD = re.compile(r"[^\W\d_]{2,}|\b[AaIiOo]\b")
 _FIRST = re.compile(r"\b(?:I|I'm|I’m|I'd|I’d|I've|I’ve|I'll|I’ll|me|my|myself)\b")
 _THIRD = re.compile(r"\b(?:he|she|him|her|his|hers)\b", re.IGNORECASE)
 
@@ -104,10 +105,23 @@ class RowUpdate(BaseModel):
 
 def _spread(items: list[str], k: int) -> list[str]:
     """Up to ``k`` items evenly spread over the list (deterministic), so lines span the book."""
+    if k <= 0:
+        return []
     if len(items) <= k:
         return list(items)
     step = len(items) / k
     return [items[int(i * step)] for i in range(k)]
+
+
+def _character_lines(lines: list[str]) -> list[str]:
+    """Up to MAX_LINES of a character's lines: mid-length ones spread over the book first (the
+    best sample candidates), then short ones to fill, so a small part still has enough words
+    to design a voice from (design-cast joins lines up to a usable length). Wordless lines
+    ("…!", "?!") are skipped: they normalize to stray punctuation and say nothing."""
+    unique = list(dict.fromkeys(line.strip() for line in lines if _HAS_WORD.search(line)))
+    good = _spread([line for line in unique if 8 <= len(line.split()) <= 40], MAX_LINES)
+    rest = _spread([line for line in unique if line not in good], MAX_LINES - len(good))
+    return good + rest
 
 
 def _prefer_mid_length(lines: list[str], lo: int = 8, hi: int = 40) -> list[str]:
@@ -151,7 +165,7 @@ def gather_evidence(report: AttributionReport) -> list[CharacterEvidence]:
             age_hint=c.age_hint,
             description=c.description,
             line_count=len(lines[c.id]),
-            lines=tuple(_spread(_prefer_mid_length(lines[c.id]), MAX_LINES)),
+            lines=tuple(_character_lines(lines[c.id])),
             mentions=tuple(_spread(mentions.get(c.id, []), MAX_MENTIONS)),
             others=tuple(o for o in everyone if o[0] != c.id),
         )
@@ -177,7 +191,9 @@ def _row_from(ev: CharacterEvidence, sketch: VoiceSketch | None) -> PlanRow:
     gender = ev.gender or (sketch.gender if sketch and sketch.gender != "unknown" else None)
     return PlanRow(
         character_id=ev.character_id,
-        name=ev.name,
+        # the registry can hold a CHARACTER called "Narrator" (quoted lines attributed to the
+        # narrator); label it apart from the narrator row (the prompt keeps the real name)
+        name=ev.name if ev.name.casefold() != "narrator" else "Narrator (as a character)",
         line_count=ev.line_count,
         gender=gender,
         age=sketch.age if sketch else None,
@@ -246,7 +262,18 @@ def draft_plan(
         if drafted is None:
             notes.append(f"couldn't describe {ev.name!r}: the model's reply was unusable")
         row = _row_from(ev, drafted)
-        if prior is not None:
+        if prior is not None and (
+            prior.description,
+            prior.sample_lines,
+            prior.gender,
+            prior.age,
+        ) == (
+            row.description,
+            row.sample_lines,
+            row.gender,
+            row.age,
+        ):
+            # same voice brief as before: the voice designed from it still fits
             row.design_id, row.voice_id = prior.design_id, prior.voice_id
         rows.append(row)
 
@@ -354,6 +381,14 @@ def apply_updates(plan: CastPlan, updates: list[RowUpdate]) -> CastPlan:
             if upd.age not in AGES:
                 raise ServiceError(f"cast plan: age must be one of {', '.join(AGES)}")
             row.age = upd.age
+        reshaped = any(
+            v is not None for v in (upd.description, upd.sample_index, upd.gender, upd.age)
+        )
+        if reshaped:
+            # the designed voice no longer matches the row: the next design-cast run redesigns
+            # it (the old voice stays assigned and in the library until then)
+            row.design_id = None
+            row.voice_id = None
         row.edited = True
     flatten_same_as(plan.rows, plan.narrator)
     return plan

@@ -373,6 +373,7 @@ def test_build_handlers_covers_all_but_ingest(tmp_path) -> None:
         JobKind.WARMUP,
         JobKind.DESIGN,
         JobKind.DESCRIBE_CAST,
+        JobKind.DESIGN_CAST,
         JobKind.ATTRIBUTE,
         JobKind.RENDER,
         JobKind.ASSEMBLE,

@@ -707,7 +707,10 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/books/{book_id}/cast-plan/describe", "POST") in paths
     assert ("/api/books/{book_id}/cast-plan", "GET") in paths
     assert ("/api/books/{book_id}/cast-plan", "PUT") in paths
-    assert len(paths) == 72
+    # step 2: design the cast (a job) and swap a row to another take
+    assert ("/api/books/{book_id}/cast-plan/design", "POST") in paths
+    assert ("/api/books/{book_id}/cast-plan/rows/{character_id}/take", "POST") in paths
+    assert len(paths) == 74
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:

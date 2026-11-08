@@ -98,6 +98,7 @@ export const JOB_DOING: Record<JobKind, string> = {
   warmup: "Getting the voice engine ready",
   design: "Designing a voice",
   describe_cast: "Describing the cast",
+  design_cast: "Designing the cast's voices",
 };
 
 /** The finish headline for a job that worked, naming its subject. */
@@ -110,6 +111,7 @@ export const JOB_DONE: Record<JobKind, (name: string) => string> = {
   warmup: (e) => `${e} is downloaded and ready`,
   design: (n) => `Finished designing ${n}`,
   describe_cast: (t) => `Described the cast of ${t}`,
+  design_cast: (t) => `Designed the voices for ${t}`,
 };
 
 export const JOB_FAILED: Record<JobKind, (name: string) => string> = {
@@ -121,6 +123,7 @@ export const JOB_FAILED: Record<JobKind, (name: string) => string> = {
   warmup: (e) => `Couldn't get ${e} ready`,
   design: (n) => `Couldn't design ${n}`,
   describe_cast: (t) => `Couldn't describe the cast of ${t}`,
+  design_cast: (t) => `Couldn't finish the voices for ${t}`,
 };
 
 export const JOB_STOPPED: Record<JobKind, (name: string) => string> = {
@@ -132,6 +135,7 @@ export const JOB_STOPPED: Record<JobKind, (name: string) => string> = {
   warmup: (e) => `Stopped getting ${e} ready`,
   design: (n) => `Stopped designing ${n}`,
   describe_cast: (t) => `Stopped describing the cast of ${t}`,
+  design_cast: (t) => `Stopped designing the voices for ${t}`,
 };
 
 /** A card's failure headline (the card already names the book). */
@@ -144,6 +148,7 @@ export const JOB_FAILED_STEP: Record<JobKind, string> = {
   warmup: "Getting the voice engine ready failed",
   design: "Designing a voice failed",
   describe_cast: "Describing the cast failed",
+  design_cast: "Designing the voices failed",
 };
 
 /** The button that stops a running job of this kind ("Cancel recording"). */
@@ -156,6 +161,7 @@ export const JOB_CANCEL: Record<JobKind, string> = {
   warmup: "Stop the download",
   design: "Stop designing",
   describe_cast: "Stop describing",
+  design_cast: "Stop designing voices",
 };
 
 /* ================================================================ failures */

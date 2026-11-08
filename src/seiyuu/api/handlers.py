@@ -148,6 +148,28 @@ def build_handlers(
                 check_cancel=ctx.check_cancel,
             )
 
+    def design_cast(ctx: JobContext) -> None:
+        from seiyuu.services.cast_design import run_design_cast
+        from seiyuu.services.voice_design import DESIGN_ENGINE
+        from seiyuu.validate import Validator
+
+        validator = Validator(
+            model_size=cfg.validation_model_size,
+            device="cpu",  # the speech check never takes the GPU from Qwen
+            compute_type="int8",
+            min_ratio=cfg.validation_min_ratio,
+        )
+        with gate.hold("job"):
+            run_design_cast(
+                cfg,
+                ctx.job.book_id,
+                engine=registry.get(DESIGN_ENGINE),
+                validator=validator,
+                gpu=get_gpu_manager(),
+                progress=ctx.progress,
+                check_cancel=ctx.check_cancel,
+            )
+
     def describe_cast(ctx: JobContext) -> None:
         from seiyuu.services.cast_plan import run_describe_cast
 
@@ -338,6 +360,7 @@ def build_handlers(
         JobKind.WARMUP: warmup,
         JobKind.DESIGN: design,
         JobKind.DESCRIBE_CAST: describe_cast,
+        JobKind.DESIGN_CAST: design_cast,
         JobKind.ATTRIBUTE: attribute,
         JobKind.RENDER: render,
         JobKind.ASSEMBLE: assemble,

@@ -140,7 +140,9 @@ def test_evidence_is_busiest_first_and_skips_the_silent():
     assert [e.character_id for e in evidence] == ["new", "kim", "staff"]  # ghost has no lines
     kim = evidence[1]
     assert kim.line_count == 6
-    assert all(8 <= len(line.split()) <= 40 for line in kim.lines)  # "Yes." loses to real lines
+    # real lines first (the sample candidates), the short "Yes." after them as filler
+    assert all(8 <= len(line.split()) <= 40 for line in kim.lines[:-1])
+    assert kim.lines[-1] == "Yes."
     assert kim.mentions and all("Kim Soleum" in m for m in kim.mentions)
     assert ("kim", "Kim Soleum") not in kim.others and ("new", "New Employee") in kim.others
 
@@ -432,3 +434,19 @@ def test_narrator_samples_skip_notices_and_front_matter():
     samples = narrator_samples(report)
     assert samples and not any("※" in s for s in samples)
     assert all(s[0].isupper() for s in samples)
+
+
+def test_a_character_with_many_good_lines_gets_no_filler():
+    from seiyuu.services.cast_plan import MAX_LINES, _character_lines
+
+    good = [f"This is a perfectly ordinary spoken line number {i} in the book." for i in range(20)]
+    lines = _character_lines([*good, "Yes.", "No."])
+    assert len(lines) == MAX_LINES and "Yes." not in lines  # no room left: no division by zero
+    few = _character_lines([good[0], "Yes.", "No."])
+    assert few == [good[0], "Yes.", "No."]
+
+
+def test_wordless_lines_are_never_filler():
+    from seiyuu.services.cast_plan import _character_lines
+
+    assert _character_lines(["…!", "?!", "“…”", "Y-Yes, let’s!", "I"]) == ["Y-Yes, let’s!", "I"]

@@ -500,3 +500,66 @@ def describe_cast(book_id: str) -> None:
         click.echo(f"\nnarrator could share the protagonist's voice: {plan.protagonist_suggestion}")
     for note in plan.notes:
         click.echo(f"note: {note}")
+
+
+@main.command("design-cast")
+@click.argument("book_id")
+def design_cast(book_id: str) -> None:
+    """Design every character's voice from the cast plan and assign them (step 2 of 2).
+
+    Runs `seiyuu describe-cast` output through Qwen3-TTS VoiceDesign on the GPU: each row that
+    designs its own voice gets its takes (2, or 1 for small parts), the recommended take becomes
+    a library voice, and the book's assignment is updated. "Same voice as" rows share their
+    target's voice; "keep current voice" rows are left alone. Resumable: rerun to continue.
+    """
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.engines import get_engine, voices_dir_kwargs
+    from seiyuu.gpu import GpuBusyError, get_gpu_manager
+    from seiyuu.services import ServiceError
+    from seiyuu.services.cast_design import designing_rows, run_design_cast
+    from seiyuu.services.cast_plan import load_plan
+    from seiyuu.services.voice_design import DESIGN_ENGINE
+    from seiyuu.settings import get_settings
+    from seiyuu.validate import Validator
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    plan = load_plan(cfg.output_dir, book_dir.name)
+    if plan is None:
+        raise click.ClickException("no cast plan yet; run `seiyuu describe-cast` first")
+    rows = designing_rows(plan)
+    takes = sum(r.takes for r in rows)
+    click.echo(
+        # measured on the 3080 Ti: ~5 s per take once VoiceDesign is loaded (~1 min to load)
+        f"designing {len(rows)} voices, {takes} takes (~{takes * 5 // 60 + 1} min on the GPU, "
+        "plus loading the model)"
+    )
+    engine = get_engine(DESIGN_ENGINE, **voices_dir_kwargs(DESIGN_ENGINE, cfg.voices_dir))
+    validator = Validator(
+        model_size=cfg.validation_model_size,
+        device="cpu",
+        compute_type="int8",
+        min_ratio=cfg.validation_min_ratio,
+    )
+    try:
+        plan, assignment = run_design_cast(
+            cfg,
+            book_dir.name,
+            engine=engine,
+            validator=validator,
+            gpu=get_gpu_manager(),
+            progress=lambda m: click.echo(f"  {m}"),
+        )
+    except (ServiceError, GpuBusyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for row in [plan.narrator, *plan.rows]:
+        if row.keep_current:
+            state = "kept its current voice"
+        elif row.same_as:
+            state = f"shares {row.same_as}'s voice"
+        else:
+            state = row.voice_id or "not designed"
+        click.echo(f"  {row.name}: {state}")
+    click.echo(f"narrator: {assignment.narrator_voice_id}; assignment saved")
