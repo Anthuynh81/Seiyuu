@@ -13,7 +13,10 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
-  const [engine, setEngine] = useState("chatterbox");
+  const [engine, setEngine] = useState("qwen3tts");
+  const [transcript, setTranscript] = useState("");
+  // a Qwen clone reports which way it clones; keep the dialog open to say so
+  const [note, setNote] = useState<string | null>(null);
   const [attested, setAttested] = useState(false);
   const [attestedBy, setAttestedBy] = useState(() => readStored("seiyuu.attestedBy") ?? "");
   const err = clone.error instanceof ApiError ? clone.error : null;
@@ -28,7 +31,10 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
   const submit = (replace = false) => {
     if (!file) return;
     writeStored("seiyuu.attestedBy", attestedBy);
-    clone.mutate({ file, name, engine, attestedBy, replace }, { onSuccess: onClose });
+    clone.mutate(
+      { file, name, engine, attestedBy, replace, transcript: engine === "qwen3tts" ? transcript : undefined },
+      { onSuccess: (voice) => (voice.clone_note ? setNote(voice.clone_note) : onClose()) },
+    );
   };
 
   return (
@@ -36,83 +42,111 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
       title="New cloned voice"
       onClose={onClose}
       footer={
-        <>
-          <button className="key quiet" onClick={onClose}>cancel</button>
-          <button className="key" disabled={clone.isPending || !file || !name.trim() || !attested || !attestedBy.trim()} onClick={() => submit(false)}>
-            {clone.isPending ? "cloning…" : "clone voice"}
-          </button>
-        </>
+        note ? (
+          <button className="key" onClick={onClose}>done</button>
+        ) : (
+          <>
+            <button className="key quiet" onClick={onClose}>cancel</button>
+            <button className="key" disabled={clone.isPending || !file || !name.trim() || !attested || !attestedBy.trim()} onClick={() => submit(false)}>
+              {clone.isPending ? "cloning…" : "clone voice"}
+            </button>
+          </>
+        )
       }
     >
-      <label>reference clip (wav/mp3, ≥ 20 s recommended)</label>
-      <div className="flex gap-2">
-        <input type="text" readOnly value={file?.name ?? ""} placeholder="choose a file…" onClick={() => fileInput.current?.click()} />
-        <button className="key quiet" onClick={() => fileInput.current?.click()}>browse</button>
-        <input ref={fileInput} type="file" accept="audio/*" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-      </div>
-      <label>voice name</label>
-      <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Mr. Darcy" />
-      <label>engine</label>
-      <TalkSelect
-        ariaLabel="engine"
-        value={engine}
-        onChange={setEngine}
-        options={[
-          { value: "chatterbox", label: "chatterbox — local, free" },
-          { value: "indextts2", label: "indextts2 — local, emotion + cloning (slow, high quality)" },
-          { value: "elevenlabs", label: "elevenlabs — cloud IVC, paid" },
-        ]}
-      />
-      <div className="paper release slim">
-        <div className="att">
-          <input type="checkbox" id="att" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
-          <label htmlFor="att" className="attlbl m-0">
-            I have the speaker's permission to clone this voice
-          </label>
-          <span className="mono ml-auto text-[11px] text-paper-ink-2">
-            as{" "}
-            <input
-              type="text"
-              value={attestedBy}
-              onChange={(e) => setAttestedBy(e.target.value)}
-              placeholder="your name"
-              className="attname"
-            />
-          </span>
-        </div>
-      </div>
-      <div className="tag mt-2 normal-case tracking-[0.02em] text-ink-3">
-        one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate
-      </div>
-      {clone.error && !recloneBlocked && <PlainError className="mt-3" error={clone.error} title="couldn't clone" />}
-      {reclone && (
-        <div className="refusal mt-3" role="alert">
-          <span className="tag">already cloned</span>
-          <p className="joberr-sum">{reclone.summary}</p>
-          {stale.length > 0 ? (
+      {note ? (
+        <p role="status" className="m-0 text-ink-2">
+          Voice <b>{name}</b> is ready: {note}.
+        </p>
+      ) : (
+        <>
+          <label>reference clip (wav/mp3)</label>
+          <div className="flex gap-2">
+            <input type="text" readOnly value={file?.name ?? ""} placeholder="choose a file…" onClick={() => fileInput.current?.click()} />
+            <button className="key quiet" onClick={() => fileInput.current?.click()}>browse</button>
+            <input ref={fileInput} type="file" accept="audio/*" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          </div>
+          <label>voice name</label>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Mr. Darcy" />
+          <label>engine</label>
+          <TalkSelect
+            ariaLabel="engine"
+            value={engine}
+            onChange={setEngine}
+            options={[
+              { value: "qwen3tts", label: "qwen3tts — local, free, closest cloning (recommended)" },
+              { value: "chatterbox", label: "chatterbox — local, free" },
+              { value: "indextts2", label: "indextts2 — local, emotion + cloning (slow, high quality)" },
+              { value: "elevenlabs", label: "elevenlabs — cloud IVC, paid" },
+            ]}
+          />
+          {engine === "qwen3tts" && (
             <>
-              <p className="joberr-fix">
-                {stale.length === 1 ? "This recorded book goes" : `These ${stale.length} recorded books go`} back to
-                not recorded, and need re-recording:
-              </p>
-              <ul className="m-0 list-none p-0" aria-label="books that need re-recording">
-                {stale.map((id) => (
-                  <li key={id} className="border-b border-hairline py-1 text-ink-2 last:border-b-0">
-                    <b>{titleOf(id)}</b>
-                  </li>
-                ))}
-              </ul>
+              <label htmlFor="clone-transcript">what the clip says (optional)</label>
+              <textarea
+                id="clone-transcript"
+                rows={2}
+                value={transcript}
+                onChange={(e) => setTranscript(e.target.value)}
+                placeholder="leave blank and it's transcribed for you"
+              />
+              <div className="tag normal-case tracking-[0.02em] text-ink-3">
+                a clip of 5–30 s clones closest: Qwen copies the voice from the clip and its words
+              </div>
             </>
-          ) : (
-            <p className="joberr-fix">No recorded book uses it yet.</p>
           )}
-          <p className="joberr-fix">
-            Its saved lines are cleared, and any paid lines are billed again when re-recorded.{" "}
-            <button className="link" onClick={() => submit(true)}>
-              replace it
-            </button>
-          </p>
-        </div>
+          <div className="paper release slim">
+            <div className="att">
+              <input type="checkbox" id="att" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
+              <label htmlFor="att" className="attlbl m-0">
+                I have the speaker's permission to clone this voice
+              </label>
+              <span className="mono ml-auto text-[11px] text-paper-ink-2">
+                as{" "}
+                <input
+                  type="text"
+                  value={attestedBy}
+                  onChange={(e) => setAttestedBy(e.target.value)}
+                  placeholder="your name"
+                  className="attname"
+                />
+              </span>
+            </div>
+          </div>
+          <div className="tag mt-2 normal-case tracking-[0.02em] text-ink-3">
+            one click — the attestation binds to these exact bytes (sha-256) and is required by the render gate
+          </div>
+          {clone.error && !recloneBlocked && <PlainError className="mt-3" error={clone.error} title="couldn't clone" />}
+          {reclone && (
+            <div className="refusal mt-3" role="alert">
+              <span className="tag">already cloned</span>
+              <p className="joberr-sum">{reclone.summary}</p>
+              {stale.length > 0 ? (
+                <>
+                  <p className="joberr-fix">
+                    {stale.length === 1 ? "This recorded book goes" : `These ${stale.length} recorded books go`} back to
+                    not recorded, and need re-recording:
+                  </p>
+                  <ul className="m-0 list-none p-0" aria-label="books that need re-recording">
+                    {stale.map((id) => (
+                      <li key={id} className="border-b border-hairline py-1 text-ink-2 last:border-b-0">
+                        <b>{titleOf(id)}</b>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="joberr-fix">No recorded book uses it yet.</p>
+              )}
+              <p className="joberr-fix">
+                Its saved lines are cleared, and any paid lines are billed again when re-recorded.{" "}
+                <button className="link" onClick={() => submit(true)}>
+                  replace it
+                </button>
+              </p>
+            </div>
+          )}
+        </>
       )}
     </TalkDialog>
   );

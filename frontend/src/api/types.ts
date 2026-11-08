@@ -481,6 +481,12 @@ export interface VoiceOut {
   has_audition: boolean;
 }
 
+/** POST /api/voices/clone: a Qwen clone also says, in one sentence, whether it bound the clip's
+    transcript (closer cloning) or clones from the sound alone, and why. */
+export interface ClonedVoiceOut extends VoiceOut {
+  clone_note: string | null;
+}
+
 export interface VoiceListOut {
   voices: VoiceOut[];
   unreadable: { voice_id: string; error: string }[];

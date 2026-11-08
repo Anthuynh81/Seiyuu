@@ -294,10 +294,15 @@ def voice_delete(
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--engine",
-    type=click.Choice(["chatterbox", "indextts2", "qwen3tts", "elevenlabs"]),
-    default="chatterbox",
+    type=click.Choice(["qwen3tts", "chatterbox", "indextts2", "elevenlabs"]),
+    default="qwen3tts",
     show_default=True,
-    help="Cloning engine: chatterbox/indextts2/qwen3tts (local) or elevenlabs (cloud IVC).",
+    help="Cloning engine: qwen3tts/chatterbox/indextts2 (local) or elevenlabs (cloud IVC).",
+)
+@click.option(
+    "--transcript",
+    default=None,
+    help="qwen3tts: exactly what the clip says (default: whisper transcribes it on the CPU).",
 )
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
@@ -312,12 +317,15 @@ def voice_delete(
 @_voices_dir_option
 def voice_clone(
     name: str, reference: Path, engine: str, consent: bool, consent_by: str | None,
-    seed: int, voice_id: str | None, voices_dir: Path | None,
+    seed: int, voice_id: str | None, voices_dir: Path | None, transcript: str | None,
 ) -> None:  # fmt: skip
-    """Create a cloned voice from a reference clip (chatterbox/indextts2 local, elevenlabs IVC)."""
+    """Create a cloned voice from a reference clip (qwen3tts/chatterbox/indextts2 local,
+    elevenlabs IVC). A qwen3tts clone of a clip up to 30 s also binds the clip's transcript, so
+    Qwen clones from the clip and its words (closer to the speaker)."""
     import getpass
     import shutil
 
+    from seiyuu.services.clone_transcript import QWEN_ENGINE, bind_transcript, choose_transcript
     from seiyuu.settings import get_settings
     from seiyuu.voices import (
         ConsentAttestation,
@@ -334,8 +342,18 @@ def voice_clone(
         )
     import os
 
-    lib = VoiceLibrary(voices_dir or get_settings().voices_dir)
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     vid = voice_id or lib.new_voice_id(name)
+    chosen = None
+    if engine == QWEN_ENGINE:
+        from seiyuu.validate import Validator
+
+        # CPU/int8 like the API's aligner: never a second model on the GPU
+        whisper = Validator(model_size=cfg.validation_model_size, device="cpu", compute_type="int8")
+        chosen = choose_transcript(
+            reference, provided=transcript, transcribe=whisper.transcribe_clip
+        )
     # Order matters: copy first, hash the COPY, publish it atomically, THEN save the meta.
     # The attestation provably describes the exact bytes the library will serve — a failed
     # copy can't leave an attested meta pointing at missing/partial audio, and the source
@@ -353,6 +371,9 @@ def voice_clone(
     # the OLD reference so nothing can speak the previously-attested speaker
     for stale in ref_path.parent.glob("conds_*.pt"):
         stale.unlink(missing_ok=True)
+    settings = bind_transcript(
+        ref_path, attestation.reference_sha256, chosen.text if chosen else None
+    )
     try:
         lib.save(
             VoiceMeta(
@@ -365,11 +386,14 @@ def voice_clone(
                 consent=attestation,
                 seed=seed,
                 source="user_upload",
+                settings=settings,
             )  # fmt: skip
         )
     except (VoiceLibraryError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"cloned voice {vid} ({engine}) from {reference.name}")
+    if chosen is not None:
+        click.echo(f"  {chosen.note}")
     click.echo(
         f"consent recorded: {attestation.attested_by}, "
         f"sha256 {attestation.reference_sha256[:12]}…, {attestation.attested_at[:19]}"

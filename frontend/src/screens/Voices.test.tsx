@@ -254,8 +254,8 @@ describe("Voices", () => {
     await user.type(within(dialog).getByPlaceholderText("your name"), "Cyber");
     expect(submit).toBeEnabled();
 
-    // the engine picker offers all three clone targets; pick the non-default local one
-    await user.click(within(dialog).getByRole("button", { name: /chatterbox — local, free/ }));
+    // the engine picker defaults to Qwen and offers every clone target; pick another local one
+    await user.click(within(dialog).getByRole("button", { name: /qwen3tts — local, free, closest/ }));
     expect(await screen.findByRole("option", { name: /^chatterbox/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /^elevenlabs/ })).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: /^indextts2/ }));
@@ -274,6 +274,68 @@ describe("Voices", () => {
     await user.click(within(dialog).getByRole("button", { name: /replace it/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(server.formBodyOf("POST", "/api/voices/clone").get("replace")).toBe("true");
+  });
+
+  it("a Qwen clone sends the typed transcript and says how it clones before closing", async () => {
+    const user = userEvent.setup();
+    const server = mountServer();
+    server.on("POST", "/api/voices/clone", () =>
+      jsonResponse({
+        ...makeVoice({ voice_id: "elena", kind: "cloned", engine: "qwen3tts" }),
+        clone_note: "cloned from the clip and your transcript",
+      }),
+    );
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "new clone" }));
+    const dialog = await screen.findByRole("dialog", { name: "New cloned voice" });
+    await user.upload(
+      dialog.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["wav"], "elena.wav", { type: "audio/wav" }),
+    );
+    await user.type(within(dialog).getByPlaceholderText("Mr. Darcy"), "Elena");
+    await user.type(within(dialog).getByLabelText("what the clip says (optional)"), "Call me Elena.");
+    await user.click(within(dialog).getByRole("checkbox", { name: /permission to clone/ }));
+    await user.type(within(dialog).getByPlaceholderText("your name"), "Cyber");
+    await user.click(within(dialog).getByRole("button", { name: "clone voice" }));
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(
+      "Voice Elena is ready: cloned from the clip and your transcript.",
+    );
+    const form = server.formBodyOf("POST", "/api/voices/clone");
+    expect(form.get("engine")).toBe("qwen3tts");
+    expect(form.get("transcript")).toBe("Call me Elena.");
+
+    await user.click(within(dialog).getByRole("button", { name: "done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("the transcript box is only for Qwen and never sent for another engine", async () => {
+    const user = userEvent.setup();
+    const server = mountServer();
+    server.on("POST", "/api/voices/clone", () =>
+      jsonResponse({ ...makeVoice({ voice_id: "vc", kind: "cloned", engine: "chatterbox" }), clone_note: null }),
+    );
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "new clone" }));
+    const dialog = await screen.findByRole("dialog", { name: "New cloned voice" });
+    await user.upload(
+      dialog.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["wav"], "ref.wav", { type: "audio/wav" }),
+    );
+    await user.type(within(dialog).getByPlaceholderText("Mr. Darcy"), "Darcy");
+    await user.type(within(dialog).getByLabelText("what the clip says (optional)"), "words");
+    await user.click(within(dialog).getByRole("button", { name: /qwen3tts — local/ }));
+    await user.click(await screen.findByRole("option", { name: /^chatterbox/ }));
+    expect(within(dialog).queryByLabelText("what the clip says (optional)")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("checkbox", { name: /permission to clone/ }));
+    await user.type(within(dialog).getByPlaceholderText("your name"), "Cyber");
+    await user.click(within(dialog).getByRole("button", { name: "clone voice" }));
+
+    // no note: the dialog closes straight away, as before
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(server.formBodyOf("POST", "/api/voices/clone").get("transcript")).toBeNull();
   });
 
   it("reclone_blocked names the recorded books that would need re-recording, by title, before replace", async () => {

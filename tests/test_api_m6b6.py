@@ -78,6 +78,9 @@ def _clone(client, voice_id="clone1", data=b"RIFF-fake-reference", **form):
         "consent": "true",
         "attested_by": "cyberfang",
         "voice_id": voice_id,
+        # these tests are about consent/re-clone mechanics; the qwen3tts default would also run
+        # whisper over the clip (test_clone_transcript.py covers that path with a fake)
+        "engine": "chatterbox",
         **form,
     }
     return client.post(
