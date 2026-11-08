@@ -16,6 +16,7 @@ from pathlib import Path
 from seiyuu.attribute.aliases import AliasResolver, resolve_registry_aliases
 from seiyuu.attribute.cache import AttributionCache, ChunkCacheKey
 from seiyuu.attribute.chunking import Chunk, chunk_blocks
+from seiyuu.attribute.genders import infer_genders
 from seiyuu.attribute.models import (
     AttributedChapter,
     AttributionReport,
@@ -344,6 +345,9 @@ def attribute_book(
                 else seg
                 for seg in chapter_out.segments
             ]
+    # With merges settled (more names per record), fill empty genders from what the book
+    # states — casting otherwise reads an empty gender as female.
+    notes.extend(infer_genders(registry, out_chapters))
 
     return AttributionReport(
         book_id=book.book_meta.book_id,

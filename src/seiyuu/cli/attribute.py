@@ -109,6 +109,40 @@ def attribute(
     click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
 
 
+@main.command("infer-genders")
+@click.argument("book_id")
+@click.option(
+    "--books-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where normalized books live (default: settings.books_dir).",
+)
+def infer_genders_cmd(book_id: str, books_dir: Path | None) -> None:
+    """Fill empty character genders from the book's own text (titles, names, pronouns).
+
+    Never overwrites a gender attribution gave; thin or mixed evidence stays unknown. No LLM,
+    no GPU. New attributions do this automatically; run it once on books attributed earlier.
+    """
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import ServiceError, fill_genders
+    from seiyuu.settings import get_settings
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        books_dir or cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    try:
+        report, notes = fill_genders(book_dir)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for note in notes:
+        click.echo(f"  {note}")
+    unknown = [c.canonical_name for c in report.registry.characters if not c.gender]
+    click.echo(f"filled {len(notes)}; still unknown: {len(unknown)}")
+    if notes:
+        click.echo(f"wrote: {book_dir / ATTRIBUTION_NAME}")
+
+
 @main.command()
 @click.argument("book_id")
 @click.option(
