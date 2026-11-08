@@ -125,6 +125,21 @@ class Validator:
                 f"whisper transcription failed for {_describe(wav_path)}: {exc}"
             ) from exc
 
+    def transcribe_clip(self, wav_path: AudioSource) -> tuple[str, float]:
+        """``transcribe`` plus the clip's duration in seconds (whisper decodes it anyway), for
+        callers that decide on length too — e.g. whether a clone reference is short enough to
+        bind its transcript."""
+        try:
+            segments, info = self._get_model().transcribe(_source(wav_path), language=self.language)
+            text = " ".join(seg.text for seg in segments).strip()
+            return text, float(info.duration)
+        except ValidationError:
+            raise
+        except Exception as exc:  # surface a loud, contextual failure
+            raise ValidationError(
+                f"whisper transcription failed for {_describe(wav_path)}: {exc}"
+            ) from exc
+
     def validate(
         self, wav_path: AudioSource, expected_text: str, *, alternates: Sequence[str] = ()
     ) -> ValidationResult:

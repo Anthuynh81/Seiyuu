@@ -32,6 +32,7 @@ from seiyuu.api.schemas import (
     AuditionOut,
     AuditionRequest,
     BlendVoiceCreate,
+    ClonedVoiceOut,
     CloudSlotOut,
     CloudSlotsOut,
     JobOut,
@@ -51,6 +52,12 @@ from seiyuu.normalize import normalize_text, profile_for
 from seiyuu.render.models import RenderManifest
 from seiyuu.repository import Job, JobKind, JobState
 from seiyuu.services import ServiceError, delete_voice, voice_references
+from seiyuu.services.clone_transcript import (
+    QWEN_ENGINE,
+    CloneTranscript,
+    bind_transcript,
+    choose_transcript,
+)
 from seiyuu.voices import (
     BlendComponent,
     CloudVoiceError,
@@ -281,7 +288,7 @@ def _purge_cached_segments(output_dir: Path, voice_id: str) -> int:
     return removed
 
 
-@router.post("/voices/clone", response_model=VoiceOut, status_code=201)
+@router.post("/voices/clone", response_model=ClonedVoiceOut, status_code=201)
 def clone_voice(
     request: Request,
     response: Response,
@@ -292,13 +299,14 @@ def clone_voice(
     name: Annotated[str, Form(min_length=1)],
     engine: Annotated[
         str, Form(pattern="^(chatterbox|elevenlabs|indextts2|qwen3tts)$")
-    ] = "chatterbox",
+    ] = "qwen3tts",
     consent: Annotated[bool, Form()] = False,
     attested_by: Annotated[str, Form()] = "",
     seed: Annotated[int, Form()] = 41172,
     voice_id: Annotated[str | None, Form()] = None,
     replace: Annotated[bool, Form()] = False,
-) -> VoiceOut:
+    transcript: Annotated[str | None, Form(max_length=2000)] = None,
+) -> ClonedVoiceOut:
     """Clone from an uploaded reference clip. The load-bearing ordering from the CLI is
     preserved exactly: copy -> hash the COPY -> publish atomically -> purge stale conds
     -> save meta, so the attestation provably describes the bytes the library serves and
@@ -335,6 +343,16 @@ def clone_voice(
                 out.write(chunk)
         if size == 0:
             raise ApiError(422, "invalid", "empty reference upload")
+
+        # Qwen clones closer from the clip AND its transcript (ICL). Whisper runs on the shared
+        # CPU aligner, before the voices mutex: it is the slow part and touches no library state.
+        chosen: CloneTranscript | None = None
+        if engine == QWEN_ENGINE:
+            aligner = request.app.state.aligner
+            with request.app.state.align_lock:
+                chosen = choose_transcript(
+                    staged, provided=transcript, transcribe=aligner.transcribe_clip
+                )
 
         with request.app.state.voices_mutex:
             exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
@@ -381,6 +399,10 @@ def clone_voice(
             # embeds the ref hash, so they are unreachable anyway — removing them is hygiene)
             for stale in ref_path.parent.glob("conds_*.pt"):
                 stale.unlink(missing_ok=True)
+            # bound to the PUBLISHED bytes; a non-Qwen re-clone drops an old transcript too
+            settings = bind_transcript(
+                ref_path, attestation.reference_sha256, chosen.text if chosen else None
+            )
             library.save(
                 VoiceMeta(
                     voice_id=vid,
@@ -392,6 +414,7 @@ def clone_voice(
                     consent=attestation,
                     seed=seed,
                     source="user_upload",
+                    settings=settings,
                 )
             )
             # the shared cloning-engine instances cache per-run reference state and must not let
@@ -402,7 +425,8 @@ def clone_voice(
             registry.invalidate("chatterbox")
             registry.invalidate("indextts2")
         response.headers["Location"] = f"/api/voices/{vid}"
-        return _voice_out(library, library.load(vid))
+        out = _voice_out(library, library.load(vid))
+        return ClonedVoiceOut(**out.model_dump(), clone_note=chosen.note if chosen else None)
     finally:
         shutil.rmtree(upload_dir, ignore_errors=True)
 

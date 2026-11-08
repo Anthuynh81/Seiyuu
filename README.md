@@ -162,10 +162,11 @@ reclaimed by process death and the single-GPU discipline holds. Once configured,
 `--engine indextts2` (or the Voice Studio engine picker) and render as usual; output rides the same
 whisper validation and per-segment cost/cache paths as every other engine.
 
-#### Qwen3-TTS (optional)
+#### Qwen3-TTS (the default cloning engine)
 
 Qwen3-TTS 1.7B (Apache-2.0) clones a voice from a short clip and can also **design** one from a
-written description. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
+written description. It is the default engine for new clones (the Clone dialog and
+`seiyuu voice clone`); pick `--engine chatterbox` / `indextts2` / `elevenlabs` for the others. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
 2.8/cu128 and transformers 5.15.1), through [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts):
 
 ```bash
@@ -184,9 +185,18 @@ Then in `.env`: `QWEN3TTS_WORKER_PYTHON=...\qwen3-tts\.venv\Scripts\python.exe` 
 `qwen_tts` package (no CUDA graphs) if the fast path misbehaves. A voice is cloned in Qwen's ICL
 mode when its `meta.json` binds a transcript (`settings.qwen3tts.ref_text_digest`, a digest of
 `reference.wav` plus the `reference.txt` beside it, so the transcript is part of the segment cache
-key); otherwise from the speaker embedding alone. `scripts/design_voices.py` writes both. A
-`reference.txt` dropped in by hand is ignored, and one that no longer matches its digest fails
-the render loudly rather than mixing clone modes in one book.
+key); otherwise from the speaker embedding alone. A Qwen clone of a clip up to 30 s writes both:
+the transcript is yours if you typed one (`--transcript`, or the dialog's "what the clip says"),
+otherwise whisper's (CPU). Longer clips, silence, or a failed transcription clone from the sound
+alone, because a long reference shares Qwen's generation budget and would cut long lines short.
+`scripts/design_voices.py` writes both too. A `reference.txt` dropped in by hand is ignored, and
+one that no longer matches its digest fails the render loudly rather than mixing clone modes in
+one book.
+
+```bash
+uv run seiyuu voice clone "Elena" elena.wav --consent              # transcribed for you
+uv run seiyuu voice clone "Elena" elena.wav --consent --transcript "Call me Elena."
+```
 
 To design voices from written descriptions (nothing enters your voice library; the staged clips
 land under `--out`):

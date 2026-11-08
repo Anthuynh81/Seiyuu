@@ -10,6 +10,7 @@ import type {
   AuditionOut,
   CastAccent,
   CastStrategy,
+  ClonedVoiceOut,
   BookDeletedOut,
   BookDetail,
   BooksOut,
@@ -814,7 +815,14 @@ export function useCreateVoice() {
 export function useCloneVoice() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { file: File; name: string; engine: string; attestedBy: string; replace?: boolean }) => {
+    mutationFn: (input: {
+      file: File;
+      name: string;
+      engine: string;
+      attestedBy: string;
+      replace?: boolean;
+      transcript?: string;
+    }) => {
       const form = new FormData();
       form.append("file", input.file);
       form.append("name", input.name);
@@ -822,7 +830,8 @@ export function useCloneVoice() {
       form.append("consent", "true");
       form.append("attested_by", input.attestedBy);
       if (input.replace) form.append("replace", "true");
-      return postForm<VoiceOut>("/api/voices/clone", form);
+      if (input.transcript?.trim()) form.append("transcript", input.transcript.trim());
+      return postForm<ClonedVoiceOut>("/api/voices/clone", form);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
   });

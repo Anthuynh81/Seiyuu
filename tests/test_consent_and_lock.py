@@ -142,6 +142,8 @@ def test_clone_cli_writes_attestation_record(tmp_path):
             "clone",
             "Elena",
             str(ref),
+            "--engine",
+            "chatterbox",  # consent is engine-agnostic; qwen3tts would also transcribe
             "--consent",
             "--consent-by",
             "Ann Author",

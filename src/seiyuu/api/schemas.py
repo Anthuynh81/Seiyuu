@@ -559,6 +559,13 @@ class VoiceOut(VoiceMeta):
     has_audition: bool = False
 
 
+class ClonedVoiceOut(VoiceOut):
+    """POST /voices/clone: the new voice plus, for a Qwen clone, one plain sentence saying
+    whether it binds a transcript (ICL) or clones from the sound alone, and why."""
+
+    clone_note: str | None = None
+
+
 class UnreadableVoice(BaseModel):
     voice_id: str
     error: str
