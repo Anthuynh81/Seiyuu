@@ -43,6 +43,8 @@ function JobCompletionWatcher() {
           "assignment",
           "voices",
           "characters",
+          "castPlan", // a finished describe/design-cast job rewrites the cast plan
+          "designs",
         ];
         for (const key of finished) {
           qc.invalidateQueries({ queryKey: [key] });

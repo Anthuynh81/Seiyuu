@@ -10,10 +10,13 @@ import type {
   AuditionOut,
   CastAccent,
   CastStrategy,
+  CastDesignedOut,
+  CastPlan,
   ClonedVoiceOut,
   DesignCreate,
   DesignOut,
   DesignStartedOut,
+  RowUpdate,
   BookDeletedOut,
   BookDetail,
   BooksOut,
@@ -837,6 +840,73 @@ export function useCloneVoice() {
       return postForm<ClonedVoiceOut>("/api/voices/clone", form);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+/** The book's cast plan (Qwen-first casting); null until it has been described. Refreshed by
+    JobCompletionWatcher when a describe/design-cast job finishes (key "castPlan"). */
+export function useCastPlan(bookId: string | null) {
+  return useQuery({
+    queryKey: ["castPlan", bookId],
+    queryFn: async () => {
+      try {
+        return await api<CastPlan>(`/api/books/${bookId}/cast-plan`);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null;
+        throw e;
+      }
+    },
+    enabled: bookId !== null,
+  });
+}
+
+/** Queue the describer job (the local LLM drafts every character's voice description). */
+export function useDescribeCast(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => postJson<JobOut>(`/api/books/${bookId}/cast-plan/describe`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+/** Save Review-table edits; the server's plan replaces the cached one. */
+export function useUpdateCastPlan(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (updates: RowUpdate[]) =>
+      api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates }),
+      }),
+    onSuccess: (plan) => qc.setQueryData(["castPlan", bookId], plan),
+  });
+}
+
+/** Queue the design-cast job (a voice per row, then the book's assignment). */
+export function useDesignCast(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => postJson<JobOut>(`/api/books/${bookId}/cast-plan/design`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+/** Swap a designed row to another of its takes; re-points everyone sharing that voice. */
+export function useCastTake(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { characterId: string; take: number }) =>
+      postJson<CastDesignedOut>(
+        `/api/books/${bookId}/cast-plan/rows/${encodeURIComponent(input.characterId)}/take`,
+        { take: input.take },
+      ),
+    onSuccess: (out) => {
+      qc.setQueryData(["castPlan", bookId], out.plan);
+      qc.invalidateQueries({ queryKey: ["assignment"] });
+      qc.invalidateQueries({ queryKey: ["voices"] });
+      qc.invalidateQueries({ queryKey: ["designs"] });
+    },
   });
 }
 
