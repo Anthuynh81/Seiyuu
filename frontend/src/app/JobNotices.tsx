@@ -5,7 +5,7 @@ import { useBooks, useDepartedJobs, useRecentJobs } from "../api/hooks";
 import type { JobKind, JobOut } from "../api/types";
 import { JobErrorText } from "../components/JobErrorText";
 import { SCREENS } from "../lib/glossary";
-import { engineSubject, finishedHeadline, subjectName } from "../lib/jobCopy";
+import { designSubject, finishedHeadline, isBookSubject, subjectName } from "../lib/jobCopy";
 import { explainJobError } from "../lib/jobErrors";
 
 /** Successes (and user-requested stops) clear themselves; failures wait for the user. */
@@ -42,8 +42,16 @@ function Notice({ job, name, onDismiss: dismissId }: { job: JobOut; name: string
   }, [failed, paused, onDismiss]);
 
   const headline = finishedHeadline(job, name);
-  const isBook = engineSubject(job.book_id) === null;
-  const next = !isBook ? undefined : failed ? (["render", `Open ${SCREENS.render}`] as const) : NEXT[job.kind];
+  const isBook = isBookSubject(job.book_id);
+  // a voice design's takes (or its failure) are on the Voices screen
+  const next =
+    designSubject(job.book_id) !== null
+      ? (["voices", `Open ${SCREENS.voices}`] as const)
+      : !isBook
+        ? undefined
+        : failed
+          ? (["render", `Open ${SCREENS.render}`] as const)
+          : NEXT[job.kind];
   const cls = failed ? "fail" : job.state === "canceled" ? "stop" : "";
   return (
     <div

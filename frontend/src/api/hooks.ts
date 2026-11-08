@@ -11,6 +11,9 @@ import type {
   CastAccent,
   CastStrategy,
   ClonedVoiceOut,
+  DesignCreate,
+  DesignOut,
+  DesignStartedOut,
   BookDeletedOut,
   BookDetail,
   BooksOut,
@@ -834,6 +837,38 @@ export function useCloneVoice() {
       return postForm<ClonedVoiceOut>("/api/voices/clone", form);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+/** Start a voice design: a `design` job makes the takes (GET /api/designs/{id} shows them). */
+export function useStartDesign() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: DesignCreate) => postJson<DesignStartedOut>("/api/designs", input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
+/** One design's takes so far; polls while its job is live (takes land one by one). */
+export function useDesign(designId: string | null, live: boolean) {
+  return useQuery({
+    queryKey: ["designs", designId],
+    queryFn: () => api<DesignOut>(`/api/designs/${encodeURIComponent(designId ?? "")}`),
+    enabled: designId !== null,
+    refetchInterval: live ? 2000 : false,
+  });
+}
+
+/** Keep one take as a library voice (a Qwen3-TTS clone of it). */
+export function useKeepDesignTake(designId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { take: number; name?: string }) =>
+      postJson<VoiceOut>(`/api/designs/${encodeURIComponent(designId)}/keep`, input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["voices"] });
+      qc.invalidateQueries({ queryKey: ["designs", designId] });
+    },
   });
 }
 

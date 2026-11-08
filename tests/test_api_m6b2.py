@@ -371,6 +371,7 @@ def test_build_handlers_covers_all_but_ingest(tmp_path) -> None:
     handlers = build_handlers(cfg, EngineRegistry(cfg), HeavyWorkGate())
     assert set(handlers) == {
         JobKind.WARMUP,
+        JobKind.DESIGN,
         JobKind.ATTRIBUTE,
         JobKind.RENDER,
         JobKind.ASSEMBLE,

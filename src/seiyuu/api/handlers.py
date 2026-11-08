@@ -17,6 +17,7 @@ from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.schemas import (
     AssembleParams,
     AttributeParams,
+    DesignParams,
     LoudnessWrite,
     MasterParams,
     PauseWrite,
@@ -120,6 +121,32 @@ def build_handlers(
             # Lazy release by design: the model STAYS resident so the next audition's
             # re-acquire is an identity no-op — that is the whole point of warmup.
             ctx.progress(f"{params.engine_id} resident")
+
+    def design(ctx: JobContext) -> None:
+        from seiyuu.services.voice_design import DESIGN_ENGINE, design_dir, run_design
+        from seiyuu.validate import Validator
+
+        params = DesignParams.model_validate(ctx.job.params or {})
+        directory = design_dir(cfg.data_dir, params.design_id)
+        engine = registry.get(DESIGN_ENGINE)
+        # the speech check runs on the CPU, like read-along: never a second model on the GPU
+        validator = Validator(
+            model_size=cfg.validation_model_size,
+            device="cpu",
+            compute_type="int8",
+            min_ratio=cfg.validation_min_ratio,
+        )
+        with gate.hold("job"):
+            # run_design holds the GPU per take and frees it at the end: the VoiceDesign
+            # checkpoint is never what a render wants resident next
+            run_design(
+                directory,
+                engine=engine,
+                validator=validator,
+                gpu=get_gpu_manager(),
+                progress=ctx.progress,
+                check_cancel=ctx.check_cancel,
+            )
 
     def attribute(ctx: JobContext) -> None:
         params = AttributeParams.model_validate(ctx.job.params or {})
@@ -300,6 +327,7 @@ def build_handlers(
 
     return {
         JobKind.WARMUP: warmup,
+        JobKind.DESIGN: design,
         JobKind.ATTRIBUTE: attribute,
         JobKind.RENDER: render,
         JobKind.ASSEMBLE: assemble,

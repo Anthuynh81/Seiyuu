@@ -25,6 +25,7 @@ from seiyuu.api.handlers import build_handlers
 from seiyuu.api.origin import OriginGuard
 from seiyuu.api.registry import EngineRegistry
 from seiyuu.api.routes import books as books_routes
+from seiyuu.api.routes import design as design_routes
 from seiyuu.api.routes import engines as engines_routes
 from seiyuu.api.routes import jobs as jobs_routes
 from seiyuu.api.routes import lexicon as lexicon_routes
@@ -157,6 +158,7 @@ def create_app(
     app.include_router(render_routes.router, prefix="/api")
     app.include_router(series_routes.router, prefix="/api")
     app.include_router(voices_routes.router, prefix="/api")
+    app.include_router(design_routes.router, prefix="/api")
     return app
 
 

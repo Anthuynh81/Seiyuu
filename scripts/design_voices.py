@@ -39,7 +39,6 @@ Usage:
 
 import argparse
 import getpass
-import hashlib
 import json
 import shutil
 import sys
@@ -50,10 +49,15 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-WPM_RANGE = (140.0, 210.0)
-WPM_TARGET = 175.0
-SOURCE = "qwen_design"
-CONSENT_TEXT = "synthetic voice designed from a text description, no real person"
+from seiyuu.services.voice_design import (  # noqa: E402 - after the sys.path insert
+    CONSENT_TEXT,
+    SOURCE,
+    WPM_RANGE,
+    TakeScore,
+    pick_best,
+    score_take,
+    take_seed,
+)
 
 
 @dataclass(frozen=True)
@@ -62,21 +66,6 @@ class DesignSpec:
     description: str
     sample_text: str
     name: str
-
-
-@dataclass
-class TakeScore:
-    take: int
-    seed: int
-    path: str
-    text: str  # the normalized text the model spoke (also the reference transcript)
-    seconds: float
-    words: int
-    wpm: float
-    ok: bool
-    score: float
-    transcript: str
-    reason: str | None = None
 
 
 def _say(msg: str) -> None:
@@ -99,27 +88,6 @@ def load_specs(path: Path) -> list[DesignSpec]:
     return specs
 
 
-def take_seed(voice_id: str, take: int) -> int:
-    """A stable, distinct seed per (voice, take): re-runs reproduce the same takes."""
-    digest = hashlib.sha256(f"{voice_id}#{take}".encode()).digest()
-    return int.from_bytes(digest[:4], "big") % 2_000_000_000
-
-
-def words_per_minute(text: str, seconds: float) -> float:
-    return len(text.split()) / max(seconds, 1e-6) * 60.0
-
-
-def rank_key(t: TakeScore) -> tuple:
-    in_range = WPM_RANGE[0] <= t.wpm <= WPM_RANGE[1]
-    return (t.ok, in_range, round(t.score, 2), -abs(t.wpm - WPM_TARGET), -t.take)
-
-
-def pick_best(takes: list[TakeScore]) -> TakeScore:
-    if not takes:
-        raise ValueError("no takes to pick from")
-    return max(takes, key=rank_key)
-
-
 def parse_picks(values: list[str]) -> dict[str, int]:
     picks = {}
     for value in values:
@@ -140,27 +108,6 @@ def parse_shares(values: list[str]) -> dict[str, str]:
     if set(shares) & set(shares.values()):
         raise ValueError("--share: a shared voice can't itself be a source")
     return shares
-
-
-def score_take(validator: Any, path: Path, text: str, take: int, seed: int) -> TakeScore:
-    import soundfile as sf
-
-    info = sf.info(str(path))
-    seconds = info.frames / float(info.samplerate)
-    verdict = validator.validate(path, text)
-    return TakeScore(
-        take=take,
-        seed=seed,
-        path=str(path),
-        text=text,
-        seconds=round(seconds, 2),
-        words=len(text.split()),
-        wpm=round(words_per_minute(text, seconds), 1),
-        ok=bool(verdict.ok),
-        score=float(verdict.score),
-        transcript=verdict.transcript,
-        reason=verdict.reason,
-    )
 
 
 def check_stageable(voices_dir: Path, voice_ids: list[str]) -> None:

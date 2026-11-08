@@ -1,4 +1,4 @@
-import type { VoiceOut } from "../../api/types";
+import type { DesignTakeOut, VoiceOut } from "../../api/types";
 
 export const BORROW_RETRY_MAX = 3; // bounded auto-retries while a render lends the GPU between segments
 
@@ -26,4 +26,11 @@ export function recipeOf(voice: VoiceOut): DuplicateRecipe | null {
     return { kind: "blend", name: `${voice.name} copy`, engine: voice.engine, layers, seed: voice.seed };
   }
   return null;
+}
+
+/** Plain words for one designed take's pace and speech check. */
+export function takeVerdict(t: Pick<DesignTakeOut, "wpm" | "in_pace" | "ok" | "reason">): string {
+  const pace = t.in_pace ? "natural pace" : t.wpm > 175 ? "a bit fast" : "a bit slow";
+  const check = t.ok ? "every word clear" : `the speech check flagged it${t.reason ? ` (${t.reason})` : ""}`;
+  return `${pace}, ${check}`;
 }

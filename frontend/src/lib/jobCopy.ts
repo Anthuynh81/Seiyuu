@@ -11,11 +11,22 @@ export function engineSubject(bookId: string): string | null {
   return bookId.startsWith("engine:") ? bookId.slice("engine:".length) : null;
 }
 
+/** Voice-design jobs use the `design:<id>` subject in the book column. */
+export function designSubject(bookId: string): string | null {
+  return bookId.startsWith("design:") ? bookId.slice("design:".length) : null;
+}
+
+/** True when a job's subject is a book (not an engine warm-up or a voice design). */
+export function isBookSubject(bookId: string): boolean {
+  return engineSubject(bookId) === null && designSubject(bookId) === null;
+}
+
 /** The book's title for a job's subject, or the engine's name for a warm-up job. A book that
     is gone (or has no title) reads as "your book" rather than its id. */
 export function subjectName(job: Pick<JobOut, "book_id">, books: BookCard[] | undefined): string {
   const engine = engineSubject(job.book_id);
   if (engine !== null) return engineName(engine);
+  if (designSubject(job.book_id) !== null) return "a new voice";
   return books?.find((b) => b.book_id === job.book_id)?.title ?? "your book";
 }
 
