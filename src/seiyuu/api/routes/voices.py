@@ -290,7 +290,9 @@ def clone_voice(
     store: StoreDep,
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1)],
-    engine: Annotated[str, Form(pattern="^(chatterbox|elevenlabs|indextts2)$")] = "chatterbox",
+    engine: Annotated[
+        str, Form(pattern="^(chatterbox|elevenlabs|indextts2|qwen3tts)$")
+    ] = "chatterbox",
     consent: Annotated[bool, Form()] = False,
     attested_by: Annotated[str, Form()] = "",
     seed: Annotated[int, Form()] = 41172,

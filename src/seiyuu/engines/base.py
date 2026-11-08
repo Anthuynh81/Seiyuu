@@ -55,7 +55,7 @@ class TTSEngine(ABC):
     # Cloning engines resolve a voice from voices/{voice_id}/reference.wav, so they must be
     # constructed with the voice-library dir (and the consent gate binds to those exact bytes —
     # see api/registry). The pipeline/CLI pass voices_dir iff this is True; preset/cloud engines
-    # (Kokoro, ElevenLabs) leave it False. Chatterbox and IndexTTS-2 set it True.
+    # (Kokoro, ElevenLabs) leave it False. Chatterbox, IndexTTS-2 and Qwen3-TTS set it True.
     clones_from_library: bool = False
 
     @property

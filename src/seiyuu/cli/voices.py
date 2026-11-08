@@ -294,10 +294,10 @@ def voice_delete(
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--engine",
-    type=click.Choice(["chatterbox", "indextts2", "elevenlabs"]),
+    type=click.Choice(["chatterbox", "indextts2", "qwen3tts", "elevenlabs"]),
     default="chatterbox",
     show_default=True,
-    help="Cloning engine: chatterbox/indextts2 (local) or elevenlabs (cloud IVC).",
+    help="Cloning engine: chatterbox/indextts2/qwen3tts (local) or elevenlabs (cloud IVC).",
 )
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."

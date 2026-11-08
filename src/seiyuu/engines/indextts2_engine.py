@@ -157,7 +157,13 @@ class SubprocessTransport:
         env: dict[str, str],
         cwd: str | None,
         boot_timeout: float,
+        name: str = "indextts2",
+        protocol: int | None = None,
     ) -> None:
+        self._name = name  # engine id in error messages (the Qwen3-TTS worker reuses this class)
+        # When set, the boot handshake must announce exactly this protocol version: a worker file
+        # from another checkout (or an older env) is refused instead of misreading requests.
+        self._protocol = protocol
         self._proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -202,32 +208,37 @@ class SubprocessTransport:
     def _boot(self, timeout: float) -> None:
         reply = self._read(timeout)
         if reply.get("event") != "ready":
-            raise WorkerError(f"indextts2 worker did not announce readiness: {reply}")
+            raise WorkerError(f"{self._name} worker did not announce readiness: {reply}")
+        if self._protocol is not None and reply.get("protocol") != self._protocol:
+            raise WorkerError(
+                f"{self._name} worker speaks protocol {reply.get('protocol')!r}, "
+                f"expected {self._protocol}: the worker file and the adapter are out of step"
+            )
 
     def _read(self, timeout: float) -> dict[str, Any]:
         try:
             item = self._out_q.get(timeout=timeout)
         except queue.Empty as exc:
             raise WorkerError(
-                f"indextts2 worker timed out after {timeout:g}s{self._stderr_context()}"
+                f"{self._name} worker timed out after {timeout:g}s{self._stderr_context()}"
             ) from exc
         if item is _EOF:
             code = self._proc.poll()
-            raise WorkerError(f"indextts2 worker exited (code {code}){self._stderr_context()}")
+            raise WorkerError(f"{self._name} worker exited (code {code}){self._stderr_context()}")
         try:
             return json.loads(item)
         except ValueError as exc:
-            raise WorkerError(f"indextts2 worker sent non-JSON: {item!r}") from exc
+            raise WorkerError(f"{self._name} worker sent non-JSON: {item!r}") from exc
 
     def request(self, message: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         if self._proc.stdin is None or self._proc.poll() is not None:
-            raise WorkerError(f"indextts2 worker is not running{self._stderr_context()}")
+            raise WorkerError(f"{self._name} worker is not running{self._stderr_context()}")
         try:
             self._proc.stdin.write(json.dumps(message) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             raise WorkerError(
-                f"indextts2 worker pipe broke: {exc}{self._stderr_context()}"
+                f"{self._name} worker pipe broke: {exc}{self._stderr_context()}"
             ) from exc
         return self._read(timeout)
 

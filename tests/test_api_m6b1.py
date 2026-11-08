@@ -68,7 +68,7 @@ def test_system_shape_and_defaults(client) -> None:
     assert body["attribution"]["model"] == "gemma4:12b-it-qat"
     assert body["attribution"]["prompt_version"]
     assert body["attribution"]["hybrid"] is False
-    assert body["engines"] == ["chatterbox", "elevenlabs", "indextts2", "kokoro"]
+    assert body["engines"] == ["chatterbox", "elevenlabs", "indextts2", "kokoro", "qwen3tts"]
     assert body["version"] == __version__
 
 
@@ -126,7 +126,7 @@ def test_startup_reconciles_orphaned_jobs(tmp_path) -> None:
 def test_engines_catalog(client) -> None:
     body = client.get("/api/engines").json()
     by_id = {e["engine_id"]: e for e in body["engines"]}
-    assert set(by_id) == {"kokoro", "chatterbox", "indextts2", "elevenlabs"}
+    assert set(by_id) == {"kokoro", "chatterbox", "indextts2", "qwen3tts", "elevenlabs"}
 
     assert by_id["kokoro"]["uses_gpu"] is True
     assert by_id["kokoro"]["requires_validation"] is False
@@ -146,6 +146,13 @@ def test_engines_catalog(client) -> None:
     assert by_id["indextts2"]["supports_cloning"] is True
     assert by_id["indextts2"]["paid"] is False
     assert by_id["indextts2"]["weights_cached"] is not None
+
+    # Qwen3-TTS: the same local-worker facts; its weights are a local models dir.
+    assert by_id["qwen3tts"]["uses_gpu"] is True
+    assert by_id["qwen3tts"]["requires_validation"] is True
+    assert by_id["qwen3tts"]["supports_cloning"] is True
+    assert by_id["qwen3tts"]["paid"] is False
+    assert by_id["qwen3tts"]["weights_cached"] is not None
 
     assert by_id["elevenlabs"]["uses_gpu"] is False
     assert by_id["elevenlabs"]["paid"] is True

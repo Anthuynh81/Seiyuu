@@ -24,7 +24,7 @@ from typing import Any, Protocol
 from seiyuu.bench.models import VramStats
 
 # Engines whose model lives in a separate worker process (torch counters here can't see it).
-SUBPROCESS_ENGINES = frozenset({"indextts2"})
+SUBPROCESS_ENGINES = frozenset({"indextts2", "qwen3tts"})
 
 _MB = 1024 * 1024
 
