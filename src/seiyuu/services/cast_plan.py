@@ -354,6 +354,14 @@ def apply_updates(plan: CastPlan, updates: list[RowUpdate]) -> CastPlan:
             if upd.age not in AGES:
                 raise ServiceError(f"cast plan: age must be one of {', '.join(AGES)}")
             row.age = upd.age
+        reshaped = any(
+            v is not None for v in (upd.description, upd.sample_index, upd.gender, upd.age)
+        )
+        if reshaped:
+            # the designed voice no longer matches the row: the next design-cast run redesigns
+            # it (the old voice stays assigned and in the library until then)
+            row.design_id = None
+            row.voice_id = None
         row.edited = True
     flatten_same_as(plan.rows, plan.narrator)
     return plan
