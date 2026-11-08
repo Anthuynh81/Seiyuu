@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from seiyuu.attribute import ATTRIBUTION_NAME, AttributionCache, attribute_book, write_attribution
 from seiyuu.attribute.aliases import resolve_registry_aliases
+from seiyuu.attribute.genders import infer_genders
 from seiyuu.attribute.models import AttributionReport, CharacterRegistry
 from seiyuu.attribute.pipeline import _drop_superseded_notes
 from seiyuu.attribute.providers.local import OllamaPreflightError, ollama_preflight
@@ -369,9 +370,34 @@ def run_adjudication(
                 else seg
                 for seg in chapter_out.segments
             ]
+    gender_notes = infer_genders(registry, report.chapters)
     kept = _drop_superseded_notes(report.registry_notes, {pre_names[loser] for loser in id_remap})
-    notes = list(dict.fromkeys([*kept, *alias_notes]))
+    notes = list(dict.fromkeys([*kept, *alias_notes, *gender_notes]))
     updated = report.model_copy(update={"registry": registry, "registry_notes": notes})
     write_attribution(updated, book_dir)
     say(f"adjudication: {len(id_remap)} merge(s) applied")
     return updated
+
+
+def fill_genders(book_dir: Path) -> tuple[AttributionReport, list[str]]:
+    """Back-fill empty character genders in an existing ``attribution.json`` (no LLM, no GPU).
+
+    New attributions already run ``infer_genders`` after alias resolution; this brings books
+    attributed before it up to date without re-attributing. Rewrites the file only when
+    something was filled, so a rerun is a no-op. Returns ``(report, notes)``.
+    """
+    path = Path(book_dir) / ATTRIBUTION_NAME
+    if not path.is_file():
+        raise ServiceError(f"no attribution at {path}; run `seiyuu attribute` first")
+    try:
+        report = AttributionReport.model_validate_json(path.read_text(encoding="utf-8"))
+    except (ValidationError, OSError) as exc:
+        raise ServiceError(
+            f"corrupt attribution report {path}: {exc}; re-run `seiyuu attribute`"
+        ) from exc
+    notes = infer_genders(report.registry, report.chapters)
+    if notes:
+        merged = list(dict.fromkeys([*report.registry_notes, *notes]))
+        report = report.model_copy(update={"registry_notes": merged})
+        write_attribution(report, book_dir)
+    return report, notes

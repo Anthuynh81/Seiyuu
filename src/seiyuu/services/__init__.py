@@ -19,6 +19,7 @@ from seiyuu.services.assignment import (
 from seiyuu.services.attribution import (
     build_adjudicator,
     build_provider,
+    fill_genders,
     load_report,
     record_edit,
     run_adjudication,
@@ -74,6 +75,7 @@ __all__ = [
     "merge_existing_cast",
     "pop_edit",
     "record_edit",
+    "fill_genders",
     "run_adjudication",
     "run_attribution",
     "save_assignment",
