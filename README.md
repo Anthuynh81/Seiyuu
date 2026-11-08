@@ -198,8 +198,18 @@ uv run seiyuu voice clone "Elena" elena.wav --consent              # transcribed
 uv run seiyuu voice clone "Elena" elena.wav --consent --transcript "Call me Elena."
 ```
 
-To design voices from written descriptions (nothing enters your voice library; the staged clips
-land under `--out`):
+**Describe a voice.** On the Voices screen, "describe a voice" designs one from a written
+description: Qwen3-TTS VoiceDesign speaks a line in a new voice a few times (a `design` job on the
+GPU, ~30 s per take), each take is scored for clarity and pace, and the one you keep becomes a
+normal Qwen clone in your library. From the CLI:
+
+```bash
+uv run seiyuu voice design "Old janitor" --description "a gruff man in his sixties, slow and tired"
+uv run seiyuu voice design "Old janitor" --description "..." --keep none   # just list the takes
+```
+
+For a whole cast at once, the batch script designs from a JSON file (nothing enters your voice
+library; the staged clips land under `--out`):
 
 ```bash
 uv run python scripts/design_voices.py cast.json --out output/designed/<book>

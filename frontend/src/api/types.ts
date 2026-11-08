@@ -6,7 +6,7 @@ export interface ErrorEnvelope {
 }
 
 export type JobState = "queued" | "running" | "succeeded" | "failed" | "canceled";
-export type JobKind = "ingest" | "attribute" | "render" | "assemble" | "master" | "warmup";
+export type JobKind = "ingest" | "attribute" | "render" | "assemble" | "master" | "warmup" | "design";
 
 export interface JobOut {
   job_id: string;
@@ -485,6 +485,41 @@ export interface VoiceOut {
     transcript (closer cloning) or clones from the sound alone, and why. */
 export interface ClonedVoiceOut extends VoiceOut {
   clone_note: string | null;
+}
+
+/** Voice design (Qwen3-TTS VoiceDesign): POST /api/designs and friends. */
+export interface DesignCreate {
+  name: string;
+  description: string;
+  sample_text?: string;
+  takes?: number;
+}
+
+export interface DesignTakeOut {
+  take: number;
+  seconds: number;
+  wpm: number;
+  in_pace: boolean; // comfortable listening pace
+  ok: boolean; // passed the speech check
+  score: number;
+  reason: string | null;
+  audio_url: string;
+  kept_voice_id: string | null;
+}
+
+export interface DesignOut {
+  design_id: string;
+  name: string;
+  description: string;
+  text: string; // the line every take speaks
+  takes_requested: number;
+  takes: DesignTakeOut[];
+  recommended: number | null;
+}
+
+export interface DesignStartedOut {
+  design: DesignOut;
+  job: JobOut;
 }
 
 export interface VoiceListOut {

@@ -6,6 +6,7 @@ import { TalkSelect } from "../components/Select";
 import { SCREENS } from "../lib/glossary";
 import { AddVoiceDialog } from "./voices/AddVoiceDialog";
 import { CloneDialog } from "./voices/CloneDialog";
+import { DesignDialog } from "./voices/DesignDialog";
 import type { DuplicateRecipe } from "./voices/helpers";
 import { VoiceCardView } from "./voices/VoiceCardView";
 
@@ -17,7 +18,7 @@ export function Voices() {
   const voices = useVoices();
   const slots = useCloudSlots();
   const books = useBooks();
-  const [dialog, setDialog] = useState<"none" | "add" | "clone">("none");
+  const [dialog, setDialog] = useState<"none" | "add" | "clone" | "design">("none");
   const [duplicate, setDuplicate] = useState<DuplicateRecipe | null>(null);
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<"all" | "preset" | "blend" | "cloned">("all");
@@ -94,6 +95,7 @@ export function Voices() {
             add voice
           </button>
           <button className="key ml-2" onClick={() => setDialog("clone")}>new clone</button>
+          <button className="key ml-2" onClick={() => setDialog("design")}>describe a voice</button>
         </div>
         <div className="voicetools">
           <input
@@ -183,6 +185,7 @@ export function Voices() {
         />
       )}
       {dialog === "clone" && <CloneDialog onClose={() => setDialog("none")} />}
+      {dialog === "design" && <DesignDialog onClose={() => setDialog("none")} />}
     </section>
   );
 }

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { makeBook } from "../test/fixtures";
-import { engineSubject, finishedHeadline, liveJobLine, stepName, subjectName } from "./jobCopy";
+import {
+  designSubject,
+  engineSubject,
+  finishedHeadline,
+  isBookSubject,
+  liveJobLine,
+  stepName,
+  subjectName,
+} from "./jobCopy";
 
 describe("jobCopy", () => {
   const books = [makeBook({ book_id: "b1", title: "The Hollow Crown" }), makeBook({ book_id: "b2", title: null })];
@@ -13,6 +21,19 @@ describe("jobCopy", () => {
     expect(subjectName({ book_id: "gone" }, undefined)).toBe("your book");
     expect(engineSubject("engine:kokoro")).toBe("kokoro");
     expect(engineSubject("b1")).toBeNull();
+  });
+
+  it("a voice design is its own subject, never a book", () => {
+    expect(designSubject("design:0123456789ab")).toBe("0123456789ab");
+    expect(designSubject("b1")).toBeNull();
+    expect(subjectName({ book_id: "design:0123456789ab" }, books)).toBe("a new voice");
+    expect(isBookSubject("b1")).toBe(true);
+    expect(isBookSubject("engine:kokoro")).toBe(false);
+    expect(isBookSubject("design:0123456789ab")).toBe(false);
+    expect(finishedHeadline({ kind: "design", state: "succeeded" }, "a new voice")).toBe(
+      "Finished designing a new voice",
+    );
+    expect(stepName("design")).toBe("Designing a voice");
   });
 
   it.each([
