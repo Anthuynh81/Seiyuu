@@ -140,7 +140,9 @@ def test_evidence_is_busiest_first_and_skips_the_silent():
     assert [e.character_id for e in evidence] == ["new", "kim", "staff"]  # ghost has no lines
     kim = evidence[1]
     assert kim.line_count == 6
-    assert all(8 <= len(line.split()) <= 40 for line in kim.lines)  # "Yes." loses to real lines
+    # real lines first (the sample candidates), the short "Yes." after them as filler
+    assert all(8 <= len(line.split()) <= 40 for line in kim.lines[:-1])
+    assert kim.lines[-1] == "Yes."
     assert kim.mentions and all("Kim Soleum" in m for m in kim.mentions)
     assert ("kim", "Kim Soleum") not in kim.others and ("new", "New Employee") in kim.others
 

@@ -200,7 +200,7 @@ uv run seiyuu voice clone "Elena" elena.wav --consent --transcript "Call me Elen
 
 **Describe a voice.** On the Voices screen, "describe a voice" designs one from a written
 description: Qwen3-TTS VoiceDesign speaks a line in a new voice a few times (a `design` job on the
-GPU, ~30 s per take), each take is scored for clarity and pace, and the one you keep becomes a
+GPU: about a minute to load the model, then ~5 s per take), each take is scored for clarity and pace, and the one you keep becomes a
 normal Qwen clone in your library. From the CLI:
 
 ```bash

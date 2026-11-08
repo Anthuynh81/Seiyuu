@@ -38,6 +38,7 @@ from seiyuu.voices import VoiceAssignment, VoiceLibrary
 
 MIN_DESIGN_WORDS = 15  # ~5 s of speech: enough for VoiceDesign to settle and to clone from
 MAX_DESIGN_WORDS = 45  # ~15 s: a longer clip only eats Qwen's generation budget at render
+FILLER_LINE = "Well, I suppose there's nothing else to do but keep going and see what happens next."
 
 
 def design_text(row: PlanRow) -> str:
@@ -58,6 +59,10 @@ def design_text(row: PlanRow) -> str:
         words += n
         if words >= MIN_DESIGN_WORDS:
             break
+    if words < MIN_DESIGN_WORDS:
+        # a small part with almost nothing to say: top up with a neutral line so the clip is
+        # long enough to clone from (it designs the voice; it never appears in the book)
+        picked.append(FILLER_LINE)
     return " ".join(picked)
 
 

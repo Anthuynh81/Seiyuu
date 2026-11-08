@@ -17,6 +17,7 @@ from seiyuu.repository import JobState
 from seiyuu.services import ServiceError
 from seiyuu.services.assignment import load_existing_assignment, save_assignment
 from seiyuu.services.cast_design import (
+    FILLER_LINE,
     design_prompt,
     design_text,
     designing_rows,
@@ -58,14 +59,21 @@ def test_design_text_joins_short_lines_until_long_enough():
     one_long = _row(sample_lines=[" ".join(["word"] * 20), "next line here"], sample_index=0)
     assert design_text(one_long) == " ".join(["word"] * 20)  # already long enough
     wrap = _row(sample_lines=["one two three", "four five"], sample_index=1)
-    assert design_text(wrap) == "four five one two three"  # starts at the pick, wraps round
+    # starts at the pick and wraps round; still under 15 words, so the neutral filler tops it up
+    assert design_text(wrap) == f"four five one two three {FILLER_LINE}"
     with pytest.raises(ServiceError, match="no line"):
         design_text(_row(sample_lines=[]))
 
 
 def test_design_text_never_runs_past_the_cap():
     row = _row(sample_lines=["short.", " ".join(["w"] * 45)], sample_index=0)
-    assert design_text(row) == "short."  # adding the 45-word line would make 46 words
+    # adding the 45-word line would make 46 words, so it is skipped (and the filler tops up)
+    assert design_text(row) == f"short. {FILLER_LINE}"
+
+
+def test_a_tiny_part_is_topped_up_to_a_usable_length():
+    text = design_text(_row(sample_lines=["So that's why you pried open the wall?"]))
+    assert text.startswith("So that's why") and len(text.split()) >= 15
 
 
 def test_design_prompt_leads_with_age_and_gender():

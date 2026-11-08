@@ -532,7 +532,9 @@ def design_cast(book_id: str) -> None:
     rows = designing_rows(plan)
     takes = sum(r.takes for r in rows)
     click.echo(
-        f"designing {len(rows)} voices, {takes} takes (~{takes * 30 // 60 + 1} min on the GPU)"
+        # measured on the 3080 Ti: ~5 s per take once VoiceDesign is loaded (~1 min to load)
+        f"designing {len(rows)} voices, {takes} takes (~{takes * 5 // 60 + 1} min on the GPU, "
+        "plus loading the model)"
     )
     engine = get_engine(DESIGN_ENGINE, **voices_dir_kwargs(DESIGN_ENGINE, cfg.voices_dir))
     validator = Validator(
