@@ -444,3 +444,9 @@ def test_a_character_with_many_good_lines_gets_no_filler():
     assert len(lines) == MAX_LINES and "Yes." not in lines  # no room left: no division by zero
     few = _character_lines([good[0], "Yes.", "No."])
     assert few == [good[0], "Yes.", "No."]
+
+
+def test_wordless_lines_are_never_filler():
+    from seiyuu.services.cast_plan import _character_lines
+
+    assert _character_lines(["…!", "?!", "“…”", "Y-Yes, let’s!", "I"]) == ["Y-Yes, let’s!", "I"]

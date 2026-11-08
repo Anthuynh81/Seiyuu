@@ -51,6 +51,7 @@ DEFAULT_NARRATOR_DESCRIPTION = (
 )
 GENERIC_DESCRIPTION = "A natural, clear adult voice with a calm, conversational tone."
 
+_HAS_WORD = re.compile(r"[^\W\d_]{2,}|\b[AaIiOo]\b")
 _FIRST = re.compile(r"\b(?:I|I'm|I’m|I'd|I’d|I've|I’ve|I'll|I’ll|me|my|myself)\b")
 _THIRD = re.compile(r"\b(?:he|she|him|her|his|hers)\b", re.IGNORECASE)
 
@@ -115,8 +116,9 @@ def _spread(items: list[str], k: int) -> list[str]:
 def _character_lines(lines: list[str]) -> list[str]:
     """Up to MAX_LINES of a character's lines: mid-length ones spread over the book first (the
     best sample candidates), then short ones to fill, so a small part still has enough words
-    to design a voice from (design-cast joins lines up to a usable length)."""
-    unique = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+    to design a voice from (design-cast joins lines up to a usable length). Wordless lines
+    ("…!", "?!") are skipped: they normalize to stray punctuation and say nothing."""
+    unique = list(dict.fromkeys(line.strip() for line in lines if _HAS_WORD.search(line)))
     good = _spread([line for line in unique if 8 <= len(line.split()) <= 40], MAX_LINES)
     rest = _spread([line for line in unique if line not in good], MAX_LINES - len(good))
     return good + rest
