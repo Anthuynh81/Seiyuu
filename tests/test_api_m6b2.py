@@ -372,6 +372,7 @@ def test_build_handlers_covers_all_but_ingest(tmp_path) -> None:
     assert set(handlers) == {
         JobKind.WARMUP,
         JobKind.DESIGN,
+        JobKind.DESCRIBE_CAST,
         JobKind.ATTRIBUTE,
         JobKind.RENDER,
         JobKind.ASSEMBLE,

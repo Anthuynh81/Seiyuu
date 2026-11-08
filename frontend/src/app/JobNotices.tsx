@@ -19,6 +19,7 @@ const LED: Record<string, string> = { succeeded: "ok", failed: "err", canceled: 
 /** Where a finished book job's next step lives. */
 const NEXT: Partial<Record<JobKind, [screen: string, label: string]>> = {
   attribute: ["review", "Review characters"],
+  describe_cast: ["review", "Review the cast"],
   render: ["listen", "Listen"],
   assemble: ["render", `Open ${SCREENS.render}`],
   master: ["render", `Open ${SCREENS.render}`],

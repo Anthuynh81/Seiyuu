@@ -703,7 +703,11 @@ def test_route_surface_is_complete() -> None:
     assert ("/api/designs/{design_id}", "GET") in paths
     assert ("/api/designs/{design_id}/takes/{take}.wav", "GET") in paths
     assert ("/api/designs/{design_id}/keep", "POST") in paths
-    assert len(paths) == 69
+    # Qwen-first casting step 1: draft, read and edit the per-book cast plan
+    assert ("/api/books/{book_id}/cast-plan/describe", "POST") in paths
+    assert ("/api/books/{book_id}/cast-plan", "GET") in paths
+    assert ("/api/books/{book_id}/cast-plan", "PUT") in paths
+    assert len(paths) == 72
 
 
 def test_assemble_and_master_routes(client, monkeypatch) -> None:
