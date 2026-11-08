@@ -54,6 +54,8 @@ class JobKind(StrEnum):
     # Qwen-first casting step 1: the LLM drafts each character's voice description into
     # output/{book}/cast_plan.json. A book job (book_id is the book).
     DESCRIBE_CAST = "describe_cast"
+    # Qwen-first casting step 2: design a voice per cast-plan row, then write the assignment.
+    DESIGN_CAST = "design_cast"
 
 
 class JobState(StrEnum):

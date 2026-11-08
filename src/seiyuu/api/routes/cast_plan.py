@@ -4,6 +4,8 @@ POST /books/{id}/cast-plan/describe   draft every character's voice description 
 GET  /books/{id}/cast-plan            the plan (404 until drafted)
 PUT  /books/{id}/cast-plan            Review-table edits (description, sample line, same voice
                                       as, keep current voice, gender, age)
+POST /books/{id}/cast-plan/design     design every row's voice and assign them (a GPU job)
+POST /books/{id}/cast-plan/rows/{character_id}/take   use another of a row's takes (no GPU)
 
 The plan is a working file for the Review table and the design-cast job; it never changes an
 assignment, a voice, or a cache key by itself.
@@ -16,8 +18,10 @@ from seiyuu.api.enqueue import enqueue_job
 from seiyuu.api.errors import ApiError
 from seiyuu.api.routes.common import effective_report, guard_render_active, status_or_404
 from seiyuu.api.schemas import (
+    CastDesignedOut,
     CastPlanOut,
     CastPlanUpdate,
+    CastTakeRequest,
     DescribeCastParams,
     DescribeCastRequest,
     JobOut,
@@ -110,3 +114,67 @@ def update_cast_plan(
             raise ApiError(422, "invalid", str(exc)) from exc
         save_plan(cfg.output_dir, updated)
     return CastPlanOut(**updated.model_dump())
+
+
+def _refuse_while_casting(store, book_id: str) -> None:
+    live = store.list_jobs(book_id=book_id)
+    for job in live:
+        if job.kind in (JobKind.DESCRIBE_CAST, JobKind.DESIGN_CAST) and not job.is_terminal:
+            raise ApiError(
+                409,
+                "conflict",
+                f"a {job.kind.value} job for this book is still {job.state.value}; wait for it",
+                detail=JobOut.from_job(job).model_dump(mode="json"),
+            )
+
+
+@router.post("/books/{book_id}/cast-plan/design", response_model=JobOut, status_code=202)
+def design_cast(
+    book_id: str,
+    request: Request,
+    response: Response,
+    cfg: SettingsDep,
+    store: StoreDep,
+    runner: RunnerDep,
+) -> JobOut:
+    """Queue the design-cast job: a voice per row that needs one (local Qwen3-TTS, free), then
+    the book's assignment. Refused while the book renders or its cast is being described."""
+    status_or_404(cfg, book_id)
+    _plan_or_404(cfg, book_id)
+    guard_render_active(store, book_id)
+    with request.app.state.enqueue_mutex:
+        _refuse_while_casting(store, book_id)
+    job = enqueue_job(
+        store=store,
+        runner=runner,
+        mutex=request.app.state.enqueue_mutex,
+        book_id=book_id,
+        kind=JobKind.DESIGN_CAST,
+        params={},
+    )
+    response.headers["Location"] = f"/api/jobs/{job.job_id}"
+    return JobOut.from_job(job)
+
+
+@router.post("/books/{book_id}/cast-plan/rows/{character_id}/take", response_model=CastDesignedOut)
+def keep_cast_take(
+    book_id: str,
+    character_id: str,
+    body: CastTakeRequest,
+    request: Request,
+    cfg: SettingsDep,
+    store: StoreDep,
+) -> CastDesignedOut:
+    """Swap a designed row to another of its takes and re-point everyone using that voice."""
+    from seiyuu.services.cast_design import keep_other_take
+
+    status_or_404(cfg, book_id)
+    guard_render_active(store, book_id)
+    with request.app.state.enqueue_mutex:
+        _refuse_while_casting(store, book_id)
+        with request.app.state.voices_mutex:
+            try:
+                plan, assignment = keep_other_take(cfg, book_id, character_id, body.take)
+            except ServiceError as exc:
+                raise ApiError(422, "invalid", str(exc)) from exc
+    return CastDesignedOut(plan=CastPlanOut(**plan.model_dump()), assignment=assignment)

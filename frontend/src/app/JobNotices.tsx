@@ -20,6 +20,7 @@ const LED: Record<string, string> = { succeeded: "ok", failed: "err", canceled: 
 const NEXT: Partial<Record<JobKind, [screen: string, label: string]>> = {
   attribute: ["review", "Review characters"],
   describe_cast: ["review", "Review the cast"],
+  design_cast: ["review", "Hear the cast"],
   render: ["listen", "Listen"],
   assemble: ["render", `Open ${SCREENS.render}`],
   master: ["render", `Open ${SCREENS.render}`],
