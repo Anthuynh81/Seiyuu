@@ -32,6 +32,7 @@ ENGINE_FACTS: dict[str, dict[str, bool]] = {
     "chatterbox": {"paid": False, "supports_cloning": True},
     "indextts2": {"paid": False, "supports_cloning": True},
     "qwen3tts": {"paid": False, "supports_cloning": True},
+    "breeze": {"paid": False, "supports_cloning": True},
     "elevenlabs": {"paid": True, "supports_cloning": True},
 }
 
@@ -58,7 +59,7 @@ class EngineRegistry:
 
     def _construct_kwargs(self, engine_id: str) -> dict:
         # Consent invariant — see module docstring. Cloning engines (chatterbox, indextts2,
-        # qwen3tts) must see the SAME voices_dir the VoiceLibrary uses; voices_dir_kwargs
+        # qwen3tts, breeze) must see the SAME voices_dir the VoiceLibrary uses; voices_dir_kwargs
         # tolerates an unknown (test-injected) id by returning {}.
         kwargs: dict = dict(voices_dir_kwargs(engine_id, self._settings.voices_dir))
         if engine_id == "indextts2":
@@ -83,6 +84,17 @@ class EngineRegistry:
                 load_timeout=self._settings.qwen3tts_worker_load_timeout,
                 request_timeout=self._settings.qwen3tts_worker_request_timeout,
                 max_restarts=self._settings.qwen3tts_worker_max_restarts,
+            )
+            return kwargs
+        if engine_id == "breeze":
+            # Same reasoning again: the injected Settings must govern the worker config.
+            from seiyuu.engines.breeze_engine import breeze_config
+
+            kwargs.update(
+                **breeze_config(self._settings),
+                load_timeout=self._settings.breeze_worker_load_timeout,
+                request_timeout=self._settings.breeze_worker_request_timeout,
+                max_restarts=self._settings.breeze_worker_max_restarts,
             )
             return kwargs
         if engine_id == "chatterbox":
@@ -131,6 +143,13 @@ def weights_cached(engine_id: str) -> bool | None:
         from seiyuu.engines.qwen3tts_engine import models_present, qwen3tts_config
 
         return models_present(qwen3tts_config(get_settings())["models_dir"])
+    if engine_id == "breeze":
+        # The Breeze checkpoint is a local dir (BREEZE_CHECKPOINT_DIR), loaded by a source
+        # checkout (BREEZE_REPO_DIR): both must be there, and neither is in the HF hub cache.
+        from seiyuu.engines.breeze_engine import breeze_config, checkpoint_present, repo_present
+
+        paths = breeze_config(get_settings())
+        return repo_present(paths["repo_dir"]) and checkpoint_present(paths["checkpoint_dir"])
     needle = _HF_NEEDLES.get(engine_id)
     if needle is None:
         return None

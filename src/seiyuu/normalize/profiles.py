@@ -117,6 +117,11 @@ _PROFILES = {
     # Qwen3-TTS ignores ellipses and dashes entirely (upstream discussion #75: they make "absolutely
     # no difference"), so fold them to the comma pause it does honor — the shared default.
     "qwen3tts": {"punct": "comma"},
+    # Breeze TTS 2 shares Qwen3-TTS's tokenizer lineage and the listening test that chose it fed
+    # it Qwen-normalized text, so it starts from the same fold. It applies no text cleanup of its
+    # own, and it PERFORMS parenthesized sounds such as "(sigh)" or "(laugh)" rather than reading
+    # them, so those are left in the text on purpose.
+    "breeze": {"punct": "comma"},
 }
 
 

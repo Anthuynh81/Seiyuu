@@ -179,6 +179,23 @@ class Settings(BaseSettings):
     qwen3tts_worker_request_timeout: float = 600.0
     qwen3tts_worker_max_restarts: int = 1  # kill + restart + retry on OOM / a dead or hung worker
 
+    # Breeze TTS 2: a local cloning engine with voice direction, again a subprocess worker in its
+    # OWN env (the repo pins torch 2.9.1/cu128 + transformers 4.57.3). Breeze is a source checkout,
+    # not a package: the worker imports it from the repo dir and loads the weights from the
+    # checkpoint dir (model_version fingerprints it). Unset (None) until set up; the adapter fails
+    # loudly with an actionable message.
+    breeze_worker_python: Path | None = None  # python.exe of the Breeze env
+    breeze_repo_dir: Path | None = None  # the breeze-tts git checkout
+    breeze_checkpoint_dir: Path | None = None  # the downloaded breeze-tts-2 weights
+    # "decode" = depth decoder + codec + backbone decode compiled / as CUDA graphs (about 4x faster
+    # than eager, +0.8 GB); "off" = plain eager execution, the fallback if compilation misbehaves.
+    # Different model_version: the two are not bit-exact.
+    breeze_fast: Literal["decode", "off"] = "decode"
+    # The first load compiles the fast path (16-50 s; later starts reuse torch's inductor cache).
+    breeze_worker_load_timeout: float = 600.0
+    breeze_worker_request_timeout: float = 600.0
+    breeze_worker_max_restarts: int = 1  # kill + restart + retry on OOM / a dead or hung worker
+
     # Per-segment emotion (F2). Opt-in, default OFF: when off, render/estimate IGNORE the
     # attribution's segment_emotions and settings stay byte-identical to a no-emotion render
     # (cache stable). When on, the quantized emotion folds into each dialogue segment's

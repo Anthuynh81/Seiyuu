@@ -18,6 +18,7 @@ _ENGINES = {
     "chatterbox": "seiyuu.engines.chatterbox_engine:ChatterboxEngine",
     "indextts2": "seiyuu.engines.indextts2_engine:IndexTTS2Engine",
     "qwen3tts": "seiyuu.engines.qwen3tts_engine:Qwen3TTSEngine",
+    "breeze": "seiyuu.engines.breeze_engine:BreezeEngine",
     "elevenlabs": "seiyuu.engines.elevenlabs_engine:ElevenLabsEngine",
 }
 
@@ -40,11 +41,12 @@ def voices_dir_kwargs(engine_id: str, voices_dir) -> dict:
     """The ``voices_dir=`` construction kwarg for a cloning engine, or ``{}`` otherwise.
 
     Single source of truth for every engine-construction site (CLI, render pipeline, cost
-    estimate): a cloning engine (chatterbox, indextts2, qwen3tts — see ``clones_from_library``)
-    resolves voices from the library dir and the consent gate binds to those bytes, so it MUST get
-    the dir; preset/cloud engines must not. Reads the class attribute only — no SDK import. An id
-    not in the catalog (a test-injected fake) yields ``{}``; the real ``get_engine`` that follows
-    raises loudly for a genuinely unknown id, so tolerance here never hides a typo."""
+    estimate): a cloning engine (chatterbox, indextts2, qwen3tts, breeze — see
+    ``clones_from_library``) resolves voices from the library dir and the consent gate binds to
+    those bytes, so it MUST get the dir; preset/cloud engines must not. Reads the class attribute
+    only — no SDK import. An id not in the catalog (a test-injected fake) yields ``{}``; the real
+    ``get_engine`` that follows raises loudly for a genuinely unknown id, so tolerance here never
+    hides a typo."""
     if engine_id not in _ENGINES:
         return {}
     return {"voices_dir": voices_dir} if get_engine_class(engine_id).clones_from_library else {}
