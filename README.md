@@ -70,7 +70,7 @@ CLI before any UI is involved.
 | **Chatterbox** | local | primary zero-shot cloning (~7–20 s reference) | ✅ |
 | **IndexTTS-2** | local | slow high-quality finisher; native emotion control | ✅ |
 | **Qwen3-TTS** | local | closest cloning; designs voices from a description | ✅ |
-| **Breeze TTS 2** | local | cloning with per-line voice direction (delivery instructions) | ✅ |
+| **Breeze TTS 2** | local | fast cloning; can take a delivery instruction per line (non-commercial weights) | ✅ |
 | **ElevenLabs** | cloud | premium final renders | ✅ (IVC) |
 | Fish Audio | cloud | cheaper cloud renders (planned) | ✅ |
 
@@ -222,9 +222,11 @@ uv run python scripts/design_voices.py cast.json --out output/designed/<book>
 [Breeze TTS 2](https://github.com/breezeblue-ai/breeze-tts) (3B) clones a voice from a clip **and
 its exact transcript**, and can take a natural-language delivery instruction per line ("calm, dry,
 a little lower") on top of the clone. It also performs parenthesized sounds such as `(sigh)` or
-`(laugh)` instead of reading them. The code is Apache-2.0; the **weights are under BreezeBlue's
-research / non-commercial license**. It is a source checkout rather than a package, with its own
-pins (torch 2.9.1/cu128, transformers 4.57.3), so it too runs as a worker in its **own** env:
+`(laugh)` instead of reading them (whisper validation does not know that yet, and flags such a
+line as missing a word). The code is Apache-2.0, but the **weights and any audio you render with
+them locally are under the BreezeBlue Research and Non-Commercial License** (research and
+non-commercial use only). It is a source checkout rather than a package, with its own pins (torch
+2.9.1/cu128, transformers 4.57.3), so it too runs as a worker in its **own** env:
 
 ```bash
 git clone https://github.com/breezeblue-ai/breeze-tts && cd breeze-tts
@@ -250,21 +252,27 @@ Then in `.env`: `BREEZE_WORKER_PYTHON=...\breeze-tts\.venv\Scripts\python.exe`,
 - **Transcript**: Breeze has no clone mode without one. A voice renders on Breeze only when its
   `meta.json` binds the transcript (`ref_text_digest`, the same digest of `reference.wav` plus
   `reference.txt` that Qwen clones use, so it is part of the segment cache key); a voice that
-  binds none, or whose `reference.txt` was edited afterwards, fails the render loudly. Every
-  designed voice binds one.
-- **Voice direction**: a line rendered with an `instruction` setting is spoken with that delivery,
-  using classifier-free guidance (`cfg_scale`, default 4), which costs about 20 % more time. Both
-  are part of the segment cache key.
+  binds none, or whose `reference.txt` was edited afterwards, fails the render loudly. A designed
+  voice binds one when the take you kept passed the speech check; a Qwen clone binds one when the
+  clip is at most 30 s.
+- **Voice direction**: the engine speaks a line with a given delivery when its settings carry an
+  `instruction`, using classifier-free guidance (`cfg_scale`, default 4), which costs about 20 %
+  more time. Both are part of the segment cache key. Renders do not pass an instruction yet:
+  choosing one per segment (narration, thought, dialogue) is the next step.
+- **Long paragraphs**: the clip, both transcripts and the generated audio share a window of 2048
+  positions, and one line is capped at 120 s. A paragraph of more than roughly 1,500 characters
+  is cut short (and flagged by whisper); one of several thousand characters is refused, which
+  stops the render with the block named.
 - **Safety net**: like the other worker engines it is validated by whisper, a line that never
-  stops is cut at a per-line cap and counted, and a CUDA out-of-memory or a dead or hung worker is
-  killed, restarted and retried before the segment fails loudly. `unload()` terminates the worker,
-  which frees all its VRAM.
+  stops is cut at a per-line cap, and a CUDA out-of-memory or a dead or hung worker is killed,
+  restarted and retried before the segment fails loudly. `unload()` terminates the worker, which
+  frees all its VRAM.
 
-Until the clone and design flows offer Breeze, try it on a voice that already binds a transcript
-(any designed voice):
+Until the clone and design flows offer Breeze, try it on a voice that already binds a transcript.
+A single-voice render becomes the book's active render, so send the trial to a scratch folder:
 
 ```bash
-uv run seiyuu render <book_id> --engine breeze --voice <voice_id> --chapter 1
+uv run seiyuu render <book_id> --engine breeze --voice <voice_id> --chapter 1 --output-dir <scratch dir>
 uv run python scripts/benchmark_engines.py --engines breeze qwen3tts
 uv run pytest -m gpu -k breeze_real -s    # end-to-end smoke test (a few minutes on the GPU)
 ```

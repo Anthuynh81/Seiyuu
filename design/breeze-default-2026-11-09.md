@@ -36,7 +36,7 @@ for nothing). First compile 16–50 s; later worker starts reuse the inductor ca
   cfg recipe, so the cost estimate builds the same SegmentKey as the render.
 - Settings: `BREEZE_WORKER_PYTHON`, `BREEZE_REPO_DIR`, `BREEZE_CHECKPOINT_DIR`,
   `BREEZE_FAST=decode|off`, timeouts/restarts like Qwen. Normalization profile: start from
-  Qwen's (`punct: comma`; same tokenizer lineage and the A/B used Qwen-normalized text).
+  Qwen's (`punct: comma`; the A/B used Qwen-normalized text).
 - Same OOM / dead-worker kill + restart + retry as Qwen. `unload()` kills the worker.
 
 ### Delivery direction (what C did)

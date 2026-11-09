@@ -9,9 +9,9 @@ present — they are absent on CI and a fresh box. Run it on the configured GPU 
 It takes a few minutes: a 7.7 GB load, then the fast path's compile (16-50 s the first time),
 then three short lines. Breeze clones from a clip AND its exact transcript, so a synthetic tone
 won't do: the test borrows the first voice in the library that has ``reference.txt`` beside its
-``reference.wav`` (every designed voice does), or the clip named by ``BREEZE_TEST_REFERENCE``
-(with its transcript in a ``.txt`` of the same name). Set ``BREEZE_SMOKE_OUT`` to a directory to
-keep the three WAVs for a listen.
+``reference.wav`` (a designed voice whose kept take passed the speech check does), or the clip
+named by the ``BREEZE_TEST_REFERENCE`` environment variable (with its transcript in a ``.txt`` of
+the same name). Set ``BREEZE_SMOKE_OUT`` to a directory to keep the three WAVs for a listen.
 """
 
 import hashlib
@@ -49,8 +49,11 @@ def _require_configured():
 def _reference(cfg) -> tuple[Path, str]:
     """A real speech clip and its exact transcript."""
     env = os.environ.get("BREEZE_TEST_REFERENCE")
-    if env and Path(env).is_file() and Path(env).with_suffix(".txt").is_file():
-        return Path(env), Path(env).with_suffix(".txt").read_text(encoding="utf-8").strip()
+    if env:
+        clip, txt = Path(env), Path(env).with_suffix(".txt")
+        if not clip.is_file() or not txt.is_file() or not txt.read_text(encoding="utf-8").strip():
+            pytest.skip(f"BREEZE_TEST_REFERENCE: {clip} or its transcript {txt.name} is missing")
+        return clip, txt.read_text(encoding="utf-8").strip()
     voices_dir = Path(cfg.voices_dir)
     for voice in sorted(voices_dir.iterdir()) if voices_dir.is_dir() else []:
         wav, txt = voice / "reference.wav", voice / "reference.txt"
@@ -80,19 +83,21 @@ def test_breeze_real_render_smoke(tmp_path):
         started = time.perf_counter()
         clone = engine.synthesize(LINE, "smoke_voice", settings)
         clone_wall = time.perf_counter() - started
-        assert clone.sample_rate == 24_000  # already canonical: no resample
+        assert clone.sample_rate == 24_000
         assert float(np.abs(clone.samples).max()) > 0.0
-        # 79 characters of speech: seconds, not a click and not a runaway
+        # 78 characters of speech: seconds, not a click and not a runaway (the cap is 19 s)
         assert 2.0 < clone.duration_seconds < 15.0
 
-        # the same seed must give the same audio, or one SegmentKey would name two renderings
+        # Within one worker the same seed must give the same audio (the seed plumbing works and
+        # nothing between two lines shifts the sampling). A fresh worker recaptures its graphs
+        # and re-encodes the clip, which this does not cover.
         again = engine.synthesize(LINE, "smoke_voice", settings)
         assert np.array_equal(clone.samples, again.samples)
 
         started = time.perf_counter()
         directed = engine.synthesize(LINE, "smoke_voice", {**settings, "instruction": INSTRUCTION})
         directed_wall = time.perf_counter() - started
-        assert 2.0 < directed.duration_seconds < 20.0
+        assert directed.duration_seconds > 2.0  # a runaway is caught by capped_lines below
         assert not np.array_equal(clone.samples, directed.samples)  # the instruction did something
 
         assert engine.worker_restarts == 0 and engine.capped_lines == 0
