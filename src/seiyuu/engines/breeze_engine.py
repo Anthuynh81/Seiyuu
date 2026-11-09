@@ -2,8 +2,8 @@
 
 Breeze TTS 2 (BreezeBlue, 3B; the Qwen3-TTS codec lineage) is a source checkout whose pins (torch
 2.9.1/cu128, transformers 4.57.3) fit neither this venv nor the Qwen3-TTS env. So it lives in its
-OWN env and runs as a subprocess *worker* (``breeze_worker.py``); this adapter is stdlib-only (it
-NEVER imports torch or the Breeze repo) and reuses IndexTTS-2's newline-JSON stdio transport,
+OWN env and runs as a subprocess *worker* (``breeze_worker.py``); this adapter NEVER imports the
+Breeze repo or anything from the Breeze env, and reuses IndexTTS-2's newline-JSON stdio transport,
 taking each line's audio back as a WAV in a scratch file. The GpuResourceManager frees the card by
 calling ``unload()``, which TERMINATES the worker so the OS reclaims all its VRAM (the Breeze
 runtime has no unload path of its own; process death IS the free).
@@ -244,7 +244,8 @@ class BreezeEngine(TTSEngine):
         # reference.wav (path, mtime, size) -> sha256: the worker keys its encoded-reference cache
         # by content, and hashing a 15 s clip on every line is wasted work.
         self._ref_hashes: dict[tuple[str, int, int], str] = {}
-        # Observability, as on the other worker engines (read by the engine benchmark).
+        # Observability, as on the other worker engines. The engine benchmark reads the restart
+        # and OOM counts; capped_lines is not reported anywhere yet.
         self.worker_restarts = 0
         self.worker_ooms = 0
         self.capped_lines = 0  # lines that ran into the generation cap (likely runaways)
@@ -381,7 +382,9 @@ class BreezeEngine(TTSEngine):
         if bound is None:
             raise SynthesisError(
                 f"breeze: voice {voice!r} binds no reference transcript. Breeze clones from the "
-                "clip AND its exact words; re-clone the voice with a transcript or design it"
+                "clip AND its exact words: use a voice whose meta.json carries ref_text_digest "
+                "(a designed voice whose kept take passed the speech check, or a Qwen clone of "
+                "a clip of at most 30 s)"
             )
         path = reference.with_name("reference.txt")
         text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
@@ -435,6 +438,10 @@ class BreezeEngine(TTSEngine):
                 transport = self._ensure_loaded()
                 message["out_path"] = out_path
                 reply = transport.request(message, timeout=self._request_timeout)
+                if not reply.get("ok") and reply.get("request_error"):
+                    # The worker is healthy and refused THIS request (a line too long for the
+                    # model's window, say): a restart would only reload 8 GB to hear it again.
+                    raise SynthesisError(f"breeze: {reply.get('error')} ({what})")
                 if not reply.get("ok"):
                     raise WorkerError(
                         f"breeze worker {message['cmd']} failed: {reply.get('error')}",

@@ -32,6 +32,9 @@ from seiyuu.engines import breeze_worker as w
         ("Go <ins_bos>shout<ins_eos> now", "Go  shout  now"),
         ("<|AUDIO|><|audio_eos|>Hi", "Hi"),
         ("[Sx] and [S12] are just text", "[Sx] and [S12] are just text"),
+        ("Type <eos> to stop.", "Type   to stop."),  # the Gemma tokenizer's own specials
+        ("<bos><start_of_turn>Hi<end_of_turn><pad>", "Hi"),
+        ("a <b> tag and x < y > z", "a <b> tag and x < y > z"),  # ordinary angle brackets stay
     ],
 )
 def test_model_text_removes_control_token_literals(text, expected):
@@ -46,9 +49,10 @@ def test_max_frames_scales_with_text_and_respects_the_prompt():
     # the prompt shares the 2048-position cache: a long reference leaves less room to speak
     assert w.max_frames_for("x" * 9000, 1500) == 2048 - 1 - 1500
     assert w.max_frames_for("x" * 300, 2048 - 1 - 64) == 64
-    with pytest.raises(ValueError, match="prompt too long"):
+    # a line the model has no room for can never render: a request error, not a worker fault
+    with pytest.raises(w.RequestError, match="prompt too long"):
         w.max_frames_for("Hi.", 2048 - 64)
-    with pytest.raises(ValueError, match="leave 0 of 2048"):
+    with pytest.raises(w.RequestError, match="leave 0 of 2048"):
         w.max_frames_for("Hi.", 5000)
 
 
@@ -68,10 +72,11 @@ def test_gen_recipe_is_bumped_with_the_recipe():
     pinned = (
         w.FAST_CONFIGS,
         (w.MAX_SEQ_LEN, w.MAX_NEW_TOKENS, w.REPETITION_PENALTY, w.ATTN_IMPLEMENTATION),
+        (w.TEMPERATURE, w.TOP_K, w.TOP_P),
         w.DIRECTION_CFG_SCALE,
         (w._CAP_FLOOR_SECONDS, w._CAP_CHARS_PER_SECOND, w._CAP_MIN_FRAMES),
         w.max_frames_for("x" * 473, 300),
-        w.model_text("[S0]<ins_bos>a<ins_eos>"),
+        w.model_text("[S0]<ins_bos>a<ins_eos><eos>"),
     )
     assert (w.GEN_RECIPE, pinned) == (
         1,
@@ -85,6 +90,7 @@ def test_gen_recipe_is_bumped_with_the_recipe():
                 "off": {},
             },
             (2048, 1500, 1.1, "eager"),
+            (0.9, 50, 1.0),
             4.0,
             (6.0, 6.0, 64),
             1061,
@@ -105,18 +111,18 @@ def test_compile_env_is_a_windows_fix(monkeypatch):
 def test_write_wav_is_int16_mono_24k_and_flags_the_cap(tmp_path):
     out = tmp_path / "o.wav"
     chunks = [np.full(12000, 0.5, dtype=np.float32), np.full((1, 12000), 2.0, dtype=np.float32)]
-    info = w._write_wav(str(out), chunks, 13, 100)
+    info = w._write_wav(str(out), chunks, 13, False)
     data, sr = sf.read(out, dtype="int16")
     assert sr == 24000 and data.ndim == 1 and data.size == 24000
     assert sf.info(str(out)).subtype == "PCM_16"
     assert data.max() == 32767  # clipped, never wrapped
     assert info == {"sample_rate": 24000, "seconds": 1.0, "frames": 13, "hit_cap": False}
-    assert w._write_wav(str(out), chunks, 100, 100)["hit_cap"] is True
+    assert w._write_wav(str(out), chunks, 100, True)["hit_cap"] is True
 
 
 def test_no_audio_writes_an_empty_file(tmp_path):
     out = tmp_path / "o.wav"
-    info = w._write_wav(str(out), [], 0, 100)
+    info = w._write_wav(str(out), [], 0, False)
     assert sf.read(out)[0].size == 0  # the adapter fails an empty file loudly
     assert info["seconds"] == 0.0 and info["hit_cap"] is False
 
@@ -228,6 +234,7 @@ def test_serve_reports_oom_and_keeps_going():
     w.serve(stdin, stdout, model)
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert replies[0]["ok"] is False and replies[0]["oom"] is True and replies[0]["traceback"]
+    assert replies[0]["request_error"] is False  # an OOM is the worker's problem: restart it
     assert model.emptied == 1
     assert replies[1]["ok"] is False and "bad json" in replies[1]["error"]
     assert replies[2] == {"ok": True, "protocol": w.PROTOCOL_VERSION}
@@ -238,6 +245,54 @@ def test_a_bad_request_is_an_error_reply_not_a_crash():
     w.serve(io.StringIO(json.dumps({"cmd": "synthesize"}) + "\n"), stdout, _FakeModel())
     reply = json.loads(stdout.getvalue())
     assert reply["ok"] is False and reply["oom"] is False and "KeyError" in reply["error"]
+
+
+def test_an_unrenderable_request_is_flagged_so_the_worker_is_not_restarted():
+    class _Refusing(_FakeModel):
+        def synthesize(self, **kw):
+            raise w.RequestError("prompt too long: 2100 tokens")
+
+    stdout = io.StringIO()
+    request = {"cmd": "synthesize", "text": "a", "reference_wav": "r", "out_path": "o"}
+    w.serve(io.StringIO(json.dumps(request) + "\n"), stdout, _Refusing())
+    reply = json.loads(stdout.getvalue())
+    assert reply["ok"] is False and reply["request_error"] is True and reply["oom"] is False
+    assert reply["error"] == "RequestError: prompt too long: 2100 tokens"
+
+
+def test_the_real_worker_script_boots_and_answers_ping(tmp_path):
+    # Run as the adapter runs it: a standalone script. This is the only place the default suite
+    # executes the __main__ path, the fd-1 redirection and the script-dir removal.
+    from seiyuu.engines.indextts2_engine import SubprocessTransport
+
+    argv = [sys.executable, w.__file__, "--repo-dir", str(tmp_path), "--checkpoint-dir", "x"]
+    transport = SubprocessTransport(
+        argv, env={**os.environ}, cwd=None, boot_timeout=60.0, name="breeze",
+        protocol=w.PROTOCOL_VERSION,
+    )  # fmt: skip
+    try:
+        assert transport.request({"cmd": "ping"}, timeout=60.0) == {
+            "ok": True,
+            "protocol": w.PROTOCOL_VERSION,
+        }
+        assert transport.request({"cmd": "dance"}, timeout=60.0)["ok"] is False
+    finally:
+        transport.close()
+
+
+def test_module_top_imports_are_stdlib_only():
+    # The Breeze env has neither seiyuu nor (necessarily) this venv's packages: anything else
+    # must be imported lazily, inside the function that needs it.
+    import ast
+
+    tree = ast.parse(Path(w.__file__).read_text(encoding="utf-8"))
+    top_level = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            top_level.add((node.module or "").split(".")[0])
+    assert top_level and top_level <= set(sys.stdlib_module_names)
 
 
 def test_main_announces_ready_and_exits_at_eof():
@@ -298,10 +353,19 @@ class _Runtime:
 
     def iter_audio_chunks(self, inputs, *, request_id, seed, token_observer):
         self.calls.append({"inputs": inputs, "request_id": request_id, "seed": seed})
+        buffered = 0
         try:
+            # as upstream: the observer sees a frame BEFORE it is buffered, a chunk is decoded
+            # once codec_chunk_frames are buffered, and an odd tail is flushed at a normal end
+            # (an exception from the observer skips that flush)
             for i in range(self.frames_wanted):
                 token_observer(i)
-                yield _Chunk(np.full(1920, 0.1, dtype=np.float32))
+                buffered += 1
+                if buffered >= self.codec_chunk_frames:
+                    yield _Chunk(np.full(1920 * buffered, 0.1, dtype=np.float32))
+                    buffered = 0
+            if buffered:
+                yield _Chunk(np.full(1920 * buffered, 0.1, dtype=np.float32))
         finally:
             self.closed.append(request_id)
 
@@ -370,7 +434,17 @@ def breeze(monkeypatch):
     warm_mod.load_warmup_profile = lambda path: _Profile(str(path))
 
     infer_pkg = types.ModuleType("breeze_infer")
-    infer_pkg.templates, infer_pkg.runtime = templates_mod, runtime_mod
+
+    def first_repo_import(name):
+        # `from breeze_infer import templates` is the worker's first import from the checkout
+        # (the real module imports torch): log it so the order against compile_env is visible
+        submodules = {"templates": templates_mod, "runtime": runtime_mod}
+        if name not in submodules:  # the import system probes __path__, __spec__, ...
+            raise AttributeError(name)
+        log.events.append(f"import {name}")
+        return submodules[name]
+
+    infer_pkg.__getattr__ = first_repo_import
     models_pkg = types.ModuleType("models")
     for name, mod in {
         "breeze_infer": infer_pkg,
@@ -404,8 +478,8 @@ def _synth(handle, tmp_path, **kw):
 def test_load_builds_the_decode_runtime_and_warms_it(breeze, tmp_path):
     handle = _handle(tmp_path)
     handle.load()
-    # the Windows compile fix lands before anything that could import torch
-    assert breeze.events == ["compile_env", "load_runtime", "genconfig"]
+    # the Windows compile fix lands before the first import from the checkout (which imports torch)
+    assert breeze.events == ["compile_env", "import templates", "load_runtime", "genconfig"]
     assert breeze.loads == [(tmp_path / "ckpt", "cuda:0", "eager")]
     assert sys.path[0] == str(tmp_path / "repo")
     (runtime,) = breeze.runtimes
@@ -413,6 +487,10 @@ def test_load_builds_the_decode_runtime_and_warms_it(breeze, tmp_path):
         "max_new_tokens": 1500,
         "max_seq_len": 2048,
         "repetition_penalty": 1.1,
+        "temperature": 0.9,  # the sampler is pinned here, not left to the checkout's defaults
+        "top_k": 50,
+        "top_p": 1.0,
+        "do_sample": True,
         "fast_depth_decoder": True,
         "fast_codec": True,
         "fast_backbone_decode": True,
@@ -455,7 +533,7 @@ def test_clone_request_shape(breeze, tmp_path):
     assert prepared["guidance_scale"] == 1.0
     assert prepared["guidance_scale_ref"] is None and prepared["guidance_scale_ins"] is None
     (runtime,) = breeze.runtimes
-    assert breeze.seeds == [1234]  # random/numpy/torch, before the prompt is built
+    assert breeze.seeds == [1234]  # upstream's random/numpy/torch seeding
     assert runtime.calls[0]["seed"] == 1234 and runtime.calls[0]["request_id"] == "seiyuu-1"
     assert runtime.closed == ["seiyuu-1"]
     assert info == {"sample_rate": 24000, "seconds": 0.4, "frames": 5, "hit_cap": False}
@@ -463,6 +541,16 @@ def test_clone_request_shape(breeze, tmp_path):
     _synth(handle, tmp_path, seed=None)
     assert breeze.seeds == [1234] and runtime.calls[1]["seed"] is None
     assert runtime.calls[1]["request_id"] == "seiyuu-2"
+
+
+def test_a_seed_beyond_32_bits_still_renders(breeze, tmp_path):
+    # numpy refuses a seed outside 0..2**32-1 (and a voice's seed is an unbounded int): the
+    # numpy/random seeding is folded, while the runtime's own torch reseed gets the full value
+    handle = _handle(tmp_path)
+    _synth(handle, tmp_path, seed=2**32 + 5)
+    _synth(handle, tmp_path, seed=-1)
+    assert breeze.seeds == [5, 2**32 - 1]
+    assert [c["seed"] for c in breeze.runtimes[0].calls] == [2**32 + 5, -1]
 
 
 def test_direction_adds_the_instruction_and_guidance(breeze, tmp_path):
@@ -475,7 +563,7 @@ def test_direction_adds_the_instruction_and_guidance(breeze, tmp_path):
     assert first["template"] == "template:ref_edit_tata" and first["guidance_scale"] == 4.0
     assert second["guidance_scale"] == 2.5
     assert "instruction" not in third["request"] and third["guidance_scale"] == 1.0
-    with pytest.raises(ValueError, match="cfg_scale"):
+    with pytest.raises(w.RequestError, match="cfg_scale"):
         _synth(handle, tmp_path, instruction="calm", cfg_scale=0)
 
 
@@ -509,6 +597,25 @@ def test_a_runaway_is_cut_at_the_cap(breeze, tmp_path):
     # the worker keeps serving: the next line is normal
     runtime.frames_wanted = 3
     assert _synth(handle, tmp_path)["hit_cap"] is False
+    # a line that ends on its own exactly at the cap is not a runaway
+    runtime.frames_wanted = cap
+    exact = _synth(handle, tmp_path, text="Yes.")
+    assert exact["frames"] == cap and exact["hit_cap"] is False
+
+
+def test_the_eager_codec_never_loses_a_buffered_frame_at_the_cap(breeze, tmp_path):
+    # BREEZE_FAST=off decodes two frames per chunk: an odd cap would leave the last frame in
+    # the buffer when the line is stopped, so the cap is rounded down to a whole chunk
+    handle = _handle(tmp_path, fast="off")
+    handle.load()
+    (runtime,) = breeze.runtimes
+    runtime.frames_wanted = 10_000
+    text = "x" * 13
+    assert w.max_frames_for(text, 200) == 103  # odd
+    info = _synth(handle, tmp_path, text=text)
+    assert info["frames"] == 102 and info["hit_cap"] is True
+    assert sf.read(tmp_path / "o.wav")[0].size == 102 * 1920  # what was counted was decoded
+    assert info["seconds"] == round(102 * 1920 / 24000, 3)
 
 
 def test_the_cap_counts_the_longer_prompt_under_guidance(breeze, tmp_path):
@@ -522,10 +629,15 @@ def test_the_cap_counts_the_longer_prompt_under_guidance(breeze, tmp_path):
     # the negative prompt is 7 tokens longer in the fake: both rows are padded to it
     directed = _synth(handle, tmp_path, text=text, instruction="calm")
     assert directed["frames"] == 2048 - 1 - 1907 and directed["hit_cap"] is True
+    # the runtime stops without a word when the cache is full: reported as capped even though
+    # the worker's own cap never fired
+    runtime.frames_wanted = 2048 - 1 - 1900
+    silent = _synth(handle, tmp_path, text=text)
+    assert silent["frames"] == 147 and silent["hit_cap"] is True
     breeze.prompt_len = 2040
-    with pytest.raises(ValueError, match="prompt too long"):
+    with pytest.raises(w.RequestError, match="prompt too long"):
         _synth(handle, tmp_path, text=text)
-    assert len(runtime.calls) == 2  # refused before generating
+    assert len(runtime.calls) == 3  # refused before generating
 
 
 def test_no_frames_writes_an_empty_file(breeze, tmp_path):
@@ -540,6 +652,8 @@ def test_no_frames_writes_an_empty_file(breeze, tmp_path):
 def test_a_missing_transcript_is_refused_before_loading(breeze, tmp_path):
     handle = _handle(tmp_path)
     for missing in ("", "   ", None):
-        with pytest.raises(ValueError, match="exact transcript"):
+        with pytest.raises(w.RequestError, match="exact transcript"):
             _synth(handle, tmp_path, ref_text=missing)
+    with pytest.raises(w.RequestError, match="no text left"):
+        _synth(handle, tmp_path, text="  ")
     assert breeze.runtimes == [] and breeze.events == []

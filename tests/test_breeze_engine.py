@@ -428,16 +428,59 @@ def test_a_transcript_that_no_longer_matches_its_binding_fails_loudly(tmp_path):
         engine.synthesize("Hi.", "hero_1a2b", settings)
 
 
-def test_a_qwen_bound_voice_renders_unchanged(tmp_path):
-    # The binding is engine-independent (clip bytes + text): the digest a Qwen-designed voice
-    # already carries is exactly the one Breeze checks.
-    _voice(tmp_path)
+def test_a_qwen_designed_voice_carries_the_binding_breeze_checks(tmp_path):
+    # The binding is engine-independent (clip bytes + text), and a single-voice render hands the
+    # engine the voice's OWN settings (render_voice_args): so a voice cloned or designed for
+    # Qwen, with its transcript bound the way the clone and design flows bind it, renders on
+    # Breeze as it is. (`seiyuu render --engine breeze --voice <designed voice>` relies on this.)
+    from seiyuu.services.clone_transcript import bind_transcript
+    from seiyuu.voices import VoiceKind, VoiceMeta, render_voice_args
+
+    _voice(tmp_path, transcript=None)
     ref = tmp_path / "voices" / "hero_1a2b" / "reference.wav"
-    digest = reference_text_digest(hashlib.sha256(ref.read_bytes()).hexdigest(), TRANSCRIPT)
+    sha = hashlib.sha256(ref.read_bytes()).hexdigest()
+    meta = VoiceMeta(
+        voice_id="hero_1a2b", name="Hero", kind=VoiceKind.CLONED, engine="qwen3tts",
+        reference_audio="reference.wav", consent_attested=True, seed=3,
+        settings=bind_transcript(ref, sha, TRANSCRIPT),
+    )  # fmt: skip
+    engine_voice, settings = render_voice_args(meta)
+    assert settings == {"ref_text_digest": reference_text_digest(sha, TRANSCRIPT)}
     transport = FakeTransport(_happy)
     engine = _engine(tmp_path, lambda: transport)
-    engine.synthesize("Hi.", "hero_1a2b", {"seed": 3, "ref_text_digest": digest})
+    engine.synthesize("Hi.", engine_voice, {**settings, "seed": meta.seed})
     assert transport.requests[-1]["ref_text"] == TRANSCRIPT
+    assert transport.requests[-1]["seed"] == 3
+
+
+def test_a_request_the_worker_refuses_fails_the_line_without_a_restart(tmp_path):
+    # e.g. a paragraph too long for the model's window: a fresh worker would refuse it the same
+    # way, so the healthy one is kept (no 8 GB reload) and the failure is not counted as a crash
+    _voice(tmp_path)
+    transports = []
+
+    def refusing(message):
+        if message["cmd"] == "synthesize" and len(message["text"]) > 10:
+            return {
+                "ok": False,
+                "error": "RequestError: prompt too long: 2100 tokens",
+                "oom": False,
+                "request_error": True,
+            }
+        return _happy(message)
+
+    def factory():
+        transports.append(FakeTransport(refusing))
+        return transports[-1]
+
+    engine = _engine(tmp_path, factory)
+    with pytest.raises(SynthesisError, match="prompt too long: 2100 tokens") as failure:
+        engine.synthesize("A very long paragraph.", "hero_1a2b", _bound(tmp_path))
+    assert "hero_1a2b" in str(failure.value)  # names the voice and the line
+    assert len(transports) == 1 and not transports[0].closed
+    assert engine.worker_restarts == 0 and engine.worker_ooms == 0
+    engine.synthesize("Short.", "hero_1a2b", _bound(tmp_path))  # same worker, still serving
+    assert [r["cmd"] for r in transports[0].requests] == ["load", "synthesize", "synthesize"]
 
 
 def test_missing_reference_fails_before_the_worker(tmp_path):
@@ -553,7 +596,9 @@ def test_empty_audio_is_a_loud_failure_not_a_retry(tmp_path):
     engine = _engine(tmp_path, factory)
     with pytest.raises(SynthesisError, match="empty audio"):
         engine.synthesize("Hi.", "hero_1a2b", _bound(tmp_path))
-    assert len(transports) == 1  # the worker is healthy: the render's seed retry handles it
+    # The worker is healthy, so it is not restarted. The render fails loudly on this block (as
+    # for the other worker engines): the seed retry only follows a whisper verdict.
+    assert len(transports) == 1 and not transports[0].closed
 
 
 def test_capped_lines_are_counted(tmp_path):

@@ -28,7 +28,9 @@ Protocol (one JSON object per line, request -> reply):
 - ``{"cmd": "synthesize", "text", "reference_wav", "ref_text", "out_path", "reference_sha256"?,
      "seed"?, "instruction"?, "cfg_scale"?}``
   -> ``{"ok": true, "sample_rate": 24000, "path", "seconds", "frames", "hit_cap"}``
-- any failure -> ``{"ok": false, "error": str, "oom": bool, "traceback": str}``.
+- any failure -> ``{"ok": false, "error": str, "oom": bool, "request_error": bool,
+  "traceback": str}``. ``request_error`` marks a request that can never render as sent (the
+  worker is healthy; the adapter fails the line without restarting it).
 - EOF on stdin ends the loop (the adapter closes stdin to shut the worker down).
 
 stdout MUST stay pure JSON. The Breeze repo prints progress lines from model construction and
@@ -74,6 +76,13 @@ FAST_CONFIGS: dict[str, dict[str, bool]] = {
 MAX_SEQ_LEN = 2048
 MAX_NEW_TOKENS = 1500  # 120 s: the runtime's own bound (and its per-request history buffer)
 REPETITION_PENALTY = 1.1
+# The sampler, for the backbone and the depth decoder alike. These equal what the checkout's
+# update_generation_config_for_breeze applies at daa6cb2; they are pinned here (and passed to the
+# runtime, where they win) so a later checkout can't change the sampling under an unchanged
+# model_version.
+TEMPERATURE = 0.9
+TOP_K = 50
+TOP_P = 1.0
 ATTN_IMPLEMENTATION = "eager"  # the only one upstream exercises (flash_attn is not installed)
 DEVICE = "cuda:0"
 # Guidance for a line that carries an instruction and names no scale (upstream's recommendation).
@@ -89,20 +98,32 @@ _CAP_MIN_FRAMES = 64
 
 # Everything above decides what a line sounds like or where it is cut, so it is part of the
 # engine's model_version: bump GEN_RECIPE whenever max_frames_for, model_text or a constant in
-# this block changes (FAST_CONFIGS entries, MAX_SEQ_LEN, MAX_NEW_TOKENS, REPETITION_PENALTY,
-# ATTN_IMPLEMENTATION, DIRECTION_CFG_SCALE, the cap constants). Audio made under an old recipe is
-# then never served from the cache under a new one.
+# this block changes (FAST_CONFIGS entries, MAX_SEQ_LEN, MAX_NEW_TOKENS, REPETITION_PENALTY, the
+# sampler, ATTN_IMPLEMENTATION, DIRECTION_CFG_SCALE, the cap constants). Audio made under an old
+# recipe is then never served from the cache under a new one. The Breeze checkout's own code
+# (prompt templates, model code) is NOT part of the version: the README pins its revision.
 GEN_RECIPE = 1
 
-# Breeze builds its prompt by joining text segments and re-tokenizing the joined string, so these
-# literals inside a book line, a transcript or an instruction would turn into control tokens
-# (a speaker switch, an instruction boundary, a reference-audio placeholder). None of them is
+# Breeze builds its prompt by joining text segments and re-tokenizing the joined string, so the
+# tokenizer's special-token literals inside a book line, a transcript or an instruction would
+# turn into control tokens: Breeze's own (a speaker switch, an instruction boundary, a
+# reference-audio placeholder) and the Gemma tokenizer's (<eos>, <bos>, ...). None of them is
 # speech; they are removed before the model sees the text.
-_CONTROL_TOKENS = re.compile(r"<ins_bos>|<ins_eos>|<\|AUDIO\|>|<\|audio_eos\|>|\[S\d\]")
+_CONTROL_TOKENS = re.compile(
+    r"<ins_bos>|<ins_eos>|<\|AUDIO\|>|<\|audio_eos\|>|\[S\d\]"
+    r"|<(?:pad|eos|bos|unk|mask|start_of_turn|end_of_turn|start_of_image|end_of_image"
+    r"|image_soft_token)>"
+)
+
+
+class RequestError(ValueError):
+    """This request can never be rendered as sent (a prompt too long for the model, a missing
+    transcript, a bad guidance scale). Reported with ``request_error: true`` so the adapter fails
+    the line without restarting a healthy worker: a fresh process would refuse it the same way."""
 
 
 def model_text(text: str) -> str:
-    """The text actually sent to the model: Breeze's control-token literals removed."""
+    """The text actually sent to the model: the tokenizer's control-token literals removed."""
     return _CONTROL_TOKENS.sub(" ", text).strip() if _CONTROL_TOKENS.search(text) else text
 
 
@@ -112,10 +133,10 @@ def max_frames_for(text: str, prompt_len: int) -> int:
     ``prompt_len`` is the prompt's token length (both transcripts, the reference frames, the
     instruction). The runtime stops SILENTLY when prompt + generation reaches MAX_SEQ_LEN, so the
     cap is bounded by the room left: the cap stays the binding stop and ``hit_cap`` stays
-    truthful. Raises when the prompt leaves no usable room (a very long reference clip)."""
+    truthful. Raises when the prompt leaves no usable room (a very long line or reference)."""
     room = MAX_SEQ_LEN - 1 - prompt_len
     if room < _CAP_MIN_FRAMES:
-        raise ValueError(
+        raise RequestError(
             f"prompt too long: {prompt_len} tokens of reference clip, transcripts and text "
             f"leave {max(room, 0)} of {MAX_SEQ_LEN} positions to speak in (use a shorter "
             "reference clip or split the line)"
@@ -132,7 +153,7 @@ def guidance_scale_for(instruction: str, cfg_scale: Any) -> float:
         return 1.0
     scale = DIRECTION_CFG_SCALE if cfg_scale is None else float(cfg_scale)
     if not math.isfinite(scale) or scale <= 0:
-        raise ValueError(f"cfg_scale must be a finite number above 0, got {cfg_scale!r}")
+        raise RequestError(f"cfg_scale must be a finite number above 0, got {cfg_scale!r}")
     return scale
 
 
@@ -214,6 +235,10 @@ class ModelHandle:
                 max_new_tokens=MAX_NEW_TOKENS,
                 max_seq_len=MAX_SEQ_LEN,
                 repetition_penalty=REPETITION_PENALTY,
+                temperature=TEMPERATURE,
+                top_k=TOP_K,
+                top_p=TOP_P,
+                do_sample=True,
                 **FAST_CONFIGS[self.fast],
             )
             runtime = FastBreezeStreamingRuntime(
@@ -271,10 +296,12 @@ class ModelHandle:
 
         ref_text = (ref_text or "").strip()
         if not ref_text:
-            raise ValueError(
+            raise RequestError(
                 "breeze needs the reference clip's exact transcript (ref_text); it has no "
                 "transcript-free clone mode"
             )
+        if not text.strip():
+            raise RequestError("no text left to speak once control-token literals are removed")
         instruction = (instruction or "").strip()
         scale = guidance_scale_for(instruction, cfg_scale)
         self.load()
@@ -294,9 +321,10 @@ class ModelHandle:
         chunks: list[Any] = []
         with redirect_stdout(sys.stderr):
             if seed is not None:
-                # random + numpy + torch, as upstream seeds a request; the runtime reseeds torch
-                # itself right before sampling (after its lazy setup), from the same value.
-                self._set_all_seeds(int(seed))  # type: ignore[misc]
+                # random + numpy + torch, as upstream seeds a request. numpy refuses a seed
+                # outside 32 bits, hence the fold; the audio is decided by the runtime's own torch
+                # reseed right before sampling (after its lazy setup), from the full value.
+                self._set_all_seeds(int(seed) % 2**32)  # type: ignore[misc]
             self._reference_key = reference_sha256 or reference_wav
             try:
                 inputs = templates.prepare_inputs(  # type: ignore[union-attr]
@@ -317,6 +345,12 @@ class ModelHandle:
             if negative is not None:
                 prompt_len = max(prompt_len, int(negative.shape[1]))
             cap = max_frames_for(text, prompt_len)
+            # The eager codec decodes two frames at a time: a cap that lands mid-chunk would
+            # drop the buffered frame. (One frame per chunk on the fast path: a no-op there.)
+            cap -= cap % int(self._runtime.codec_chunk_frames)  # type: ignore[union-attr]
+            # Where the runtime itself stops without a word: its token bound, or a full cache.
+            silent_stop = min(MAX_NEW_TOKENS, MAX_SEQ_LEN - 1 - prompt_len)
+            capped = False
 
             def observe(_frame: Any) -> None:
                 # Called once per generated frame, before it is decoded. One frame past the cap
@@ -336,10 +370,12 @@ class ModelHandle:
                 for chunk in stream:
                     chunks.append(chunk.audio)
             except _CapReached:
-                pass  # the generator's own cleanup closed the codec request
+                capped = True  # the generator's own cleanup closed the codec request
             finally:
                 stream.close()
-        return _write_wav(out_path, chunks, min(steps, cap), cap)
+        # A line that ends on its own exactly at the cap is not a runaway; one the runtime
+        # stopped silently is.
+        return _write_wav(out_path, chunks, min(steps, cap), capped or steps >= silent_stop)
 
     def empty_cache(self) -> None:
         """Best-effort VRAM reclaim after an OOM (the adapter restarts the worker anyway: the
@@ -356,7 +392,7 @@ class ModelHandle:
             pass
 
 
-def _write_wav(out_path: str, chunks: list[Any], frames: int, cap: int) -> dict[str, Any]:
+def _write_wav(out_path: str, chunks: list[Any], frames: int, hit_cap: bool) -> dict[str, Any]:
     """Write the generated chunks as 16-bit mono PCM and describe the line for the reply.
 
     A generation that produced no audio (the first token was the end token) is written as an
@@ -374,7 +410,7 @@ def _write_wav(out_path: str, chunks: list[Any], frames: int, cap: int) -> dict[
         "frames": frames,
         # Reached the cap: the model most likely never emitted its end token (a runaway), or the
         # prompt left too little room for the line.
-        "hit_cap": frames >= cap,
+        "hit_cap": hit_cap,
     }
 
 
@@ -430,6 +466,7 @@ def serve(stdin: TextIO, stdout: TextIO, model: ModelHandle) -> None:
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "oom": oom,
+                "request_error": isinstance(exc, RequestError),
                 "traceback": traceback.format_exc(),
             }
         _write(stdout, reply)
