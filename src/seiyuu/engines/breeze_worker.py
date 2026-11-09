@@ -88,10 +88,10 @@ DEVICE = "cuda:0"
 # Guidance for a line that carries an instruction and names no scale (upstream's recommendation).
 DIRECTION_CFG_SCALE = 4.0
 
-# Per-line generation cap. Not yet calibrated on Breeze: the constants start from Qwen3-TTS's
-# measured pace (17-22 characters/s on the same codec) and are deliberately looser, because a
-# directed line ("unhurried", a sigh) runs slower than a plain clone. 6 s plus one second per 6
-# characters is about 3x the plain pace; a runaway still stops long before the 120 s bound.
+# Per-line generation cap. Measured on the 3080 Ti (2026-11-09): plain clones spoke 17.7-18.4
+# characters/s and a directed line ("calm, dry and quiet") 16. 6 s plus one second per 6
+# characters is about 3x that pace, loose on purpose (a directed line or a sigh runs slower);
+# a runaway still stops long before the 120 s bound.
 _CAP_FLOOR_SECONDS = 6.0
 _CAP_CHARS_PER_SECOND = 6.0
 _CAP_MIN_FRAMES = 64

@@ -12,7 +12,10 @@ Output/determinism truths (checked against the Breeze repo at daa6cb2):
 - 24 kHz mono float out of the codec -> written as 16-bit PCM; already canonical, no resample.
 - autoregressive -> ``requires_validation`` (it can drop, repeat or add words and sounds).
 - every step samples; the worker seeds random/numpy/torch per line and the runtime reseeds torch
-  right before sampling, so one seed maps to one rendering within a worker configuration.
+  right before sampling, so one seed gives one PERFORMANCE: measured on the 3080 Ti, repeats of
+  a line had identical length and correlated 0.996-0.9997 sample for sample. They are not
+  bit-identical (bf16 GPU math is not bit-reproducible, so the odd fine-codebook token flips).
+  The segment cache keeps whichever take was rendered first.
 - Breeze has NO transcript-free clone mode: the prompt is the reference clip plus its exact
   transcript (``reference.txt``). The voice's settings must BIND that transcript with the same
   ``ref_text_digest`` Qwen3-TTS uses (a digest of the clip's bytes + the text), so it rides the
