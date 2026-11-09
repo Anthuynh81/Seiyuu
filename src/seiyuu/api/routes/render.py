@@ -37,6 +37,7 @@ from seiyuu.api.schemas import (
     VoiceUseOut,
 )
 from seiyuu.duration import estimate_runtime_seconds
+from seiyuu.engines import SynthesisError
 from seiyuu.ingest.models import NormalizedBook
 from seiyuu.render.align import ensure_words
 from seiyuu.render.gate import (
@@ -96,8 +97,9 @@ def _check_chapters(book: NormalizedBook, chapters: list[int]) -> tuple[int, ...
 def _estimate_or_http(
     cfg, registry, book, book_id, *, mode, chapters, single, apply_emotion=None, force=False
 ):
-    """compute_estimate with the read-path error mapping (422 unknown voice/engine;
-    residual ServiceError = corrupt artifact -> 500; marker checks already ran)."""
+    """compute_estimate with the read-path error mapping (422 unknown voice/engine; 503 for a
+    worker engine that is not set up, whose model_version cannot be computed; residual
+    ServiceError = corrupt artifact -> 500; marker checks already ran)."""
     try:
         return compute_estimate(
             cfg, registry, book, book_id, mode=mode, chapters=chapters, single=single,
@@ -109,6 +111,10 @@ def _estimate_or_http(
         raise ApiError(500, "corrupt_artifact", f"corrupt artifact: {exc}") from exc
     except (VoiceLibraryError, ValueError) as exc:
         raise ApiError(422, "invalid", str(exc)) from exc
+    except SynthesisError as exc:
+        # The key needs the engine's model_version, and a worker engine (IndexTTS-2, Qwen3-TTS,
+        # Breeze) fingerprints weights that are not there yet. The message says what to set.
+        raise ApiError(503, "not_ready", str(exc)) from exc
     except ServiceError as exc:
         raise ApiError(500, "corrupt_artifact", str(exc)) from exc
 
