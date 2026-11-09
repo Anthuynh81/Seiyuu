@@ -95,6 +95,14 @@ describe("buildChecklist", () => {
     expect(row.fix).toContain("INDEXTTS2_CHECKPOINTS_DIR");
   });
 
+  it("Breeze needs a manual install too, and reads by its product name", () => {
+    const rows = rowsFor({ engines: [makeEngine({ engine_id: "breeze", weights_cached: false })] });
+    const row = byId(rows, "engine:breeze");
+    expect(row.label).toBe("Breeze TTS 2 voice model");
+    expect(row.canDownload).toBeUndefined();
+    expect(row.fix).toContain("BREEZE_CHECKPOINT_DIR");
+  });
+
   it("a live warm-up job shows queued/running from the jobs poll", () => {
     const engines = [makeEngine({ engine_id: "chatterbox", weights_cached: false })];
     const queued = makeJob({ kind: "warmup", book_id: "engine:chatterbox", state: "queued" });
