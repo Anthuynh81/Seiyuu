@@ -879,6 +879,8 @@ def test_breeze_plans_need_a_voice_with_a_bound_transcript(tmp_path: Path) -> No
     _clone(lib, "aa_plain")  # sorts first, but binds no transcript
     (none,) = resolve_voice_plans(["breeze"], library=lib)
     assert none.skip_reason and "--voice breeze=" in none.skip_reason
+    # a consent-verified clone exists and a bare clip can't help: the reason says what is missing
+    assert "transcript" in none.skip_reason and "--reference" not in none.skip_reason
 
     # a Qwen-designed voice: the binding sits under qwen3tts, and is the same value for Breeze
     _clone(lib, "zz_designed", engine="qwen3tts")
@@ -1030,6 +1032,26 @@ def test_script_end_to_end_with_fake_engine(
     assert script.main([*argv, "--reference", str(clip), "--consent"]) == 0
     (r,) = json.loads((out3 / "bench.json").read_text(encoding="utf-8"))["results"]
     assert (r["voice_source"], r["reference_clip"]) == ("reference", str(clip.resolve()))
+
+    # Breeze needs a clip AND its transcript, so the test clip can never voice it: with a library
+    # clone that binds none, Breeze must not drag the other engines onto the test clip
+    lib = VoiceLibrary(tmp_path / "voices")
+    _clone(lib, "narr_plain")
+    out4 = tmp_path / "bench4"
+    argv = ["--engines", "chatterbox", "breeze", "--out", str(out4), "--no-audio"]
+    assert script.main([*argv, "--use-test-reference", "--consent"]) == 0
+    by_engine = {
+        r["engine"]: r
+        for r in json.loads((out4 / "bench.json").read_text(encoding="utf-8"))["results"]
+    }
+    assert (by_engine["chatterbox"]["status"], by_engine["chatterbox"]["voice_source"]) == (
+        "ok",
+        "auto",
+    )
+    assert by_engine["breeze"]["status"] == "skipped"
+    assert "transcript" in by_engine["breeze"]["reason"]
+    assert "--reference" not in by_engine["breeze"]["reason"]
+    assert "--use-test-reference" not in by_engine["breeze"]["reason"]
 
 
 def test_script_exit_codes() -> None:

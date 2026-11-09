@@ -54,7 +54,12 @@ from seiyuu.bench import (  # noqa: E402
     write_report,
 )
 from seiyuu.bench.report import collect_environment  # noqa: E402
-from seiyuu.bench.runner import DEFAULT_SEED, check_engines, stage_reference  # noqa: E402
+from seiyuu.bench.runner import (  # noqa: E402
+    DEFAULT_SEED,
+    TRANSCRIPT_ENGINES,
+    check_engines,
+    stage_reference,
+)
 from seiyuu.bench.vram import default_probes  # noqa: E402
 from seiyuu.gpu import get_gpu_manager  # noqa: E402
 from seiyuu.settings import get_settings  # noqa: E402
@@ -173,7 +178,13 @@ def main(argv: list[str] | None = None) -> int:
         # (--use-test-reference, with --consent checked above), never silently.
         fallback = cfg.indextts2_test_reference
         fallback_ok = bool(fallback) and Path(fallback).is_file()
-        unvoiced = [p for p in plans if p.skip_reason and p.voice_id == "-"]
+        # (not for engines that also need the clip's transcript: a bare clip can't voice them,
+        # so they neither trigger the fallback nor get pointed at it)
+        unvoiced = [
+            p
+            for p in plans
+            if p.skip_reason and p.voice_id == "-" and p.engine_id not in TRANSCRIPT_ENGINES
+        ]
         if unvoiced and ref_dir is None and args.use_test_reference:
             if not fallback_ok:
                 print(

@@ -215,7 +215,17 @@ def resolve_voice_plans(
             )  # fmt: skip
         else:
             meta = _auto_clone(library, engine_id)
-            if meta is None:
+            if meta is None and engine_id in TRANSCRIPT_ENGINES:
+                plans.append(
+                    _skip(
+                        engine_id, None,
+                        f"no consent-verified cloned voice in {library.voices_dir} binds a "
+                        f"reference transcript, which {engine_id} needs; pass "
+                        f"--voice {engine_id}=<a voice with a bound transcript>",
+                        seed,
+                    )
+                )  # fmt: skip
+            elif meta is None:
                 plans.append(
                     _skip(
                         engine_id, None,
@@ -266,8 +276,8 @@ def _clone_plan(engine_id: str, meta: Any, voices_dir: Path, source: str) -> Voi
             return _skip(
                 engine_id, meta.voice_id,
                 f"{engine_id} clones from a clip AND its exact transcript; voice "
-                f"{meta.voice_id!r} binds none (pick a designed voice or one cloned with a "
-                "transcript)",
+                f"{meta.voice_id!r} binds none (pick one whose meta.json carries "
+                "ref_text_digest)",
                 meta.seed,
             )  # fmt: skip
         settings[REF_TEXT_DIGEST_KEY] = binding
