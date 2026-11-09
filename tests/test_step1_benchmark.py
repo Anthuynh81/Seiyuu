@@ -844,6 +844,75 @@ def test_indextts2_preflight_reasons(tmp_path: Path) -> None:
     assert engine_preflight("indextts2", cfg) is None
 
 
+def test_breeze_preflight_reasons(tmp_path: Path) -> None:
+    cfg = SimpleNamespace(
+        breeze_worker_python=None, breeze_repo_dir=None, breeze_checkpoint_dir=None
+    )
+    assert "BREEZE_WORKER_PYTHON" in (engine_preflight("breeze", cfg) or "")
+    py = tmp_path / "python.exe"
+    py.write_bytes(b"")
+    cfg.breeze_worker_python = py
+    cfg.breeze_repo_dir = tmp_path / "repo"
+    assert "BREEZE_REPO_DIR" in (engine_preflight("breeze", cfg) or "")
+    (tmp_path / "repo" / "breeze_infer").mkdir(parents=True)
+    (tmp_path / "repo" / "models").mkdir()
+    (tmp_path / "repo" / "breeze_infer" / "templates.py").write_text("", encoding="utf-8")
+    (tmp_path / "repo" / "models" / "fast_streaming.py").write_text("", encoding="utf-8")
+    cfg.breeze_checkpoint_dir = tmp_path / "ckpt"
+    assert "BREEZE_CHECKPOINT_DIR" in (engine_preflight("breeze", cfg) or "")
+    (tmp_path / "ckpt" / "audio_tokenizer").mkdir(parents=True)
+    (tmp_path / "ckpt" / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ckpt" / "model.safetensors").write_bytes(b"")
+    assert engine_preflight("breeze", cfg) is None
+
+
+def test_breeze_plans_need_a_voice_with_a_bound_transcript(tmp_path: Path) -> None:
+    from seiyuu.bench import runner
+    from seiyuu.bench.vram import SUBPROCESS_ENGINES
+    from seiyuu.engines.qwen3tts_engine import REF_TEXT_DIGEST_KEY
+
+    assert runner.REF_TEXT_DIGEST_KEY == REF_TEXT_DIGEST_KEY  # mirrored, must not drift
+    assert "breeze" in runner.TRANSCRIPT_ENGINES and "breeze" in SUBPROCESS_ENGINES
+    assert check_engines(["breeze"]) == ["breeze"]
+
+    lib = VoiceLibrary(tmp_path / "voices")
+    _clone(lib, "aa_plain")  # sorts first, but binds no transcript
+    (none,) = resolve_voice_plans(["breeze"], library=lib)
+    assert none.skip_reason and "--voice breeze=" in none.skip_reason
+    # a consent-verified clone exists and a bare clip can't help: the reason says what is missing
+    assert "transcript" in none.skip_reason and "--reference" not in none.skip_reason
+
+    # a Qwen-designed voice: the binding sits under qwen3tts, and is the same value for Breeze
+    _clone(lib, "zz_designed", engine="qwen3tts")
+    designed = lib.load("zz_designed")
+    lib.save(designed.model_copy(update={"settings": {"qwen3tts": {REF_TEXT_DIGEST_KEY: 123.0}}}))
+    (auto,) = resolve_voice_plans(["breeze"], library=lib)
+    assert (auto.voice_id, auto.source, auto.skip_reason) == ("zz_designed", "auto", None)
+    assert auto.settings == {REF_TEXT_DIGEST_KEY: 123.0}
+    (q,) = resolve_voice_plans(["qwen3tts"], library=lib)  # other engines: unchanged
+    assert (q.voice_id, q.settings) == ("zz_designed", {REF_TEXT_DIGEST_KEY: 123.0})
+    (c,) = resolve_voice_plans(["chatterbox"], library=lib)
+    assert (c.voice_id, c.settings) == ("aa_plain", {"exaggeration": 0.7})  # nothing borrowed
+
+    # a breeze voice's own settings win, tunables included
+    lib.save(
+        designed.model_copy(
+            update={"settings": {"breeze": {REF_TEXT_DIGEST_KEY: 9.0}, "qwen3tts": {"x": 1.0}}}
+        )
+    )
+    (own,) = resolve_voice_plans(["breeze"], library=lib, overrides={"breeze": "zz_designed"})
+    assert own.settings == {REF_TEXT_DIGEST_KEY: 9.0}
+
+    # an explicit pick that binds none, and a bare --reference clip, are skip reasons
+    (plain,) = resolve_voice_plans(["breeze"], library=lib, overrides={"breeze": "aa_plain"})
+    assert plain.skip_reason and "binds none" in plain.skip_reason
+    ref, other = resolve_voice_plans(
+        ["breeze", "chatterbox"], library=lib, reference_voices_dir=tmp_path / "scratch"
+    )
+    assert ref.skip_reason and "--reference" in ref.skip_reason
+    assert other.skip_reason is None and other.voice_id == "bench_reference"
+
+
 def test_sdk_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
     assert "not installed" in (engine_preflight("chatterbox") or "")
@@ -963,6 +1032,26 @@ def test_script_end_to_end_with_fake_engine(
     assert script.main([*argv, "--reference", str(clip), "--consent"]) == 0
     (r,) = json.loads((out3 / "bench.json").read_text(encoding="utf-8"))["results"]
     assert (r["voice_source"], r["reference_clip"]) == ("reference", str(clip.resolve()))
+
+    # Breeze needs a clip AND its transcript, so the test clip can never voice it: with a library
+    # clone that binds none, Breeze must not drag the other engines onto the test clip
+    lib = VoiceLibrary(tmp_path / "voices")
+    _clone(lib, "narr_plain")
+    out4 = tmp_path / "bench4"
+    argv = ["--engines", "chatterbox", "breeze", "--out", str(out4), "--no-audio"]
+    assert script.main([*argv, "--use-test-reference", "--consent"]) == 0
+    by_engine = {
+        r["engine"]: r
+        for r in json.loads((out4 / "bench.json").read_text(encoding="utf-8"))["results"]
+    }
+    assert (by_engine["chatterbox"]["status"], by_engine["chatterbox"]["voice_source"]) == (
+        "ok",
+        "auto",
+    )
+    assert by_engine["breeze"]["status"] == "skipped"
+    assert "transcript" in by_engine["breeze"]["reason"]
+    assert "--reference" not in by_engine["breeze"]["reason"]
+    assert "--use-test-reference" not in by_engine["breeze"]["reason"]
 
 
 def test_script_exit_codes() -> None:

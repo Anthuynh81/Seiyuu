@@ -43,18 +43,21 @@ export const ENGINE_NAMES: Record<string, string> = {
   chatterbox: "Chatterbox",
   indextts2: "IndexTTS-2",
   qwen3tts: "Qwen3-TTS",
+  breeze: "Breeze TTS 2",
   elevenlabs: "ElevenLabs",
 };
 
 export const engineName = (id: string) => ENGINE_NAMES[id] ?? id;
 
-/** Engines whose weights the warm-up job can NOT fetch: IndexTTS-2 and Qwen3-TTS weights are a
-    separate manual download (their workers refuse to start without them). */
+/** Engines whose weights the warm-up job can NOT fetch: IndexTTS-2, Qwen3-TTS and Breeze weights
+    are a separate manual download (their workers refuse to start without them). */
 const MANUAL_INSTALL: Record<string, string> = {
   indextts2:
     "Needs a manual install: download the IndexTTS-2 checkpoints and set INDEXTTS2_CHECKPOINTS_DIR in .env, then restart the backend.",
   qwen3tts:
     "Needs a manual install: set up the Qwen3-TTS env and checkpoints, set QWEN3TTS_WORKER_PYTHON and QWEN3TTS_MODELS_DIR in .env, then restart the backend.",
+  breeze:
+    "Needs a manual install: set up the Breeze TTS 2 env and checkpoint, set BREEZE_WORKER_PYTHON, BREEZE_REPO_DIR and BREEZE_CHECKPOINT_DIR in .env, then restart the backend.",
 };
 
 /** The manual-install instructions for an engine the warm-up job can't fetch, if any. */

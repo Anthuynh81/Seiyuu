@@ -56,6 +56,12 @@ Normalizer = Callable[[str, str], str]  # (raw text, engine_id) -> normalized te
 Clock = Callable[[], float]
 
 _SDK_MODULES = {"kokoro": "kokoro", "chatterbox": "chatterbox"}
+# Engines that clone from reference.wav AND its exact transcript (reference.txt), with no
+# transcript-free mode: a voice must bind one to be benchmarked on them.
+TRANSCRIPT_ENGINES = frozenset({"breeze"})
+# VoiceMeta.settings key of the transcript binding (seiyuu.engines.qwen3tts_engine owns the
+# recipe; mirrored here so the benchmark module imports no engine adapter at import time).
+REF_TEXT_DIGEST_KEY = "ref_text_digest"
 
 
 class BenchError(Exception):
@@ -138,6 +144,8 @@ def resolve_voice_plans(
       ``--reference`` (staged in a scratch dir; ``reference_clip``/``reference_source`` record
       where it came from) > the first consent-verified cloned library voice (preferring one made
       for that engine) > skip.
+    - breeze clones from the clip AND its transcript: only a voice that binds one qualifies
+      (under any engine's settings), and a bare ``--reference`` clip is a skip reason.
 
     A malformed or mismatched meta.json is a skip reason (explicit voice) or is passed over (auto
     pick): one bad voice dir never sinks the run or hides the rest of the library.
@@ -187,6 +195,15 @@ def resolve_voice_plans(
                 plans.append(_skip(engine_id, explicit, str(exc), seed))
                 continue
             plans.append(_clone_plan(engine_id, meta, library.voices_dir, "library"))
+        elif reference_voices_dir is not None and engine_id in TRANSCRIPT_ENGINES:
+            plans.append(
+                _skip(
+                    engine_id, REFERENCE_VOICE_ID,
+                    f"{engine_id} clones from a clip AND its exact transcript, which --reference "
+                    f"does not carry; pass --voice {engine_id}=<a voice with a bound transcript>",
+                    seed,
+                )
+            )  # fmt: skip
         elif reference_voices_dir is not None:
             plans.append(
                 VoicePlan(
@@ -198,7 +215,17 @@ def resolve_voice_plans(
             )  # fmt: skip
         else:
             meta = _auto_clone(library, engine_id)
-            if meta is None:
+            if meta is None and engine_id in TRANSCRIPT_ENGINES:
+                plans.append(
+                    _skip(
+                        engine_id, None,
+                        f"no consent-verified cloned voice in {library.voices_dir} binds a "
+                        f"reference transcript, which {engine_id} needs; pass "
+                        f"--voice {engine_id}=<a voice with a bound transcript>",
+                        seed,
+                    )
+                )  # fmt: skip
+            elif meta is None:
                 plans.append(
                     _skip(
                         engine_id, None,
@@ -227,12 +254,36 @@ def _restarts(engine: TTSEngine) -> tuple[int, int]:
     )
 
 
+def _transcript_binding(meta: Any) -> float | None:
+    """The voice's reference-transcript digest, from whichever engine's settings hold it. The
+    digest covers the clip and its text only (no engine), so it is valid for any engine that
+    clones from reference.wav + reference.txt."""
+    for tunables in meta.settings.values():
+        if REF_TEXT_DIGEST_KEY in tunables:
+            return tunables[REF_TEXT_DIGEST_KEY]
+    return None
+
+
 def _clone_plan(engine_id: str, meta: Any, voices_dir: Path, source: str) -> VoicePlan:
     # A clone made for chatterbox can bench indextts2 too (both read reference.wav); only the
-    # benchmarked engine's own tunables apply.
+    # benchmarked engine's own tunables apply. An engine that needs the clip's transcript also
+    # takes the voice's binding, wherever the voice keeps it (a Qwen-designed voice can bench
+    # Breeze); a voice that binds none can't run on it.
+    settings = dict(meta.settings.get(engine_id, {}))
+    if engine_id in TRANSCRIPT_ENGINES and REF_TEXT_DIGEST_KEY not in settings:
+        binding = _transcript_binding(meta)
+        if binding is None:
+            return _skip(
+                engine_id, meta.voice_id,
+                f"{engine_id} clones from a clip AND its exact transcript; voice "
+                f"{meta.voice_id!r} binds none (pick one whose meta.json carries "
+                "ref_text_digest)",
+                meta.seed,
+            )  # fmt: skip
+        settings[REF_TEXT_DIGEST_KEY] = binding
     return VoicePlan(
         engine_id=engine_id, voice_id=meta.voice_id, engine_voice=meta.voice_id,
-        settings=dict(meta.settings.get(engine_id, {})), seed=meta.seed,
+        settings=settings, seed=meta.seed,
         voices_dir=Path(voices_dir), source=source,
     )  # fmt: skip
 
@@ -260,6 +311,8 @@ def _auto_clone(library: Any, engine_id: str) -> Any | None:
         # is really there — a missing reference would otherwise FAIL mid-synthesis
         if not library.reference_path(meta.voice_id).is_file():
             continue
+        if engine_id in TRANSCRIPT_ENGINES and _transcript_binding(meta) is None:
+            continue  # this engine can't clone a voice that binds no transcript
         candidates.append(meta)
     candidates.sort(key=lambda m: (m.engine != engine_id, m.voice_id))
     return candidates[0] if candidates else None
@@ -271,8 +324,8 @@ def _auto_clone(library: Any, engine_id: str) -> Any | None:
 def engine_preflight(engine_id: str, cfg: Any | None = None) -> str | None:
     """Why ``engine_id`` can't run on this machine (actionable), or None if it looks runnable.
 
-    Cheap and SDK-free: a find_spec for in-process SDKs, file checks for the IndexTTS-2 and
-    Qwen3-TTS workers (their python + weights live outside this venv)."""
+    Cheap and SDK-free: a find_spec for in-process SDKs, file checks for the IndexTTS-2,
+    Qwen3-TTS and Breeze workers (their python + weights live outside this venv)."""
     if engine_id in _SDK_MODULES and importlib.util.find_spec(_SDK_MODULES[engine_id]) is None:
         return f"{engine_id}: SDK package {_SDK_MODULES[engine_id]!r} is not installed in this venv"
     if engine_id == "indextts2":
@@ -311,6 +364,30 @@ def engine_preflight(engine_id: str, cfg: Any | None = None) -> str | None:
             return (
                 f"qwen3tts: {BASE_CHECKPOINT} not found under {paths['models_dir']}; download "
                 "it and set QWEN3TTS_MODELS_DIR"
+            )
+    if engine_id == "breeze":
+        from seiyuu.engines.breeze_engine import breeze_config, checkpoint_present, repo_present
+
+        if cfg is None:
+            from seiyuu.settings import get_settings
+
+            cfg = get_settings()
+        paths = breeze_config(cfg)
+        py = paths["worker_python"]
+        if py is None or not Path(py).is_file():
+            return (
+                f"breeze: worker python not configured or missing ({py}); set "
+                "BREEZE_WORKER_PYTHON in .env to the Breeze env's python.exe"
+            )
+        if not repo_present(paths["repo_dir"]):
+            return (
+                f"breeze: no breeze-tts checkout at {paths['repo_dir']}; clone it and set "
+                "BREEZE_REPO_DIR"
+            )
+        if not checkpoint_present(paths["checkpoint_dir"]):
+            return (
+                f"breeze: checkpoint not found at {paths['checkpoint_dir']}; download it and "
+                "set BREEZE_CHECKPOINT_DIR"
             )
     return None
 

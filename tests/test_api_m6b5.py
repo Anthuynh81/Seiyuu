@@ -105,6 +105,20 @@ def test_estimate_unknown_engine_422(client) -> None:
     assert resp.status_code == 422
 
 
+def test_estimate_for_a_worker_engine_that_is_not_set_up_is_503(tmp_path, epub_bytes) -> None:
+    # The estimate needs the engine's model_version, which fingerprints weights that are not
+    # there: an actionable "not ready", not an unhandled 500. (IndexTTS-2 and Qwen3-TTS alike.)
+    settings = make_settings(tmp_path, breeze_checkpoint_dir=tmp_path / "no-such-checkpoint")
+    with TestClient(create_app(settings=settings)) as c:
+        files = {"file": ("synthetic.epub", epub_bytes, "application/epub+zip")}
+        book_id = c.post("/api/books", files=files).json()["book"]["book_id"]
+        single = {"engine": "breeze", "voice": "some_voice"}
+        resp = c.get(f"/api/books/{book_id}/cost-estimate", params={"mode": "single", **single})
+        assert resp.status_code == 503, resp.text
+        assert _error(resp)["code"] == "not_ready"
+        assert "checkpoint dir not found" in _error(resp)["message"]
+
+
 # -- quotes -------------------------------------------------------------------------------
 
 
