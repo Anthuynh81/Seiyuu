@@ -481,6 +481,14 @@ export interface VoiceOut {
   has_audition: boolean;
 }
 
+/** POST /api/voices/{id}/engine: the voice on its new engine, what it was on, one plain
+    sentence, and the books whose casting uses it (record them again to hear the new engine). */
+export interface VoiceEngineOut extends VoiceOut {
+  previous_engine: string;
+  note: string;
+  books: string[];
+}
+
 /** POST /api/voices/clone: a Qwen clone also says, in one sentence, whether it bound the clip's
     transcript (closer cloning) or clones from the sound alone, and why. */
 export interface ClonedVoiceOut extends VoiceOut {

@@ -338,6 +338,57 @@ describe("Voices", () => {
     expect(server.formBodyOf("POST", "/api/voices/clone").get("transcript")).toBeNull();
   });
 
+  it("a cloned voice can move to Breeze from its card, and says which books to record again", async () => {
+    const user = userEvent.setup();
+    const cloned = makeVoice({
+      voice_id: "kim_v",
+      name: "Kim",
+      kind: "cloned",
+      engine: "qwen3tts",
+      preset_id: null,
+      reference_audio: "reference.wav",
+      consent_attested: true,
+    });
+    const server = mountServer({
+      voices: [cloned, makeVoice({ voice_id: "vp", name: "Bright Narrator" })],
+    }).get("/api/books", { books: [makeBook({ book_id: "ghost", title: "The Ghost Story" })] });
+    server.on("POST", "/api/voices/kim_v/engine", () => {
+      // the library now reports the voice on its new engine
+      server.get("/api/voices", { voices: [{ ...cloned, engine: "breeze" }], unreadable: [] });
+      return jsonResponse({
+        ...cloned,
+        engine: "breeze",
+        previous_engine: "qwen3tts",
+        note: "kim_v now clones on breeze (was qwen3tts).",
+        books: ["ghost"],
+      });
+    });
+    renderWithProviders(<Voices />);
+
+    // only the cloned voice offers it: a preset has no clip to clone from
+    const buttons = await screen.findAllByRole("button", { name: "use Breeze" });
+    expect(buttons).toHaveLength(1);
+    await user.click(buttons[0]);
+    expect(server.jsonBodyOf("POST", "/api/voices/kim_v/engine")).toEqual({ engine: "breeze" });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Now cloned by Breeze (was Qwen). Record this book again to hear it: The Ghost Story.",
+    );
+    // and it can go back
+    expect(await screen.findByRole("button", { name: "use Qwen" })).toBeInTheDocument();
+  });
+
+  it("a refused engine switch says why in plain words", async () => {
+    const user = userEvent.setup();
+    const server = mountServer({
+      voices: [makeVoice({ voice_id: "kim_v", kind: "cloned", engine: "qwen3tts", preset_id: null })],
+    });
+    server.error("POST", "/api/voices/kim_v/engine", 503, "not_ready", "breeze is not set up on this machine");
+    renderWithProviders(<Voices />);
+    await user.click(await screen.findByRole("button", { name: "use Breeze" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("couldn't switch engine");
+    expect(screen.getByRole("button", { name: "use Breeze" })).toBeEnabled(); // still on Qwen
+  });
+
   it("where the server has Breeze set up, a new clone defaults to it and sends the transcript", async () => {
     const user = userEvent.setup();
     const server = mountServer().get("/api/system", makeSystemProbe({ default_clone_engine: "breeze" }));

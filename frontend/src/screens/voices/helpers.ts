@@ -34,3 +34,13 @@ export function takeVerdict(t: Pick<DesignTakeOut, "wpm" | "in_pace" | "ok" | "r
   const check = t.ok ? "every word clear" : `the speech check flagged it${t.reason ? ` (${t.reason})` : ""}`;
   return `${pace}, ${check}`;
 }
+
+/** Engines that clone locally from the library's reference clip (the server refuses others). */
+const LOCAL_CLONING = new Set(["breeze", "qwen3tts", "chatterbox", "indextts2"]);
+
+/** The engine a cloned voice can move to from its card: Breeze, or back to Qwen from Breeze.
+    null for a voice that cannot move (a preset or blend, or a clone kept in the cloud). */
+export function switchTarget(voice: VoiceOut): string | null {
+  if (voice.kind !== "cloned" || !LOCAL_CLONING.has(voice.engine)) return null;
+  return voice.engine === "breeze" ? "qwen3tts" : "breeze";
+}

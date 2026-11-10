@@ -57,6 +57,7 @@ import type {
   VoiceAssignment,
   VoiceCreate,
   VoiceListOut,
+  VoiceEngineOut,
   VoiceOut,
   VoiceReferencesOut,
 } from "./types";
@@ -1012,6 +1013,22 @@ export function useRenameVoice() {
         body: JSON.stringify({ name }),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["voices"] }),
+  });
+}
+
+/** Move a cloned voice to another local cloning engine, in place. The voice id does not
+    change, so no casting does; but every line it speaks gets a new cache key, so each book's
+    estimate and render summary are refreshed (by key prefix: the switch names no book). */
+export function useSwitchVoiceEngine() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ voiceId, engine }: { voiceId: string; engine: string }) =>
+      postJson<VoiceEngineOut>(`/api/voices/${voiceId}/engine`, { engine }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["voices"] });
+      qc.invalidateQueries({ queryKey: ["estimate"] });
+      qc.invalidateQueries({ queryKey: ["render-summary"] });
+    },
   });
 }
 
