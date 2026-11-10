@@ -51,6 +51,14 @@ segment, so it rides `settings_hash` (no cache-key format change):
 | Thought (italics) | same inner-voice instruction |
 | Dialogue | "natural, expressive spoken delivery that fits the line" |
 
+**As built (PR 2):** `voices/delivery.py`. The engine reads `settings["instruction"]`. The three
+texts (inner voice, narration, dialogue) and an on/off switch are the `delivery` block of
+`cast_plan.json`; a book with no plan uses the built-in texts, direction on. A book is first
+person when the narrator's voice is also a character's voice in `assignments.json` (owner's
+choice, 2026-11-09). Headings stay a plain clone, and so does a single-voice render. Not built:
+a "delivery changed since the last render" banner, and a refusal when a part-book re-render
+would mix old and new delivery (the emotion switch has the same gap).
+
 One helper computes it for both render and estimate (the `_emotion_settings` parity rule).
 Later, emotion verdicts (F2) can add a phrase ("angry, raising his voice"): Breeze is the first
 local engine where that works without a numeric knob.
