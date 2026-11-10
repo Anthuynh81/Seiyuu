@@ -807,6 +807,8 @@ class SystemStatus(BaseModel):
     # F2b: the server-default apply_emotion (per-render overridable). The render config reads
     # this to default its toggle.
     apply_emotion: bool
+    # The engine a new clone gets when none is named: Breeze where it is set up, else Qwen.
+    default_clone_engine: str
     engines: list[str]
     version: str
 

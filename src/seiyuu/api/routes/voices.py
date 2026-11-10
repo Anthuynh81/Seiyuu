@@ -53,10 +53,12 @@ from seiyuu.render.models import RenderManifest
 from seiyuu.repository import Job, JobKind, JobState
 from seiyuu.services import ServiceError, delete_voice, voice_references
 from seiyuu.services.clone_transcript import (
-    QWEN_ENGINE,
+    TRANSCRIPT_ENGINES,
+    CloneRefused,
     CloneTranscript,
     bind_transcript,
     choose_transcript,
+    default_clone_engine,
 )
 from seiyuu.voices import (
     BlendComponent,
@@ -307,8 +309,8 @@ def clone_voice(
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1)],
     engine: Annotated[
-        str, Form(pattern="^(chatterbox|elevenlabs|indextts2|qwen3tts)$")
-    ] = "qwen3tts",
+        str | None, Form(pattern="^(breeze|chatterbox|elevenlabs|indextts2|qwen3tts)$")
+    ] = None,
     consent: Annotated[bool, Form()] = False,
     attested_by: Annotated[str, Form()] = "",
     seed: Annotated[int, Form()] = 41172,
@@ -334,6 +336,8 @@ def clone_voice(
     library = VoiceLibrary(cfg.voices_dir)
     vid = voice_id or library.new_voice_id(name)
     _check_voice_id(vid)
+    if engine is None:
+        engine = default_clone_engine(cfg)  # Breeze where it is set up, else Qwen
 
     upload_dir = cfg.data_dir / "uploads" / secrets.token_hex(8)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -353,15 +357,22 @@ def clone_voice(
         if size == 0:
             raise ApiError(422, "invalid", "empty reference upload")
 
-        # Qwen clones closer from the clip AND its transcript (ICL). Whisper runs on the shared
-        # CPU aligner, before the voices mutex: it is the slow part and touches no library state.
+        # Qwen clones closer from the clip AND its transcript (ICL); Breeze clones no other
+        # way. Whisper runs on the shared CPU aligner, before the voices mutex: it is the slow
+        # part and touches no library state.
         chosen: CloneTranscript | None = None
-        if engine == QWEN_ENGINE:
+        if engine in TRANSCRIPT_ENGINES:
             aligner = request.app.state.aligner
-            with request.app.state.align_lock:
-                chosen = choose_transcript(
-                    staged, provided=transcript, transcribe=aligner.transcribe_clip
-                )
+            try:
+                with request.app.state.align_lock:
+                    chosen = choose_transcript(
+                        staged,
+                        provided=transcript,
+                        transcribe=aligner.transcribe_clip,
+                        engine=engine,
+                    )
+            except CloneRefused as exc:  # Breeze, and no transcript to bind: nothing is saved
+                raise ApiError(422, "invalid", str(exc)) from exc
 
         with request.app.state.voices_mutex:
             exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
@@ -408,9 +419,13 @@ def clone_voice(
             # embeds the ref hash, so they are unreachable anyway — removing them is hygiene)
             for stale in ref_path.parent.glob("conds_*.pt"):
                 stale.unlink(missing_ok=True)
-            # bound to the PUBLISHED bytes; a non-Qwen re-clone drops an old transcript too
+            # bound to the PUBLISHED bytes, under the engine that will read it; a re-clone on
+            # an engine that takes no transcript drops an old one too
             settings = bind_transcript(
-                ref_path, attestation.reference_sha256, chosen.text if chosen else None
+                ref_path,
+                attestation.reference_sha256,
+                chosen.text if chosen else None,
+                engine=engine,
             )
             library.save(
                 VoiceMeta(

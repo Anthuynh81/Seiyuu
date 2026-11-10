@@ -648,6 +648,9 @@ export interface SystemStatusOut {
   attribution: AttributionDefaults;
   keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
+  // the engine a new clone gets when none is picked: "breeze" where it is set up on the
+  // server, else "qwen3tts"; optional only so slim test fixtures can omit it
+  default_clone_engine?: string;
   // server limits; optional only so slim test fixtures can omit it (the server always sends it)
   limits?: {
     // a whole-book render over this many speakable paragraphs needs confirm_full=true

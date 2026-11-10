@@ -27,6 +27,7 @@ from seiyuu.api.schemas import (
 from seiyuu.normalize import normalize_text
 from seiyuu.repository import JobKind
 from seiyuu.services import ServiceError
+from seiyuu.services.clone_transcript import default_clone_engine
 from seiyuu.services.voice_design import (
     DEFAULT_SAMPLE_TEXT,
     DESIGN_ENGINE,
@@ -129,12 +130,19 @@ def design_take_wav(design_id: str, take: int, cfg: SettingsDep) -> FileResponse
 def keep_design_take(
     design_id: str, body: DesignKeep, request: Request, response: Response, cfg: SettingsDep
 ) -> VoiceOut:
-    """Make one take a library voice: a consent-recorded CLONED qwen3tts voice cloned from it."""
+    """Make one take a library voice: a consent-recorded CLONED voice cloned from it, on the
+    default cloning engine (Breeze where it is set up, else Qwen3-TTS)."""
     directory = _dir_or_404(cfg, design_id)
     library = VoiceLibrary(cfg.voices_dir)
     with request.app.state.voices_mutex:
         try:
-            meta = keep_take(directory, body.take, library=library, name=body.name)
+            meta = keep_take(
+                directory,
+                body.take,
+                library=library,
+                name=body.name,
+                engine=default_clone_engine(cfg),
+            )
         except ServiceError as exc:
             code = "conflict" if "already exists" in str(exc) else "invalid"
             raise ApiError(409 if code == "conflict" else 422, code, str(exc)) from exc

@@ -294,15 +294,16 @@ def voice_delete(
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--engine",
-    type=click.Choice(["qwen3tts", "chatterbox", "indextts2", "elevenlabs"]),
-    default="qwen3tts",
-    show_default=True,
-    help="Cloning engine: qwen3tts/chatterbox/indextts2 (local) or elevenlabs (cloud IVC).",
+    type=click.Choice(["breeze", "qwen3tts", "chatterbox", "indextts2", "elevenlabs"]),
+    default=None,
+    help="Cloning engine: breeze/qwen3tts/chatterbox/indextts2 (local) or elevenlabs (cloud "
+    "IVC). Default: breeze when it is set up on this machine, otherwise qwen3tts.",
 )
 @click.option(
     "--transcript",
     default=None,
-    help="qwen3tts: exactly what the clip says (default: whisper transcribes it on the CPU).",
+    help="breeze/qwen3tts: exactly what the clip says (default: whisper transcribes it on "
+    "the CPU).",
 )
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
@@ -316,16 +317,24 @@ def voice_delete(
 @click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
 @_voices_dir_option
 def voice_clone(
-    name: str, reference: Path, engine: str, consent: bool, consent_by: str | None,
+    name: str, reference: Path, engine: str | None, consent: bool, consent_by: str | None,
     seed: int, voice_id: str | None, voices_dir: Path | None, transcript: str | None,
 ) -> None:  # fmt: skip
-    """Create a cloned voice from a reference clip (qwen3tts/chatterbox/indextts2 local,
-    elevenlabs IVC). A qwen3tts clone of a clip up to 30 s also binds the clip's transcript, so
-    Qwen clones from the clip and its words (closer to the speaker)."""
+    """Create a cloned voice from a reference clip (breeze/qwen3tts/chatterbox/indextts2
+    local, elevenlabs IVC). A breeze or qwen3tts clone of a clip up to 30 s binds the clip's
+    transcript and clones from the clip and its words. Breeze has no other way to clone, so it
+    refuses a clip with no transcript to bind (over 30 s, or no speech heard); Qwen then clones
+    from the sound alone."""
     import getpass
     import shutil
 
-    from seiyuu.services.clone_transcript import QWEN_ENGINE, bind_transcript, choose_transcript
+    from seiyuu.services.clone_transcript import (
+        TRANSCRIPT_ENGINES,
+        CloneRefused,
+        bind_transcript,
+        choose_transcript,
+        default_clone_engine,
+    )
     from seiyuu.settings import get_settings
     from seiyuu.voices import (
         ConsentAttestation,
@@ -345,15 +354,20 @@ def voice_clone(
     cfg = get_settings()
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     vid = voice_id or lib.new_voice_id(name)
+    if engine is None:
+        engine = default_clone_engine(cfg)
     chosen = None
-    if engine == QWEN_ENGINE:
+    if engine in TRANSCRIPT_ENGINES:
         from seiyuu.validate import Validator
 
         # CPU/int8 like the API's aligner: never a second model on the GPU
         whisper = Validator(model_size=cfg.validation_model_size, device="cpu", compute_type="int8")
-        chosen = choose_transcript(
-            reference, provided=transcript, transcribe=whisper.transcribe_clip
-        )
+        try:
+            chosen = choose_transcript(
+                reference, provided=transcript, transcribe=whisper.transcribe_clip, engine=engine
+            )
+        except CloneRefused as exc:  # before anything is copied: no half-made voice
+            raise click.ClickException(str(exc)) from exc
     # Order matters: copy first, hash the COPY, publish it atomically, THEN save the meta.
     # The attestation provably describes the exact bytes the library will serve — a failed
     # copy can't leave an attested meta pointing at missing/partial audio, and the source
@@ -372,7 +386,7 @@ def voice_clone(
     for stale in ref_path.parent.glob("conds_*.pt"):
         stale.unlink(missing_ok=True)
     settings = bind_transcript(
-        ref_path, attestation.reference_sha256, chosen.text if chosen else None
+        ref_path, attestation.reference_sha256, chosen.text if chosen else None, engine=engine
     )
     try:
         lib.save(
@@ -426,6 +440,7 @@ def voice_design(
     from seiyuu.gpu import GpuBusyError, get_gpu_manager
     from seiyuu.normalize import normalize_text
     from seiyuu.services import ServiceError
+    from seiyuu.services.clone_transcript import default_clone_engine
     from seiyuu.services.voice_design import (
         DEFAULT_SAMPLE_TEXT,
         DESIGN_ENGINE,
@@ -477,7 +492,9 @@ def voice_design(
         return
     chosen = record.recommended if keep == "best" else int(keep)
     try:
-        meta = keep_take(directory, chosen, library=lib, name=name)
+        meta = keep_take(
+            directory, chosen, library=lib, name=name, engine=default_clone_engine(cfg)
+        )
     except ServiceError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"kept take {chosen} as voice {meta.voice_id} ({meta.engine})")

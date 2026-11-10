@@ -88,6 +88,22 @@ def breeze_config(cfg: Any) -> dict[str, Any]:
     }
 
 
+def breeze_ready(cfg: Any) -> bool:
+    """Is Breeze set up on this machine: the worker interpreter, the repo checkout and the
+    weights all present? Cheap (a few stat calls), offline, and never raises."""
+    config = breeze_config(cfg)
+    python = config["worker_python"]
+    try:
+        has_python = python is not None and Path(python).is_file()
+    except OSError:
+        has_python = False
+    return (
+        has_python
+        and repo_present(config["repo_dir"])
+        and checkpoint_present(config["checkpoint_dir"])
+    )
+
+
 def worker_env(base: dict[str, str], *, windows: bool | None = None) -> dict[str, str]:
     """The worker process environment, from ``base`` (normally ``os.environ``).
 

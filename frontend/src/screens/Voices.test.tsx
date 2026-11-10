@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CharactersOverview, CloudSlotsOut, EngineVoicesOut, VoiceOut } from "../api/types";
-import { makeBook, makeJob } from "../test/fixtures";
+import { makeBook, makeJob, makeSystemProbe } from "../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, renderWithProviders } from "../test/utils";
 import { Voices } from "./Voices";
 
@@ -336,6 +336,42 @@ describe("Voices", () => {
     // no note: the dialog closes straight away, as before
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(server.formBodyOf("POST", "/api/voices/clone").get("transcript")).toBeNull();
+  });
+
+  it("where the server has Breeze set up, a new clone defaults to it and sends the transcript", async () => {
+    const user = userEvent.setup();
+    const server = mountServer().get("/api/system", makeSystemProbe({ default_clone_engine: "breeze" }));
+    server.on("POST", "/api/voices/clone", () =>
+      jsonResponse({
+        ...makeVoice({ voice_id: "elena", kind: "cloned", engine: "breeze" }),
+        clone_note: "cloned from the clip and its transcript",
+      }),
+    );
+    renderWithProviders(<Voices />);
+
+    await user.click(await screen.findByRole("button", { name: "new clone" }));
+    const dialog = await screen.findByRole("dialog", { name: "New cloned voice" });
+    // Breeze is the picked engine and the one marked recommended; Qwen is still offered
+    const picker = await within(dialog).findByRole("button", { name: /breeze — local, free.*\(recommended\)/ });
+    expect(within(dialog).getByText(/Breeze needs a clip of 5–30 s of clear speech/)).toBeInTheDocument();
+    await user.click(picker);
+    expect(await screen.findByRole("option", { name: /^qwen3tts — local, free, closest cloning$/ })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await user.upload(
+      dialog.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["wav"], "elena.wav", { type: "audio/wav" }),
+    );
+    await user.type(within(dialog).getByPlaceholderText("Mr. Darcy"), "Elena");
+    await user.type(within(dialog).getByLabelText("what the clip says (optional)"), "Call me Elena.");
+    await user.click(within(dialog).getByRole("checkbox", { name: /permission to clone/ }));
+    await user.type(within(dialog).getByPlaceholderText("your name"), "Cyber");
+    await user.click(within(dialog).getByRole("button", { name: "clone voice" }));
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("Voice Elena is ready");
+    const form = server.formBodyOf("POST", "/api/voices/clone");
+    expect(form.get("engine")).toBe("breeze");
+    expect(form.get("transcript")).toBe("Call me Elena.");
   });
 
   it("reclone_blocked names the recorded books that would need re-recording, by title, before replace", async () => {
