@@ -8,18 +8,39 @@ import {
   useDesignCast,
   useLiveJobs,
   useUpdateCastPlan,
+  useUpdateDelivery,
 } from "../../api/hooks";
-import type { CastPlan, JobOut, PlanRow, RowUpdate } from "../../api/types";
-import { NARRATOR_ROW } from "../../api/types";
+import type { CastPlan, Delivery, JobOut, PlanRow, RowUpdate, VoiceAssignment } from "../../api/types";
+import { MAX_INSTRUCTION_CHARS, NARRATOR_ROW } from "../../api/types";
 import { PlainError } from "../../components/PlainError";
 import { takeVerdict } from "../voices/helpers";
-import { designMinutes, planRows, rowFacts, rowName, rowStatus, rowsToDesign, shareTargets } from "./castPlan";
+import {
+  designMinutes,
+  narrationNote,
+  oneLine,
+  planRows,
+  rowFacts,
+  rowName,
+  rowStatus,
+  rowsToDesign,
+  shareTargets,
+} from "./castPlan";
 
 const NO_SHARE = "__own__";
 
 /** Qwen-first casting in the Review screen: describe the cast (local LLM), edit the plan,
-    design every voice (Qwen3-TTS, GPU), then listen and swap takes per character. */
-export function CastPlanPanel({ bookId, onClose }: { bookId: string; onClose: () => void }) {
+    design every voice (Qwen3-TTS, GPU), then listen and swap takes per character. The plan
+    also holds how lines are spoken on Breeze voices; `assignment` (the book's saved cast, when
+    there is one) tells that section which text the narration uses. */
+export function CastPlanPanel({
+  bookId,
+  onClose,
+  assignment = null,
+}: {
+  bookId: string;
+  onClose: () => void;
+  assignment?: VoiceAssignment | null;
+}) {
   const plan = useCastPlan(bookId);
   const live = useLiveJobs();
   const describe = useDescribeCast(bookId);
@@ -43,6 +64,7 @@ export function CastPlanPanel({ bookId, onClose }: { bookId: string; onClose: ()
         <PlanTable
           bookId={bookId}
           plan={plan.data}
+          assignment={assignment}
           onRedescribe={() => describe.mutate()}
           onDesign={() => design.mutate()}
           busy={describe.isPending || design.isPending}
@@ -80,12 +102,14 @@ function JobLine({ job }: { job: JobOut }) {
 function PlanTable({
   bookId,
   plan,
+  assignment,
   onRedescribe,
   onDesign,
   busy,
 }: {
   bookId: string;
   plan: CastPlan;
+  assignment: VoiceAssignment | null;
   onRedescribe: () => void;
   onDesign: () => void;
   busy: boolean;
@@ -118,6 +142,7 @@ function PlanTable({
         </p>
       ))}
       {update.error && <PlainError className="mt-2" error={update.error} title="couldn't save that change" />}
+      <DeliverySection bookId={bookId} delivery={plan.delivery} assignment={assignment} />
       <div className="mt-3 flex items-center gap-2">
         {todo.length > 0 ? (
           <button className="key" disabled={busy || update.isPending} onClick={onDesign}>
@@ -131,6 +156,107 @@ function PlanTable({
         </button>
         <span className="text-[11px] text-ink-3">your edited rows are kept</span>
       </div>
+    </>
+  );
+}
+
+/** How lines are spoken on Breeze voices: a switch and three instruction texts, saved on
+    blur like the row descriptions. The render reads them from the cast plan. */
+function DeliverySection({
+  bookId,
+  delivery,
+  assignment,
+}: {
+  bookId: string;
+  delivery: Delivery;
+  assignment: VoiceAssignment | null;
+}) {
+  const update = useUpdateDelivery(bookId);
+  return (
+    <div className="mt-3 border-t border-hairline pt-2" role="group" aria-label="how lines are spoken">
+      <div className="flex flex-wrap items-center gap-2">
+        <b>How lines are spoken</b>
+        <span className="text-xs text-ink-3">Breeze voices only; other voices ignore this</span>
+        <label className="ml-auto flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            checked={delivery.enabled}
+            onChange={(e) => update.mutate({ enabled: e.target.checked })}
+          />
+          direct the delivery
+        </label>
+      </div>
+      {delivery.enabled ? (
+        <>
+          <DeliveryText
+            id="delivery-inner"
+            label="Inner voice"
+            hint="narration in a first-person book, and thoughts"
+            value={delivery.inner_voice}
+            onSave={(inner_voice) => update.mutate({ inner_voice })}
+          />
+          <DeliveryText
+            id="delivery-narration"
+            label="Narration"
+            hint="third-person books; leave empty for the voice as it is"
+            value={delivery.narration}
+            onSave={(narration) => update.mutate({ narration })}
+          />
+          <DeliveryText
+            id="delivery-dialogue"
+            label="Dialogue"
+            hint="lines spoken out loud"
+            value={delivery.dialogue}
+            onSave={(dialogue) => update.mutate({ dialogue })}
+          />
+          <p className="m-0 mt-1 text-[11px] text-ink-3">
+            {narrationNote(assignment)} Chapter titles are never directed. A change here records the lines it
+            affects again on the next render.
+          </p>
+        </>
+      ) : (
+        <p className="m-0 mt-1 text-[11px] text-ink-3">
+          Off: every line is spoken in the voice as it is. Turning it on records the Breeze lines again on the next
+          render.
+        </p>
+      )}
+      {update.error && <PlainError className="mt-2" error={update.error} title="couldn't save that change" />}
+    </div>
+  );
+}
+
+function DeliveryText({
+  id,
+  label,
+  hint,
+  value,
+  onSave,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  value: string;
+  onSave: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <>
+      <label className="mt-2 block text-xs" htmlFor={id}>
+        {label} <span className="text-ink-3">({hint})</span>
+      </label>
+      <textarea
+        id={id}
+        rows={2}
+        maxLength={MAX_INSTRUCTION_CHARS}
+        className="mt-1 w-full"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          const text = oneLine(draft);
+          if (text !== value) onSave(text);
+        }}
+      />
     </>
   );
 }

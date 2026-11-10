@@ -1,4 +1,4 @@
-import type { CastPlan, PlanRow } from "../../api/types";
+import type { CastPlan, PlanRow, VoiceAssignment } from "../../api/types";
 import { NARRATOR_ROW } from "../../api/types";
 
 /** Every row in table order: the narrator first, then characters busiest first. */
@@ -42,4 +42,23 @@ export function shareTargets(plan: CastPlan, row: PlanRow): PlanRow[] {
 export function rowFacts(row: PlanRow): string {
   const lines = row.character_id === NARRATOR_ROW ? null : `${row.line_count} line${row.line_count === 1 ? "" : "s"}`;
   return [row.age, row.gender, lines].filter(Boolean).join(" · ");
+}
+
+/** The render's first-person test: the narrator's voice is also a character's voice. */
+export function narratorSharesVoice(assignment: VoiceAssignment): boolean {
+  return Object.values(assignment.assignments).includes(assignment.narrator_voice_id);
+}
+
+/** One plain line for which text this book's narration is spoken with. */
+export function narrationNote(assignment: VoiceAssignment | null): string {
+  if (assignment === null)
+    return "Narration uses the inner-voice text when the narrator shares a character's voice.";
+  return narratorSharesVoice(assignment)
+    ? "The narrator shares a character's voice, so this book's narration uses the inner-voice text."
+    : "The narrator has a voice of its own, so this book's narration uses the narration text.";
+}
+
+/** An instruction as the server stores it: single spaces, no edges. */
+export function oneLine(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
 }

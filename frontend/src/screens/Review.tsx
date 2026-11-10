@@ -819,7 +819,13 @@ export function Review() {
                   )}
                 </div>
               )}
-              {designOpen && bookId && <CastPlanPanel bookId={bookId} onClose={() => setDesignOpen(false)} />}
+              {designOpen && bookId && (
+                <CastPlanPanel
+                  bookId={bookId}
+                  assignment={assignment.data ?? null}
+                  onClose={() => setDesignOpen(false)}
+                />
+              )}
               {castPreview && (
                 <SuggestCastPanel
                   preview={castPreview}

@@ -12,6 +12,7 @@ import type {
   CastStrategy,
   CastDesignedOut,
   CastPlan,
+  DeliveryUpdate,
   ClonedVoiceOut,
   DesignCreate,
   DesignOut,
@@ -880,6 +881,24 @@ export function useUpdateCastPlan(bookId: string) {
         body: JSON.stringify({ updates }),
       }),
     onSuccess: (plan) => qc.setQueryData(["castPlan", bookId], plan),
+  });
+}
+
+/** Save the book's delivery direction (same PUT as the row edits). The instruction is part of
+    a Breeze line's cache key, so the estimate's "already recorded" counts move: refresh it. */
+export function useUpdateDelivery(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (delivery: DeliveryUpdate) =>
+      api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delivery }),
+      }),
+    onSuccess: (plan) => {
+      qc.setQueryData(["castPlan", bookId], plan);
+      qc.invalidateQueries({ queryKey: ["estimate", bookId] });
+    },
   });
 }
 
