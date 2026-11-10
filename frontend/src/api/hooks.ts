@@ -870,10 +870,16 @@ export function useDescribeCast(bookId: string) {
   });
 }
 
+/** Every save of a book's cast plan replies with the whole plan, which replaces the cached
+    one. Saves therefore run one at a time per book (a mutation scope): two replies landing out
+    of order would leave the older snapshot on screen. */
+const planScope = (bookId: string) => ({ id: `castPlan-${bookId}` });
+
 /** Save Review-table edits; the server's plan replaces the cached one. */
 export function useUpdateCastPlan(bookId: string) {
   const qc = useQueryClient();
   return useMutation({
+    scope: planScope(bookId),
     mutationFn: (updates: RowUpdate[]) =>
       api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
         method: "PUT",
@@ -889,6 +895,7 @@ export function useUpdateCastPlan(bookId: string) {
 export function useUpdateDelivery(bookId: string) {
   const qc = useQueryClient();
   return useMutation({
+    scope: planScope(bookId),
     mutationFn: (delivery: DeliveryUpdate) =>
       api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
         method: "PUT",

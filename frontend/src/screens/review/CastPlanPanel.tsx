@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   useCastPlan,
@@ -10,7 +10,15 @@ import {
   useUpdateCastPlan,
   useUpdateDelivery,
 } from "../../api/hooks";
-import type { CastPlan, Delivery, JobOut, PlanRow, RowUpdate, VoiceAssignment } from "../../api/types";
+import type {
+  CastPlan,
+  Delivery,
+  DeliveryUpdate,
+  JobOut,
+  PlanRow,
+  RowUpdate,
+  VoiceAssignment,
+} from "../../api/types";
 import { MAX_INSTRUCTION_CHARS, NARRATOR_ROW } from "../../api/types";
 import { PlainError } from "../../components/PlainError";
 import { takeVerdict } from "../voices/helpers";
@@ -161,7 +169,8 @@ function PlanTable({
 }
 
 /** How lines are spoken on Breeze voices: a switch and three instruction texts, saved on
-    blur like the row descriptions. The render reads them from the cast plan. */
+    blur like the row descriptions. The render reads them from the cast plan. The switch and
+    each text save on their own, so a refused save stays marked on the field it belongs to. */
 function DeliverySection({
   bookId,
   delivery,
@@ -171,7 +180,7 @@ function DeliverySection({
   delivery: Delivery;
   assignment: VoiceAssignment | null;
 }) {
-  const update = useUpdateDelivery(bookId);
+  const toggle = useUpdateDelivery(bookId);
   return (
     <div className="mt-3 border-t border-hairline pt-2" role="group" aria-label="how lines are spoken">
       <div className="flex flex-wrap items-center gap-2">
@@ -181,65 +190,86 @@ function DeliverySection({
           <input
             type="checkbox"
             checked={delivery.enabled}
-            onChange={(e) => update.mutate({ enabled: e.target.checked })}
+            onChange={(e) => toggle.mutate({ enabled: e.target.checked })}
           />
           direct the delivery
         </label>
       </div>
-      {delivery.enabled ? (
-        <>
-          <DeliveryText
-            id="delivery-inner"
-            label="Inner voice"
-            hint="narration in a first-person book, and thoughts"
-            value={delivery.inner_voice}
-            onSave={(inner_voice) => update.mutate({ inner_voice })}
-          />
-          <DeliveryText
-            id="delivery-narration"
-            label="Narration"
-            hint="third-person books; leave empty for the voice as it is"
-            value={delivery.narration}
-            onSave={(narration) => update.mutate({ narration })}
-          />
-          <DeliveryText
-            id="delivery-dialogue"
-            label="Dialogue"
-            hint="lines spoken out loud"
-            value={delivery.dialogue}
-            onSave={(dialogue) => update.mutate({ dialogue })}
-          />
-          <p className="m-0 mt-1 text-[11px] text-ink-3">
-            {narrationNote(assignment)} Chapter titles are never directed. A change here records the lines it
-            affects again on the next render.
-          </p>
-        </>
-      ) : (
+      {toggle.error && <PlainError className="mt-2" error={toggle.error} title="couldn't switch it" />}
+      {!delivery.enabled && (
         <p className="m-0 mt-1 text-[11px] text-ink-3">
-          Off: every line is spoken in the voice as it is. Turning it on records the Breeze lines again on the next
-          render.
+          Off: every line is spoken in the voice as it is. The texts below are kept for when it is on again.
         </p>
       )}
-      {update.error && <PlainError className="mt-2" error={update.error} title="couldn't save that change" />}
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-inner"
+        label="Inner voice"
+        hint="narration in a first-person book, and thoughts"
+        value={delivery.inner_voice}
+        toUpdate={(inner_voice) => ({ inner_voice })}
+      />
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-narration"
+        label="Narration"
+        hint="third-person books; leave empty for the voice as it is"
+        value={delivery.narration}
+        toUpdate={(narration) => ({ narration })}
+      />
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-dialogue"
+        label="Dialogue"
+        hint="lines spoken out loud"
+        value={delivery.dialogue}
+        toUpdate={(dialogue) => ({ dialogue })}
+      />
+      <p className="m-0 mt-1 text-[11px] text-ink-3">
+        {narrationNote(assignment)} Chapter titles are never directed. A change here records the lines it affects
+        again on the next render.
+      </p>
     </div>
   );
 }
 
 function DeliveryText({
+  bookId,
   id,
   label,
   hint,
   value,
-  onSave,
+  toUpdate,
 }: {
+  bookId: string;
   id: string;
   label: string;
   hint: string;
-  value: string;
-  onSave: (text: string) => void;
+  value: string; // the saved text
+  toUpdate: (text: string) => DeliveryUpdate;
 }) {
+  const update = useUpdateDelivery(bookId);
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
+  // A reply (this field's or another's) replaces the box only while the box still shows what
+  // was saved or what was sent; anything typed since stays, and saves on the next blur.
+  const shown = useRef(draft);
+  shown.current = draft;
+  const saved = useRef(value);
+  const sent = useRef<string | null>(null);
+  useEffect(() => {
+    const typed = oneLine(shown.current);
+    if (typed === saved.current || typed === sent.current) setDraft(value);
+    saved.current = value;
+  }, [value]);
+
+  const text = oneLine(draft);
+  const save = () => {
+    if (text === value) return;
+    sent.current = text;
+    update.mutate(toUpdate(text));
+  };
+  // a refused save stays on show until this text is saved (or typed back to the saved one)
+  const refused = update.error !== null && !update.isPending && text !== value;
   return (
     <>
       <label className="mt-2 block text-xs" htmlFor={id}>
@@ -252,11 +282,16 @@ function DeliveryText({
         className="mt-1 w-full"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => {
-          const text = oneLine(draft);
-          if (text !== value) onSave(text);
-        }}
+        onBlur={save}
       />
+      {refused && (
+        <div className="mt-1" role="group" aria-label={`${label} text not saved`}>
+          <PlainError error={update.error} title="not saved" />
+          <button className="link mt-1 text-xs" onClick={save}>
+            save the {label.toLowerCase()} text again
+          </button>
+        </div>
+      )}
     </>
   );
 }
