@@ -296,10 +296,25 @@ def test_breeze_takes_a_typed_transcript_when_whisper_fails(tmp_path):
     def broken(_path):
         raise ValidationError("no model")
 
+    import numpy as np
+    import soundfile as sf
+
+    def clip(name: str, seconds: float):
+        sf.write(tmp_path / name, np.zeros(int(seconds * 8000), dtype=np.float32), 8000)
+        return tmp_path / name
+
     chosen = choose_transcript(
-        tmp_path / "c.wav", provided=" My  words. ", transcribe=broken, engine="breeze"
+        clip("c.wav", 6.0), provided=" My  words. ", transcribe=broken, engine="breeze"
     )
     assert chosen.text == "My words."
+    # whisper also measures the clip: without it the length rule is still applied for Breeze
+    with pytest.raises(CloneRefused, match="the clip is 40 s"):
+        choose_transcript(clip("long.wav", 40.0), provided="x", transcribe=broken, engine="breeze")
+    (tmp_path / "junk.wav").write_bytes(b"not audio at all")
+    with pytest.raises(CloneRefused, match="could not be read as audio"):
+        choose_transcript(tmp_path / "junk.wav", provided="x", transcribe=broken, engine="breeze")
+    # Qwen is unchanged: a typed transcript is taken on trust when whisper fails
+    assert choose_transcript(tmp_path / "junk.wav", provided="x", transcribe=broken).text == "x"
     with pytest.raises(CloneRefused, match="couldn't transcribe"):
         choose_transcript(tmp_path / "c.wav", provided=None, transcribe=broken, engine="breeze")
 

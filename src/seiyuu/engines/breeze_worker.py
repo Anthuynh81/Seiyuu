@@ -242,7 +242,12 @@ def split_long_text(text: str, limit: int = SPLIT_OVER_CHARS) -> list[str]:
         i += 1
         while i < len(units):
             joined = f"{current} {units[i]}"
-            if len(joined) > limit or abs(len(joined) - share) > abs(len(current) - share):
+            if len(joined) > limit:
+                break
+            # Stop at the even share only when the rest still fits the slots that are left:
+            # stopping early must never cost an extra piece (and an orphan to go with it).
+            nearer = abs(len(joined) - share) > abs(len(current) - share)
+            if nearer and len(_fill(units[i:], limit)) <= slots - 1:
                 break
             current = joined
             i += 1

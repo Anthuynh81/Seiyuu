@@ -801,7 +801,20 @@ def audition(
         # .part.wav, not .wav.part: libsndfile picks the container from the LAST suffix
         tmp = out_path.with_name("audition.part.wav")
         audio.save(tmp)
-        os.replace(tmp, out_path)
+        with request.app.state.voices_mutex:
+            # The voice may have moved to another engine while this take was being spoken (the
+            # switch waits for renders, not auditions). Its card must never play the old
+            # engine's sample as the new engine's: drop the take instead of publishing it.
+            current = _load_or_404(library, voice_id)
+            if current.engine != meta.engine:
+                tmp.unlink(missing_ok=True)
+                raise ApiError(
+                    409,
+                    "conflict",
+                    f"{voice_id!r} moved from {meta.engine} to {current.engine} while this "
+                    "sample was being made; audition it again",
+                )
+            os.replace(tmp, out_path)
         return AuditionOut(
             voice_id=voice_id,
             duration_seconds=round(audio.duration_seconds, 3),

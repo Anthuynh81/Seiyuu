@@ -63,6 +63,17 @@ def default_clone_engine(cfg: Any) -> str:
     return BREEZE_ENGINE if breeze_ready(cfg) else QWEN_ENGINE
 
 
+def _clip_seconds(reference: Path) -> float | None:
+    """The clip's duration from its header (no model); None when it is not readable audio."""
+    import soundfile as sf
+
+    try:
+        info = sf.info(str(reference))
+    except (RuntimeError, OSError):  # libsndfile: not audio, or not there
+        return None
+    return info.frames / float(info.samplerate) if info.samplerate else None
+
+
 def _without(engine: str, reason: str, fallback: str) -> CloneTranscript:
     """No transcript to bind: x-vector for Qwen (``fallback`` says so), a refusal for Breeze."""
     if engine in TRANSCRIPT_REQUIRED:
@@ -89,6 +100,16 @@ def choose_transcript(
     try:
         heard, seconds = transcribe(reference)
     except ValidationError as exc:
+        if typed and engine in TRANSCRIPT_REQUIRED:
+            # Whisper also measures the clip. Breeze has no fallback mode, so the length rule
+            # is checked another way before a typed transcript is bound to it.
+            seconds = _clip_seconds(reference)
+            if seconds is None:
+                return _without(engine, f"the clip could not be read as audio ({exc})", alone)
+            if seconds > ICL_MAX_SECONDS:
+                return _without(
+                    engine, f"the clip is {seconds:.0f} s, over {ICL_MAX_SECONDS:.0f} s", alone
+                )
         if typed:
             return CloneTranscript(typed, "cloned from the clip and your transcript")
         return _without(engine, f"couldn't transcribe the clip ({exc})", alone)

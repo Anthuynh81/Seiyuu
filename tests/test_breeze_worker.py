@@ -132,6 +132,33 @@ def test_a_long_line_is_cut_at_sentence_ends_into_even_pieces():
     assert max(map(len, pieces)) - min(map(len, pieces)) <= len(sentence) + 1  # even
 
 
+def test_uneven_sentences_never_cost_an_extra_piece():
+    # 400 + 100 + 700 + 100 characters: three pieces fit. Evening the lengths must not stop the
+    # first piece at 400 and leave two 100-character sentences to be spoken alone.
+    def sentence(n: int) -> str:
+        return ("Word " + "word " * (n // 5))[: n - 1].rstrip().ljust(n - 1, "s") + "."
+
+    lengths = (400, 100, 700, 100)
+    units = [sentence(n) for n in lengths]
+    text = " ".join(units)
+    pieces = w.split_long_text(text)
+    assert _same_words(text, pieces)
+    assert [len(p) for p in pieces] == [501, 700, 100]
+    assert len(pieces) == len(w._fill(units, w.SPLIT_OVER_CHARS))  # the fewest that fit
+
+    import random
+
+    rng = random.Random(11)
+    for _ in range(300):
+        units = [sentence(rng.randint(20, 400)) for _ in range(rng.randint(4, 40))]
+        text = " ".join(units)
+        pieces = w.split_long_text(text)
+        assert _same_words(text, pieces)
+        assert all(len(p) <= w.SPLIT_OVER_CHARS for p in pieces)
+        if len(text) > w.SPLIT_OVER_CHARS:
+            assert len(pieces) == len(w._fill(units, w.SPLIT_OVER_CHARS))
+
+
 def test_a_quoted_exclamation_and_an_initial_do_not_end_the_sentence():
     text = (
         "“Stop!” he cried, and J. R. Hartley of the U.S. Army stopped. "

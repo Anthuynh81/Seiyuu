@@ -136,8 +136,47 @@ def test_a_voice_with_no_transcript_is_transcribed_for_breeze(tmp_path):
     path = lib.reference_path("kim_v").with_name("reference.txt")
     assert path.read_text(encoding="utf-8") == "Call me Kim.\n"
     digest = reference_text_digest(SHA, "Call me Kim.")
-    assert after.settings == {"breeze": {REF_TEXT_DIGEST_KEY: digest}}  # nothing under Qwen
+    # bound for Breeze only; the engine it left keeps an (empty) block marking it was there
+    assert after.settings == {"chatterbox": {}, "breeze": {REF_TEXT_DIGEST_KEY: digest}}
     assert "transcribed" in done.note and done.books == []
+
+
+def test_a_sound_alone_qwen_voice_comes_back_to_exactly_that(tmp_path):
+    # A Qwen clone that bound no transcript (x-vector mode) visits Breeze, which needs one. On
+    # the way back Qwen must not pick the new transcript up: that would change its cache keys
+    # and strand every line already recorded on Qwen.
+    lib = VoiceLibrary(tmp_path / "voices")
+    original = _key(_clone(lib, bound=False))
+    assert lib.load("kim_v").engine_settings() == {}
+    _switch(lib, tmp_path, "kim_v", "breeze", transcribe=_heard("Call me Kim."))
+    assert REF_TEXT_DIGEST_KEY in lib.load("kim_v").engine_settings()  # Breeze has its binding
+    _switch(lib, tmp_path, "kim_v", "qwen3tts")
+    back = lib.load("kim_v")
+    assert back.engine_settings() == {} and _key(back).key_hash == original.key_hash
+    # and Breeze again reuses the transcript it was given: no second whisper pass
+    _switch(lib, tmp_path, "kim_v", "breeze")
+    assert REF_TEXT_DIGEST_KEY in lib.load("kim_v").engine_settings()
+
+
+def test_a_voice_new_to_qwen_gets_the_closer_transcript_mode(tmp_path):
+    lib = VoiceLibrary(tmp_path / "voices")
+    _clone(lib, engine="chatterbox", bound=False)
+    _switch(lib, tmp_path, "kim_v", "breeze", transcribe=_heard("Call me Kim."))
+    _switch(lib, tmp_path, "kim_v", "qwen3tts")  # never on Qwen before: nothing to preserve
+    assert REF_TEXT_DIGEST_KEY in lib.load("kim_v").engine_settings()
+
+
+def test_an_unreadable_casting_file_stops_the_switch_before_anything_changes(tmp_path):
+    lib = VoiceLibrary(tmp_path / "voices")
+    before = _clone(lib)
+    (lib.dir_for("kim_v") / "audition.wav").write_bytes(b"sample")
+    broken = tmp_path / "output" / "some-book"
+    broken.mkdir(parents=True)
+    (broken / "assignments.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(ServiceError, match="cannot verify voice references"):
+        _switch(lib, tmp_path, "kim_v", "breeze")
+    assert lib.load("kim_v") == before  # not half-switched
+    assert (lib.dir_for("kim_v") / "audition.wav").exists()
 
 
 @pytest.mark.parametrize("heard", [("words", 45.0), ("  ", 8.0)])
@@ -157,7 +196,7 @@ def test_engines_that_take_no_transcript_only_change_the_engine(tmp_path):
     after = lib.load("kim_v")
     assert after.engine == "chatterbox" and after.settings == {
         "breeze": {REF_TEXT_DIGEST_KEY: DIGEST}
-    }
+    }  # nothing is written for an engine that takes no transcript
     assert after.engine_settings() == {}
 
 
@@ -350,3 +389,50 @@ def test_meta_json_keeps_its_shape(tmp_path):
     before = set(json.loads(lib.meta_path(_clone(lib).voice_id).read_text("utf-8")))
     _switch(lib, tmp_path, "kim_v", "breeze")
     assert set(json.loads(lib.meta_path("kim_v").read_text("utf-8"))) == before
+
+
+def test_cli_book_switch_leaves_a_cloud_clone_alone_without_failing(tmp_path, installed):
+    lib = VoiceLibrary(tmp_path / "voices")
+    _clone(lib)
+    _clone(lib, voice_id="cloud_v", engine="elevenlabs", bound=False)
+    cast = VoiceAssignment(
+        book_id="ghost", narrator_voice_id="kim_v", assignments={"kim": "kim_v", "eve": "cloud_v"}
+    )
+    save_assignment(cast, tmp_path / "output")
+    result = _cli(tmp_path, "breeze", "--book", "ghost")
+    assert result.exit_code == 0, result.output
+    assert "cloud_v: left on elevenlabs" in result.output
+    assert "1 voice(s) now clone on breeze" in result.output
+    assert lib.load("cloud_v").engine == "elevenlabs"
+    again = _cli(tmp_path, "breeze", "--book", "ghost")  # nothing left to do: still not a failure
+    assert again.exit_code == 0 and "already uses breeze" in again.output
+
+
+def test_an_audition_that_finishes_after_a_switch_is_not_published(client, tmp_path, monkeypatch):
+    """The switch waits for renders, not auditions. A sample still being spoken on the old
+    engine when the voice moves must not land on the card as the new engine's sample."""
+    from fake_engine import FakeEngine
+
+    lib = VoiceLibrary(tmp_path / "voices")
+
+    class SwitchesMidLine(FakeEngine):
+        def _synthesize_native(self, text, voice, settings):
+            if lib.load("kim_v").engine == "qwen3tts":  # the user clicks "use Breeze" meanwhile
+                switch_engine(lib, "kim_v", "breeze", cfg=object(), output_dir=tmp_path / "output")
+            return super()._synthesize_native(text, voice, settings)
+
+    engine = SwitchesMidLine()
+    monkeypatch.setattr("seiyuu.api.registry.get_engine", lambda eid, **kw: engine)
+    monkeypatch.setattr("seiyuu.api.routes.voices.get_engine_class", lambda eid: FakeEngine)
+    monkeypatch.setattr("seiyuu.api.routes.voices.weights_cached", lambda eid: True)
+
+    stale = client.post("/api/voices/kim_v/audition", json={})
+    assert stale.status_code == 409, stale.text
+    assert "audition it again" in stale.json()["error"]["message"]
+    voice_dir = lib.dir_for("kim_v")
+    assert not (voice_dir / "audition.wav").exists()
+    assert not (voice_dir / "audition.part.wav").exists()  # the dropped take leaves nothing
+
+    fresh = client.post("/api/voices/kim_v/audition", json={})  # now on Breeze: published
+    assert fresh.status_code == 200, fresh.text
+    assert (voice_dir / "audition.wav").exists()

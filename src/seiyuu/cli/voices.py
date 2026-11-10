@@ -565,8 +565,13 @@ def voice_use_engine(
                 meta = lib.load(voice_id)
             except VoiceLibraryError as exc:
                 raise click.ClickException(str(exc)) from exc
-            if meta.kind is VoiceKind.CLONED and meta.engine != engine:
-                targets.append(voice_id)
+            if meta.kind is not VoiceKind.CLONED or meta.engine == engine:
+                continue
+            if meta.engine not in switchable_engines():
+                # a clone kept in the cloud: not a failure, just not something that can move
+                click.echo(f"  {voice_id}: left on {meta.engine} (not a local cloning engine)")
+                continue
+            targets.append(voice_id)
         if not targets:
             click.echo(f"every cloned voice of {book_id} already uses {engine}")
             return

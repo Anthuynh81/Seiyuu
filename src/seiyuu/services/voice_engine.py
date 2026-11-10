@@ -12,10 +12,12 @@ What makes this safe:
 - nothing is deleted: cached audio and manifests stay valid for the engine that made them.
 
 What a switch does to ``meta.json``: ``engine`` changes, and the transcript binding
-(``ref_text_digest``) is COPIED under the new engine's settings when that engine clones from a
-transcript. Copied, not moved: the old engine's block stays, so a switch back builds the old
-cache keys again. Sampler tunables are never copied (they would change the new engine's keys
-for nothing).
+(``ref_text_digest``) is COPIED under the new engine's settings when that engine needs it or
+has never held this voice. Copied, not moved: the engine being left keeps its block exactly as
+it was (an empty one if it had no settings), so a switch back builds the old cache keys again.
+That holds for a Qwen voice that cloned from the sound alone too: it returns to that mode, not
+to a transcript mode it never used. Sampler tunables are never copied (they would change the
+new engine's keys for nothing).
 
 Breeze cannot clone without a transcript. A voice that binds none (a Chatterbox or IndexTTS-2
 clone, a Qwen clone of a clip over 30 s) gets one from whisper on the CPU, or the switch is
@@ -164,8 +166,15 @@ def switch_engine(
     except VoiceLibraryError as exc:
         raise ServiceError(str(exc)) from exc
 
+    # Read-only, and it fails closed on an unreadable casting file: before anything is written,
+    # so a failure here really means nothing changed.
+    books = sorted({ref.book_id for ref in voice_references(voice_id, output_dir)})
     reference = library.reference_path(voice_id)
+    previous = meta.engine
     settings = {engine: dict(block) for engine, block in meta.settings.items()}
+    # The engine being left keeps a block, even an empty one: it records "this voice has been
+    # on this engine, with exactly these settings", which is what a switch back must restore.
+    settings.setdefault(previous, {})
     how = ""
     if target in TRANSCRIPT_ENGINES:
         digest = _bound_digest(meta, reference)
@@ -184,15 +193,20 @@ def switch_engine(
             atomic_write_text(reference.with_name(TRANSCRIPT_NAME), chosen.text + "\n")
             digest = reference_text_digest(_reference_sha(meta, reference), chosen.text)
             how = " Its clip was transcribed for this (check reference.txt if a line sounds off)."
-        if digest is not None:
+        # Bind it where the engine cannot work without it, and on an engine the voice has
+        # never been on. An engine it HAS been on keeps its block as it was: a Qwen voice that
+        # cloned from the sound alone comes back to exactly that (and to its recorded lines),
+        # not to a new transcript mode with new cache keys.
+        if digest is not None and (target in TRANSCRIPT_REQUIRED or target not in settings):
             settings[target] = {**settings.get(target, {}), REF_TEXT_DIGEST_KEY: digest}
-    previous = meta.engine
     meta.engine = target
     meta.settings = settings
     library.save(meta)
     # the saved sample was spoken by the old engine: drop it so the card never plays it as new
-    (library.dir_for(voice_id) / AUDITION_NAME).unlink(missing_ok=True)
-    books = sorted({ref.book_id for ref in voice_references(voice_id, output_dir)})
+    try:
+        (library.dir_for(voice_id) / AUDITION_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass  # open in a player (Windows): the switch itself is done and must not report failure
     if books:
         again = f" Record {len(books)} book(s) again to hear it: {', '.join(books)}."
     else:
