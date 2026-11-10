@@ -35,6 +35,7 @@ from seiyuu.services.clone_transcript import default_clone_engine
 from seiyuu.services.common import ServiceError
 from seiyuu.services.voice_design import (
     DESIGN_ENGINE,
+    SOURCES,
     design_dir,
     keep_take,
     load_record,
@@ -119,10 +120,19 @@ def _design_row(
 ) -> None:
     """Design (or finish designing) one row and keep its recommended take; mutates ``row``.
     ``keep_engine`` is the engine the kept voice clones on (the default cloning engine)."""
-    if row.design_id is None or not design_dir(data_dir, row.design_id).is_dir():
-        text = normalize_text(design_text(row), profile=DESIGN_ENGINE)
+    designer = getattr(engine, "engine_id", DESIGN_ENGINE)
+    unfinished = row.design_id is not None and design_dir(data_dir, row.design_id).is_dir()
+    if unfinished and load_record(design_dir(data_dir, row.design_id)).designer != designer:
+        unfinished = False  # begun by the other designer: start over rather than mix takes
+    if not unfinished:
+        text = normalize_text(design_text(row), profile=designer)
         record = start_design(
-            data_dir, name=row.name, description=design_prompt(row), text=text, takes=row.takes
+            data_dir,
+            name=row.name,
+            description=design_prompt(row),
+            text=text,
+            takes=row.takes,
+            designer=designer,
         )
         row.design_id = record.design_id
     directory = design_dir(data_dir, row.design_id)
@@ -181,8 +191,14 @@ def run_design_cast(
     gpu: Any,
     progress: Callable[[str], None] = lambda _m: None,
     check_cancel: Callable[[], None] = lambda: None,
+    redesign: bool = False,
 ) -> tuple[CastPlan, VoiceAssignment]:
-    """Design every row that needs a voice, then write the book's assignment. Resumable."""
+    """Design every row that needs a voice, then write the book's assignment. Resumable.
+
+    ``redesign`` also designs again every row whose voice was NOT made by this designer (a cast
+    designed on Qwen, moved to Breeze): the whole cast then comes from one engine. Voices this
+    designer already made are kept, so a rerun after a cancel picks up where it stopped. The
+    replaced voices stay in the library; only the book's casting moves."""
     from seiyuu.services.attribution import load_report
 
     plan = load_plan(cfg.output_dir, book_id)
@@ -190,6 +206,16 @@ def run_design_cast(
         raise ServiceError(f"no cast plan for {book_id!r}; describe the cast first")
     library = VoiceLibrary(cfg.voices_dir)
     keep_engine = default_clone_engine(cfg)  # Breeze where it is set up, else Qwen
+    if redesign:
+        mine = SOURCES.get(getattr(engine, "engine_id", DESIGN_ENGINE))
+        for row in designing_rows(plan):
+            made_here = (
+                row.voice_id is not None
+                and library.meta_path(row.voice_id).is_file()
+                and library.load(row.voice_id).source == mine
+            )
+            if not made_here:
+                row.design_id, row.voice_id = None, None
     todo = [
         r
         for r in designing_rows(plan)

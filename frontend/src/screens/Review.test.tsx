@@ -512,7 +512,7 @@ describe("Review", () => {
     expect(await screen.findByText("who says this line?")).toHaveAttribute("title", "ch001_b0002 [0]");
   });
 
-  it("Design voices (Qwen) opens the cast-plan panel and closes a Kokoro preview", async () => {
+  it("Design voices opens the cast-plan panel and closes a Kokoro preview", async () => {
     const user = userEvent.setup();
     const server = setupReview();
     server
@@ -527,11 +527,11 @@ describe("Review", () => {
 
     await user.click(await screen.findByRole("button", { name: "Quick draft (Kokoro)" }));
     expect(await screen.findByText(/1 new/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Design voices (Qwen)" }));
+    await user.click(screen.getByRole("button", { name: "Design voices" }));
     const panel = await screen.findByRole("region", { name: "design voices" });
     expect(within(panel).getByRole("button", { name: "Describe the cast" })).toBeInTheDocument();
     expect(screen.queryByText(/1 new/)).not.toBeInTheDocument(); // one way of casting at a time
-    expect(screen.getByRole("button", { name: "Design voices (Qwen)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Design voices" })).toBeDisabled();
     await user.click(within(panel).getByRole("button", { name: "close" }));
     expect(screen.queryByRole("region", { name: "design voices" })).not.toBeInTheDocument();
   });

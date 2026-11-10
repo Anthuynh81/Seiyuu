@@ -98,7 +98,7 @@ export function DesignDialog({ onClose }: { onClose: () => void }) {
         options={[1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `${n} take${n === 1 ? "" : "s"}` }))}
       />
       <div className="tag mt-2 normal-case tracking-[0.02em] text-ink-3">
-        uses the graphics card: about a minute to load Qwen3-TTS, then a few seconds per take
+        uses the graphics card: about a minute to load the voice model, then a few seconds per take
       </div>
       {start.error && <PlainError className="mt-3" error={start.error} title="couldn't start the design" />}
     </TalkDialog>

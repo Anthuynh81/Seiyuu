@@ -363,3 +363,40 @@ def test_designed_voices_clone_on_breeze_where_it_is_set_up(described, monkeypat
     assert assignment.narrator_voice_id == plan.narrator.voice_id
     kim = lib.load(next(r for r in plan.rows if r.character_id == "kim").voice_id)
     assert list(kim.settings) == ["breeze"] and kim.source == "qwen_design"
+
+
+def test_redesign_moves_a_qwen_designed_cast_to_the_breeze_designer(described, monkeypatch):
+    """A cast designed on Qwen is designed again by Breeze in one run; the old voices stay in the
+    library, voices Breeze already made are kept, and a rerun has nothing left to do."""
+    from test_voice_design import BreezeDesigner
+
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    cfg = described
+    lib = VoiceLibrary(cfg.voices_dir)
+    old_plan, old_cast = run_design_cast(
+        cfg, BOOK, engine=Designer(), validator=Checker(), gpu=Gpu()
+    )
+    old = {r.character_id: r.voice_id for r in [old_plan.narrator, *old_plan.rows]}
+    assert {lib.load(v).source for v in old.values() if v} == {"qwen_design"}
+
+    # without --redesign nothing is designed: every row already has a voice
+    idle = BreezeDesigner()
+    run_design_cast(cfg, BOOK, engine=idle, validator=Checker(), gpu=Gpu())
+    assert idle.designs == []
+
+    breeze = BreezeDesigner()
+    plan, cast = run_design_cast(
+        cfg, BOOK, engine=breeze, validator=Checker(), gpu=Gpu(), redesign=True
+    )
+    assert len(breeze.designs) == 5  # narrator 2 + kim 2 + staff 1, as the first time
+    new = {r.character_id: r.voice_id for r in [plan.narrator, *plan.rows]}
+    designed = [r for r in [plan.narrator, *plan.rows] if r.same_as is None]
+    assert all(new[r.character_id] != old[r.character_id] for r in designed)
+    assert {lib.load(r.voice_id).source for r in designed} == {"breeze_design"}
+    assert {lib.load(r.voice_id).engine for r in designed} == {"breeze"}
+    assert cast.narrator_voice_id == plan.narrator.voice_id != old_cast.narrator_voice_id
+    assert all(lib.meta_path(v).is_file() for v in old.values() if v)  # nothing was deleted
+
+    again = BreezeDesigner()
+    run_design_cast(cfg, BOOK, engine=again, validator=Checker(), gpu=Gpu(), redesign=True)
+    assert again.designs == []  # its own voices are kept: resumable, never a loop

@@ -123,12 +123,12 @@ def build_handlers(
             ctx.progress(f"{params.engine_id} resident")
 
     def design(ctx: JobContext) -> None:
-        from seiyuu.services.voice_design import DESIGN_ENGINE, design_dir, run_design
+        from seiyuu.services.voice_design import design_dir, load_record, run_design
         from seiyuu.validate import Validator
 
         params = DesignParams.model_validate(ctx.job.params or {})
         directory = design_dir(cfg.data_dir, params.design_id)
-        engine = registry.get(DESIGN_ENGINE)
+        engine = registry.get(load_record(directory).designer)  # the engine it was started on
         # the speech check runs on the CPU, like read-along: never a second model on the GPU
         validator = Validator(
             model_size=cfg.validation_model_size,
@@ -150,12 +150,12 @@ def build_handlers(
 
     def design_cast(ctx: JobContext) -> None:
         from seiyuu.services.cast_design import run_design_cast
-        from seiyuu.services.voice_design import DESIGN_ENGINE
+        from seiyuu.services.voice_design import design_engine
         from seiyuu.validate import Validator
 
         validator = Validator(
             model_size=cfg.validation_model_size,
-            device="cpu",  # the speech check never takes the GPU from Qwen
+            device="cpu",  # the speech check never takes the GPU from the designer
             compute_type="int8",
             min_ratio=cfg.validation_min_ratio,
         )
@@ -163,7 +163,7 @@ def build_handlers(
             run_design_cast(
                 cfg,
                 ctx.job.book_id,
-                engine=registry.get(DESIGN_ENGINE),
+                engine=registry.get(design_engine(cfg)),
                 validator=validator,
                 gpu=get_gpu_manager(),
                 progress=ctx.progress,

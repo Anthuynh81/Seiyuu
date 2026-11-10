@@ -4,6 +4,7 @@ No GPU and no whisper: the designer engine and the speech check are fakes. The G
 the real one (it only sees a fake engine), so the acquire/free discipline is exercised.
 """
 
+import json
 import time
 from contextlib import contextmanager
 
@@ -21,6 +22,7 @@ from seiyuu.repository import JobState
 from seiyuu.services import ServiceError
 from seiyuu.services.voice_design import (
     CONSENT_TEXT,
+    MAX_TAKES,
     SOURCE,
     design_dir,
     keep_take,
@@ -345,3 +347,88 @@ def test_cli_design_keep_none_only_lists(tmp_path, monkeypatch):
     get_settings.cache_clear()
     assert result.exit_code == 0, result.output
     assert not voices.exists() or VoiceLibrary(voices).list_voices() == []
+
+
+# -- which engine designs, and a pick that needs no listening ----------------------------------
+
+
+class BreezeDesigner(Designer):
+    engine_id = "breeze"
+
+
+def test_the_designer_is_the_default_cloning_engine(monkeypatch):
+    from seiyuu.services.voice_design import design_engine
+
+    assert design_engine(object()) == "qwen3tts"  # Breeze not set up (the suite's baseline)
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    assert design_engine(object()) == "breeze"
+
+
+def test_a_design_remembers_its_designer_and_refuses_another(tmp_path):
+    record = start_design(
+        tmp_path / "data", name="Janitor", description="gruff", text=TEXT, takes=2,
+        designer="breeze",
+    )  # fmt: skip
+    directory = design_dir(tmp_path / "data", record.design_id)
+    assert load_record(directory).designer == "breeze"
+    with pytest.raises(ServiceError, match="was started with breeze"):
+        run_design(directory, engine=Designer(), validator=Checker(), gpu=Gpu())
+    gpu = Gpu()
+    done = run_design(directory, engine=BreezeDesigner(), validator=Checker(), gpu=gpu)
+    assert len(done.takes) == 2 and gpu.acquired == ["breeze:design", "breeze:design"]
+    with pytest.raises(ServiceError, match="cannot design voices"):
+        start_design(tmp_path / "data", name="x", description="y", text=TEXT, takes=1,
+                     designer="kokoro")  # fmt: skip
+
+
+def test_an_older_design_record_is_a_qwen_design(tmp_path):
+    record, directory = _start(tmp_path)
+    raw = json.loads((directory / "design.json").read_text(encoding="utf-8"))
+    del raw["designer"]  # written before the designer was a choice
+    (directory / "design.json").write_text(json.dumps(raw), encoding="utf-8")
+    assert load_record(directory).designer == "qwen3tts"
+
+
+def test_more_takes_are_made_until_one_passes_the_speech_check(tmp_path):
+    # asked for 2, both flagged: a third is made, it passes, and it is the one recommended
+    _record, directory = _start(tmp_path, takes=2)
+    engine = Designer()
+    messages: list[str] = []
+    done = run_design(
+        directory, engine=engine, validator=Checker((False, False, True)), gpu=Gpu(),
+        progress=messages.append,
+    )  # fmt: skip
+    assert [t.take for t in done.takes] == [1, 2, 3] and [t.ok for t in done.takes][-1]
+    assert done.recommended == 3 and len(engine.designs) == 3
+    assert "no take passed the speech check yet: designing take 3" in messages
+    # a rerun changes nothing: a take that can be kept already exists
+    again = Designer()
+    assert run_design(directory, engine=again, validator=Checker(), gpu=Gpu()).recommended == 3
+    assert again.designs == []
+
+
+def test_extra_takes_stop_at_the_limit_when_none_ever_passes(tmp_path):
+    _record, directory = _start(tmp_path, takes=1)
+    engine = Designer()
+    done = run_design(directory, engine=engine, validator=Checker((False,)), gpu=Gpu())
+    assert len(done.takes) == MAX_TAKES == len(engine.designs)
+    assert done.recommended is not None and not any(t.ok for t in done.takes)
+
+
+def test_a_passing_take_means_no_extra_takes(tmp_path):
+    _record, directory = _start(tmp_path, takes=2)
+    engine = Designer()
+    done = run_design(directory, engine=engine, validator=Checker((False, True)), gpu=Gpu())
+    assert len(done.takes) == 2 and done.recommended == 2
+
+
+def test_a_breeze_designed_voice_says_so(tmp_path):
+    record = start_design(
+        tmp_path / "data", name="Janitor", description="gruff", text=TEXT, takes=1,
+        designer="breeze",
+    )  # fmt: skip
+    directory = design_dir(tmp_path / "data", record.design_id)
+    run_design(directory, engine=BreezeDesigner(), validator=Checker(), gpu=Gpu())
+    meta = keep_take(directory, 1, library=VoiceLibrary(tmp_path / "voices"), engine="breeze")
+    assert meta.source == "breeze_design" and meta.engine == "breeze"
+    assert meta.consent.attested_by == "Seiyuu voice design (Breeze TTS 2)"

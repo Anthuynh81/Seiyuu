@@ -30,9 +30,9 @@ from seiyuu.services import ServiceError
 from seiyuu.services.clone_transcript import default_clone_engine
 from seiyuu.services.voice_design import (
     DEFAULT_SAMPLE_TEXT,
-    DESIGN_ENGINE,
     DesignRecord,
     design_dir,
+    design_engine,
     keep_take,
     load_record,
     start_design,
@@ -90,7 +90,8 @@ def create_design(
 ) -> DesignStartedOut:
     """Record the description and queue the takes. The line is normalized exactly as a render
     would speak it, so a take that passes the speech check said precisely the text it binds."""
-    text = normalize_text(body.sample_text or DEFAULT_SAMPLE_TEXT, profile=DESIGN_ENGINE)
+    designer = design_engine(cfg)  # Breeze where it is set up, else Qwen
+    text = normalize_text(body.sample_text or DEFAULT_SAMPLE_TEXT, profile=designer)
     try:
         record = start_design(
             cfg.data_dir,
@@ -98,6 +99,7 @@ def create_design(
             description=body.description,
             text=text,
             takes=body.takes,
+            designer=designer,
         )
     except ServiceError as exc:
         raise ApiError(422, "invalid", str(exc)) from exc

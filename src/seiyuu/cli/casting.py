@@ -504,23 +504,35 @@ def describe_cast(book_id: str) -> None:
 
 @main.command("design-cast")
 @click.argument("book_id")
-def design_cast(book_id: str) -> None:
+@click.option(
+    "--redesign",
+    is_flag=True,
+    help="Also design again every voice that another engine designed (a cast made on Qwen "
+    "after moving to Breeze), so the whole cast comes from one engine.",
+)
+def design_cast(book_id: str, redesign: bool) -> None:
     """Design every character's voice from the cast plan and assign them (step 2 of 2).
 
-    Runs `seiyuu describe-cast` output through Qwen3-TTS VoiceDesign on the GPU: each row that
-    designs its own voice gets its takes (2, or 1 for small parts), the recommended take becomes
-    a library voice, and the book's assignment is updated. "Same voice as" rows share their
-    target's voice; "keep current voice" rows are left alone. Resumable: rerun to continue.
+    Runs `seiyuu describe-cast` output through voice design on the GPU (Breeze TTS 2 where it
+    is set up, otherwise Qwen3-TTS VoiceDesign): each row that designs its own voice gets its
+    takes (2, or 1 for small parts), the best take is picked automatically (it said exactly
+    its line, at a natural pace; more takes are made if none does) and becomes a library voice,
+    and the book's assignment is updated. "Same voice as" rows share their target's voice;
+    "keep current voice" rows are left alone. Resumable: rerun to continue.
+
+    With --redesign the replaced voices stay in the library; only this book's casting moves.
     """
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.engines import get_engine, voices_dir_kwargs
+    from seiyuu.engines.base import SynthesisError
     from seiyuu.gpu import GpuBusyError, get_gpu_manager
     from seiyuu.services import ServiceError
     from seiyuu.services.cast_design import designing_rows, run_design_cast
     from seiyuu.services.cast_plan import load_plan
-    from seiyuu.services.voice_design import DESIGN_ENGINE
+    from seiyuu.services.voice_design import SOURCES, design_engine
     from seiyuu.settings import get_settings
     from seiyuu.validate import Validator
+    from seiyuu.voices import VoiceLibrary
 
     cfg = get_settings()
     book_dir = _resolve_book_dir(
@@ -529,14 +541,21 @@ def design_cast(book_id: str) -> None:
     plan = load_plan(cfg.output_dir, book_dir.name)
     if plan is None:
         raise click.ClickException("no cast plan yet; run `seiyuu describe-cast` first")
-    rows = designing_rows(plan)
+    designer = design_engine(cfg)
+    lib = VoiceLibrary(cfg.voices_dir)
+    rows = [
+        r
+        for r in designing_rows(plan)
+        if not (r.voice_id and lib.meta_path(r.voice_id).is_file())
+        or (redesign and lib.load(r.voice_id).source != SOURCES[designer])
+    ]
     takes = sum(r.takes for r in rows)
     click.echo(
         # measured on the 3080 Ti: ~5 s per take once VoiceDesign is loaded (~1 min to load)
         f"designing {len(rows)} voices, {takes} takes (~{takes * 5 // 60 + 1} min on the GPU, "
         "plus loading the model)"
     )
-    engine = get_engine(DESIGN_ENGINE, **voices_dir_kwargs(DESIGN_ENGINE, cfg.voices_dir))
+    engine = get_engine(designer, **voices_dir_kwargs(designer, cfg.voices_dir))
     validator = Validator(
         model_size=cfg.validation_model_size,
         device="cpu",
@@ -551,8 +570,9 @@ def design_cast(book_id: str) -> None:
             validator=validator,
             gpu=get_gpu_manager(),
             progress=lambda m: click.echo(f"  {m}"),
+            redesign=redesign,
         )
-    except (ServiceError, GpuBusyError) as exc:
+    except (ServiceError, GpuBusyError, SynthesisError) as exc:
         raise click.ClickException(str(exc)) from exc
     for row in [plan.narrator, *plan.rows]:
         if row.keep_current:

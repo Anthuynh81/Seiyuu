@@ -443,8 +443,8 @@ def voice_design(
     from seiyuu.services.clone_transcript import default_clone_engine
     from seiyuu.services.voice_design import (
         DEFAULT_SAMPLE_TEXT,
-        DESIGN_ENGINE,
         design_dir,
+        design_engine,
         keep_take,
         run_design,
         start_design,
@@ -458,13 +458,19 @@ def voice_design(
         raise click.ClickException(f"--keep wants 'best', 'none' or 1..{takes}, got {keep!r}")
     cfg = get_settings()
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
-    text = normalize_text(sample_text or DEFAULT_SAMPLE_TEXT, profile=DESIGN_ENGINE)
+    designer = design_engine(cfg)  # Breeze where it is set up, else Qwen
+    text = normalize_text(sample_text or DEFAULT_SAMPLE_TEXT, profile=designer)
     try:
         record = start_design(
-            cfg.data_dir, name=name, description=description, text=text, takes=takes
+            cfg.data_dir,
+            name=name,
+            description=description,
+            text=text,
+            takes=takes,
+            designer=designer,
         )
         directory = design_dir(cfg.data_dir, record.design_id)
-        engine = get_engine(DESIGN_ENGINE, **voices_dir_kwargs(DESIGN_ENGINE, lib.voices_dir))
+        engine = get_engine(designer, **voices_dir_kwargs(designer, lib.voices_dir))
         validator = Validator(
             model_size=cfg.validation_model_size,
             device="cpu",
