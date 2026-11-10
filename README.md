@@ -270,9 +270,13 @@ Then in `.env`: `BREEZE_WORKER_PYTHON=...\breeze-tts\.venv\Scripts\python.exe`,
   re-records the Breeze lines it directs on the next render. A book with no cast plan uses the
   built-in texts with direction on; single-voice renders are never directed.
 - **Long paragraphs**: the clip, both transcripts and the generated audio share a window of 2048
-  positions, and one line is capped at 120 s. A paragraph of more than roughly 1,500 characters
-  is cut short (and flagged by whisper); one of several thousand characters is refused, which
-  stops the render with the block named.
+  positions, so a whole long paragraph does not fit in one request. A line of more than 800
+  characters is spoken in pieces: it is cut at sentence ends into pieces of even length, each
+  spoken with the same clip, seed and delivery instruction, and the audio is joined with a short
+  pause. Shorter lines are sent whole, which covers ordinary prose (the longest line of a
+  68,000-line web novel here is 574 characters). The whole line is still one cached segment and
+  is checked by whisper as one. A piece that still does not fit (a very long reference clip) is
+  refused, which stops the render with the block named.
 - **Safety net**: like the other worker engines it is validated by whisper, a line that never
   stops is cut at a per-line cap, and a CUDA out-of-memory or a dead or hung worker is killed,
   restarted and retried before the segment fails loudly. `unload()` terminates the worker, which
