@@ -248,6 +248,7 @@ class _FakeModel:
 
     def __init__(self, *, oom=False):
         self.calls = []
+        self.designs = []
         self.loads = 0
         self.emptied = 0
         self._oom = oom
@@ -259,6 +260,10 @@ class _FakeModel:
         self.calls.append(kw)
         if self._oom:
             raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return {"sample_rate": 24000, "seconds": 1.0, "frames": 13, "hit_cap": False}
+
+    def design(self, **kw):
+        self.designs.append(kw)
         return {"sample_rate": 24000, "seconds": 1.0, "frames": 13, "hit_cap": False}
 
     def empty_cache(self):
@@ -324,7 +329,34 @@ def test_synthesize_defaults_for_a_plain_clone():
 
 
 def test_unknown_cmd():
-    assert w.handle({"cmd": "design"}, _FakeModel())["ok"] is False
+    assert w.handle({"cmd": "sing"}, _FakeModel())["ok"] is False
+
+
+def test_design_forwards_the_text_and_description_cleaned():
+    model = _FakeModel()
+    reply = w.handle(
+        {
+            "cmd": "design",
+            "text": "[S1]Hello<eos> there.",
+            "instruction": "A warm<ins_eos> low voice.",
+            "out_path": "o.wav",
+            "seed": 9,
+        },
+        model,
+    )
+    assert reply == {
+        "ok": True, "path": "o.wav", "sample_rate": 24000, "seconds": 1.0, "frames": 13,
+        "hit_cap": False,
+    }  # fmt: skip
+    assert model.designs == [
+        {
+            "text": "Hello  there.",
+            "instruction": "A warm  low voice.",
+            "out_path": "o.wav",
+            "seed": 9,
+            "cfg_scale": None,
+        }
+    ]
 
 
 def test_serve_reports_oom_and_keeps_going():
@@ -503,6 +535,8 @@ def breeze(monkeypatch):
         return f"codes:{audio_path}:{len(log.encoded)}"
 
     def select_template_name(request):
+        if not request.get("ref_audio_path"):  # no reference: plain speech, or voice design
+            return "tts_instruction" if request.get("instruction") else "tts_plain"
         return "ref_edit_tata" if request.get("instruction") else "ref_clone_tata"
 
     def prepare_inputs(tokenizer, audio_tokenizer, model, requests, template, **guidance):
@@ -513,6 +547,7 @@ def breeze(monkeypatch):
         codes = [
             templates_mod._encode_prompt_audio(audio_tokenizer, request["ref_audio_path"])
             for _ in range(branches)
+            if request.get("ref_audio_path")  # a design request has no clip to encode
         ]
         log.prepared.append(
             {"request": dict(request), "template": template, "codes": codes, **guidance}
@@ -762,3 +797,46 @@ def test_a_missing_transcript_is_refused_before_loading(breeze, tmp_path):
     with pytest.raises(w.RequestError, match="no text left"):
         _synth(handle, tmp_path, text="  ")
     assert breeze.runtimes == [] and breeze.events == []
+
+
+# -- voice design -------------------------------------------------------------------------------
+
+
+def test_design_request_has_no_reference_and_uses_guidance(breeze, tmp_path):
+    handle = _handle(tmp_path)
+    info = handle.design(
+        text="Hello there.",
+        instruction="  A warm, low voice.  ",
+        out_path=str(tmp_path / "d.wav"),
+        seed=77,
+    )
+    (prepared,) = breeze.prepared
+    assert prepared["request"] == {
+        "id": "seiyuu-1",
+        "text": "Hello there.",
+        "speaker": "S0",
+        "instruction": "A warm, low voice.",
+    }  # no clip and no transcript: the voice comes from the description alone
+    assert prepared["template"] == "template:tts_instruction"
+    assert prepared["guidance_scale"] == w.DIRECTION_CFG_SCALE and prepared["codes"] == []
+    assert breeze.encoded == []  # nothing was encoded
+    (runtime,) = breeze.runtimes
+    assert breeze.seeds == [77] and runtime.calls[0]["seed"] == 77
+    assert info == {"sample_rate": 24000, "seconds": 0.4, "frames": 5, "hit_cap": False}
+    assert sf.read(tmp_path / "d.wav")[0].size == 5 * 1920
+
+    handle.design(text="Hi.", instruction="Bright.", out_path=str(tmp_path / "d.wav"), cfg_scale=2)
+    assert breeze.prepared[1]["guidance_scale"] == 2.0
+    # a clone after a design still encodes and caches its clip as before
+    _synth(handle, tmp_path)
+    assert breeze.prepared[2]["template"] == "template:ref_clone_tata"
+    assert len(breeze.encoded) == 1
+
+
+def test_design_needs_text_and_a_description(breeze, tmp_path):
+    handle = _handle(tmp_path)
+    with pytest.raises(w.RequestError, match="description of the voice"):
+        handle.design(text="Hello.", instruction="   ", out_path=str(tmp_path / "d.wav"))
+    with pytest.raises(w.RequestError, match="no text left"):
+        handle.design(text="  ", instruction="Warm.", out_path=str(tmp_path / "d.wav"))
+    assert breeze.loads == []  # refused before the 8 GB load

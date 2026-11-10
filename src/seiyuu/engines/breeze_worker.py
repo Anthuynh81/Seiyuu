@@ -12,12 +12,16 @@ seiyuu, and it keeps module-top imports to the stdlib only — torch, numpy, sou
 Breeze repo's own packages (``breeze_infer``, ``models``, imported from ``--repo-dir``) are
 imported lazily, the first time the model loads.
 
-One checkpoint, two request shapes, both cloning a voice from its reference clip AND the clip's
+One checkpoint, three request shapes. Two clone a voice from its reference clip AND the clip's
 exact transcript (Breeze has no transcript-free clone mode):
 - clone: no instruction, guidance 1.0 (the clone template defines no negative prompt, so any
   other scale is refused upstream).
 - voice direction: the same clone plus a natural-language ``instruction`` ("calm, dry, a little
   lower"), classifier-free guidance at ``cfg_scale`` (default 4.0). Guidance doubles the batch.
+The third makes a NEW voice:
+- voice design: no reference at all, only the text and a description of the voice ("a warm,
+  thoughtful young woman..."), guidance at ``cfg_scale`` (default 4.0). The take it speaks
+  becomes a voice's reference clip, cloned by the two shapes above from then on.
 
 Protocol (one JSON object per line, request -> reply):
 - boot: the worker emits ``{"ok": true, "event": "ready", "protocol": N}`` once, unprompted.
@@ -28,6 +32,8 @@ Protocol (one JSON object per line, request -> reply):
 - ``{"cmd": "synthesize", "text", "reference_wav", "ref_text", "out_path", "reference_sha256"?,
      "seed"?, "instruction"?, "cfg_scale"?}``
   -> ``{"ok": true, "sample_rate": 24000, "path", "seconds", "frames", "hit_cap"}``
+- ``{"cmd": "design", "text", "instruction", "out_path", "seed"?, "cfg_scale"?}``
+  -> the same reply as ``synthesize``.
 - any failure -> ``{"ok": false, "error": str, "oom": bool, "request_error": bool,
   "traceback": str}``. ``request_error`` marks a request that can never render as sent (the
   worker is healthy; the adapter fails the line without restarting it).
@@ -54,7 +60,7 @@ from typing import Any, TextIO
 
 # Bumped when the request/reply shape changes. The adapter refuses a worker that announces any
 # other version at boot (SubprocessTransport(protocol=...)).
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2  # 2: the design command
 
 # The 12.5 Hz codec decodes to 24 kHz (1920 samples per frame). That is already Seiyuu's canonical
 # rate, so the adapter's to_canonical() never resamples.
@@ -420,8 +426,7 @@ class ModelHandle:
         instruction: str | None = None,
         cfg_scale: float | None = None,
     ) -> dict[str, Any]:
-        from contextlib import redirect_stdout
-
+        """Speak ``text`` in the voice of the reference clip (a clone, or a directed clone)."""
         ref_text = (ref_text or "").strip()
         if not ref_text:
             raise RequestError(
@@ -432,11 +437,7 @@ class ModelHandle:
             raise RequestError("no text left to speak once control-token literals are removed")
         instruction = (instruction or "").strip()
         scale = guidance_scale_for(instruction, cfg_scale)
-        self.load()
-        self._requests += 1
-        request_id = f"seiyuu-{self._requests}"
         request: dict[str, Any] = {
-            "id": request_id,
             "text": text,
             "speaker": "S0",
             "ref_audio_path": reference_wav,
@@ -444,6 +445,51 @@ class ModelHandle:
         }
         if instruction:
             request["instruction"] = instruction
+        return self._generate(
+            request,
+            out_path,
+            seed=seed,
+            scale=scale,
+            reference_key=reference_sha256 or reference_wav,
+        )
+
+    def design(
+        self,
+        *,
+        text: str,
+        instruction: str,
+        out_path: str,
+        seed: int | None = None,
+        cfg_scale: float | None = None,
+    ) -> dict[str, Any]:
+        """Speak ``text`` in a NEW voice described by ``instruction``: the repo's reference-free
+        instruction template (its "voice design"). Same sampler, cap and seeding as a line."""
+        if not text.strip():
+            raise RequestError("no text left to speak once control-token literals are removed")
+        instruction = (instruction or "").strip()
+        if not instruction:
+            raise RequestError("voice design needs a description of the voice")
+        scale = guidance_scale_for(instruction, cfg_scale)
+        request = {"text": text, "speaker": "S0", "instruction": instruction}
+        return self._generate(request, out_path, seed=seed, scale=scale, reference_key=None)
+
+    def _generate(
+        self,
+        request: dict[str, Any],
+        out_path: str,
+        *,
+        seed: int | None,
+        scale: float,
+        reference_key: str | None,
+    ) -> dict[str, Any]:
+        """Run one request through the model and write its audio (every request shape)."""
+        from contextlib import redirect_stdout
+
+        self.load()
+        self._requests += 1
+        request_id = f"seiyuu-{self._requests}"
+        request = {"id": request_id, **request}
+        text = request["text"]
         templates = self._templates
         steps = 0
         chunks: list[Any] = []
@@ -453,7 +499,7 @@ class ModelHandle:
                 # outside 32 bits, hence the fold; the audio is decided by the runtime's own torch
                 # reseed right before sampling (after its lazy setup), from the full value.
                 self._set_all_seeds(int(seed) % 2**32)  # type: ignore[misc]
-            self._reference_key = reference_sha256 or reference_wav
+            self._reference_key = reference_key
             try:
                 inputs = templates.prepare_inputs(  # type: ignore[union-attr]
                     self._tokenizer,
@@ -560,6 +606,15 @@ def handle(msg: dict[str, Any], model: ModelHandle) -> dict[str, Any]:
             reference_sha256=msg.get("reference_sha256"),
             seed=msg.get("seed"),
             instruction=model_text(msg.get("instruction") or "") or None,
+            cfg_scale=msg.get("cfg_scale"),
+        )
+        return {"ok": True, "path": msg["out_path"], **info}
+    if cmd == "design":
+        info = model.design(
+            text=model_text(msg["text"]),
+            instruction=model_text(msg.get("instruction") or ""),
+            out_path=msg["out_path"],
+            seed=msg.get("seed"),
             cfg_scale=msg.get("cfg_scale"),
         )
         return {"ok": True, "path": msg["out_path"], **info}
