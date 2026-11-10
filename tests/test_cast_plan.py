@@ -514,3 +514,50 @@ def test_wordless_lines_are_never_filler():
     from seiyuu.services.cast_plan import _character_lines
 
     assert _character_lines(["…!", "?!", "“…”", "Y-Yes, let’s!", "I"]) == ["Y-Yes, let’s!", "I"]
+
+
+def test_cli_delivery_shows_and_edits(tmp_path, monkeypatch):
+    from seiyuu.services import save_assignment
+    from seiyuu.voices import VoiceAssignment
+
+    for var, sub in (("BOOKS_DIR", "books"), ("OUTPUT_DIR", "output"), ("DATA_DIR", "data")):
+        monkeypatch.setenv(var, str(tmp_path / sub))
+    from seiyuu.settings import get_settings
+
+    get_settings.cache_clear()
+    out = tmp_path / "output"
+    try:
+        _write(get_settings(), _report(first_person=True))
+        run = CliRunner().invoke
+
+        bare = run(main, ["delivery", BOOK])  # no plan, no assignment: the built-in settings
+        assert bare.exit_code == 0, bare.output
+        assert "no cast plan yet" in bare.output and "delivery direction: on" in bare.output
+        assert "first person or not is unknown" in bare.output
+        refused = run(main, ["delivery", BOOK, "--off"])  # nowhere to keep an edit yet
+        assert refused.exit_code != 0 and "describe-cast" in refused.output
+
+        save_plan(out, _draft(_report(first_person=True)))
+        shared = VoiceAssignment(
+            book_id=BOOK, narrator_voice_id="kim_v", assignments={"kim": "kim_v"}
+        )
+        save_assignment(shared, out)
+        edit = run(main, ["delivery", BOOK, "--off", "--dialogue", "  Quick  and clipped. "])
+        assert edit.exit_code == 0, edit.output
+        assert "delivery direction: off" in edit.output
+        assert "dialogue: Quick and clipped." in edit.output
+        assert "first person: the narrator shares a character's voice" in edit.output
+        saved = load_delivery(out / BOOK)
+        assert (saved.enabled, saved.dialogue) == (False, "Quick and clipped.")
+
+        cleared = run(main, ["delivery", BOOK, "--on", "--narration", ""])
+        assert cleared.exit_code == 0 and "narration: (none: plain clone)" in cleared.output
+        assert load_delivery(out / BOOK).enabled
+
+        save_assignment(shared.model_copy(update={"narrator_voice_id": "narrator_v"}), out)
+        assert "third person" in run(main, ["delivery", BOOK]).output
+        too_long = run(main, ["delivery", BOOK, "--dialogue", "x" * (MAX_INSTRUCTION_CHARS + 1)])
+        assert too_long.exit_code != 0
+        assert load_delivery(out / BOOK).dialogue == "Quick and clipped."  # nothing saved
+    finally:
+        get_settings.cache_clear()
