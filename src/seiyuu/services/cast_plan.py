@@ -3,14 +3,20 @@
 For every character with lines, the local LLM drafts how they should sound: a voice-only
 description, an age band, a sample line chosen from their own lines, and possibly "same person
 as" another character. The user then edits it in the Review table. The plan lives in
-``output/{book}/cast_plan.json``. It is a working file for that table and for the design-cast
-job (part 2), never read by render, and in no cache key.
+``output/{book}/cast_plan.json``. The rows are a working file for that table and for the
+design-cast job (part 2): the render never reads them and they are in no cache key.
+
+One block IS read by the render: ``delivery``, the book's delivery direction (three instruction
+texts and an on/off switch, :mod:`seiyuu.voices.delivery`). The multivoice render and the cost
+estimate load it from this file, and for a Breeze voice the instruction is part of the segment's
+cache key, so editing it re-records the lines it directs.
 
 Rules that keep it honest:
 
 - the narrator is its own row (id ``__narrator__``) with an editable default description; for a
   first-person book the plan also suggests the protagonist, whose voice the narrator can share;
-- a row the user edited survives a re-draft untouched; design ids and voice ids always carry over;
+- a row the user edited survives a re-draft untouched; design ids and voice ids always carry over,
+  and so does the delivery block (a re-draft must never re-record a book);
 - "same voice as" links are flattened to one hop and never form a cycle;
 - characters with fewer than ``SMALL_PART_LINES`` lines get 1 take, everyone else 2.
 """
@@ -26,6 +32,12 @@ from seiyuu.attribute.genders import name_patterns, narration_texts, sentences
 from seiyuu.attribute.models import AttributionReport, SegmentType
 from seiyuu.repository import atomic_write_text
 from seiyuu.services.common import ServiceError
+from seiyuu.voices.delivery import (
+    CAST_PLAN_NAME,
+    Delivery,
+    DeliveryUpdate,
+    apply_delivery_update,
+)
 from seiyuu.voices.describer import (
     AGES,
     CharacterEvidence,
@@ -37,7 +49,6 @@ from seiyuu.voices.describer import (
     sketch_character,
 )
 
-CAST_PLAN_NAME = "cast_plan.json"
 NARRATOR_ROW = "__narrator__"
 SMALL_PART_LINES = 5
 TAKES_FULL = 2
@@ -84,6 +95,9 @@ class CastPlan(BaseModel):
     narrator: PlanRow
     rows: list[PlanRow] = []  # busiest first
     notes: list[str] = []
+    # Read by the render (voices/delivery.py). A plan written before it existed loads with the
+    # defaults, which is also what a book with no plan renders with.
+    delivery: Delivery = Delivery()
 
 
 class RowUpdate(BaseModel):
@@ -308,6 +322,7 @@ def draft_plan(
         narrator=narrator,
         rows=rows,
         notes=notes,
+        delivery=existing.delivery if existing is not None else Delivery(),
     )
 
 
@@ -392,6 +407,11 @@ def apply_updates(plan: CastPlan, updates: list[RowUpdate]) -> CastPlan:
         row.edited = True
     flatten_same_as(plan.rows, plan.narrator)
     return plan
+
+
+def apply_delivery(plan: CastPlan, update: DeliveryUpdate) -> CastPlan:
+    """The plan with its delivery direction edited; rows are untouched (not marked edited)."""
+    return plan.model_copy(update={"delivery": apply_delivery_update(plan.delivery, update)})
 
 
 def plan_path(output_dir: Path, book_id: str) -> Path:

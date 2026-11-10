@@ -3,12 +3,16 @@
 POST /books/{id}/cast-plan/describe   draft every character's voice description (a job)
 GET  /books/{id}/cast-plan            the plan (404 until drafted)
 PUT  /books/{id}/cast-plan            Review-table edits (description, sample line, same voice
-                                      as, keep current voice, gender, age)
+                                      as, keep current voice, gender, age) and the book's
+                                      delivery direction (three instruction texts, on/off)
 POST /books/{id}/cast-plan/design     design every row's voice and assign them (a GPU job)
 POST /books/{id}/cast-plan/rows/{character_id}/take   use another of a row's takes (no GPU)
 
-The plan is a working file for the Review table and the design-cast job; it never changes an
-assignment, a voice, or a cache key by itself.
+The plan's rows are a working file for the Review table and the design-cast job; they never
+change an assignment, a voice, or a cache key by themselves. Its ``delivery`` block is different:
+the multivoice render reads it, and for a Breeze voice the instruction is part of each line's
+cache key, so an edit re-records the lines it directs. That is why the PUT is refused while a
+render is queued or running.
 """
 
 from fastapi import APIRouter, Request, Response
@@ -29,7 +33,7 @@ from seiyuu.api.schemas import (
 from seiyuu.attribute.providers.local import OllamaPreflightError, ollama_preflight
 from seiyuu.repository import JobKind
 from seiyuu.services import ServiceError
-from seiyuu.services.cast_plan import apply_updates, load_plan, save_plan
+from seiyuu.services.cast_plan import apply_delivery, apply_updates, load_plan, save_plan
 from seiyuu.services.llm_advisory import resolve_advisory
 
 router = APIRouter(tags=["cast-plan"])
@@ -107,11 +111,14 @@ def update_cast_plan(
             raise ApiError(
                 409, "conflict", "the cast is still being described; edit it when that finishes"
             )
-        plan = _plan_or_404(cfg, book_id)
-        try:
-            updated = apply_updates(plan, body.updates)
-        except ServiceError as exc:
-            raise ApiError(422, "invalid", str(exc)) from exc
+        updated = _plan_or_404(cfg, book_id)
+        if body.updates:
+            try:
+                updated = apply_updates(updated, body.updates)
+            except ServiceError as exc:
+                raise ApiError(422, "invalid", str(exc)) from exc
+        if body.delivery is not None:
+            updated = apply_delivery(updated, body.delivery)
         save_plan(cfg.output_dir, updated)
     return CastPlanOut(**updated.model_dump())
 

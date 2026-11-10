@@ -63,6 +63,7 @@ from seiyuu.settings import Settings
 from seiyuu.validate import SegmentWords
 from seiyuu.validate import ValidationError as ValidationErrorType
 from seiyuu.voices import VoiceLibraryError, VoiceMeta
+from seiyuu.voices.delivery import DeliveryError
 
 router = APIRouter(tags=["render"])
 
@@ -109,6 +110,9 @@ def _estimate_or_http(
         # BEFORE ValueError (its superclass): a corrupt assignments.json is a server
         # data fault, not a malformed request — same 500 GET /assignment gives it.
         raise ApiError(500, "corrupt_artifact", f"corrupt artifact: {exc}") from exc
+    except DeliveryError as exc:
+        # also BEFORE ValueError: an unreadable cast_plan.json is the same kind of fault
+        raise ApiError(500, "corrupt_artifact", str(exc)) from exc
     except (VoiceLibraryError, ValueError) as exc:
         raise ApiError(422, "invalid", str(exc)) from exc
     except SynthesisError as exc:

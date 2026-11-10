@@ -32,6 +32,7 @@ from seiyuu.services.cast_plan import (
     CastPlan,
     PlanRow,
     RowUpdate,
+    apply_delivery,
     apply_updates,
     cached_sketcher,
     draft_plan,
@@ -40,6 +41,14 @@ from seiyuu.services.cast_plan import (
     is_first_person,
     load_plan,
     run_describe_cast,
+    save_plan,
+)
+from seiyuu.voices.delivery import (
+    DEFAULT_DIALOGUE,
+    MAX_INSTRUCTION_CHARS,
+    Delivery,
+    DeliveryUpdate,
+    load_delivery,
 )
 from seiyuu.voices.describer import CharacterEvidence, VoiceSketch, clean_sketch, sketch_character
 from test_api_m6b1 import make_settings
@@ -229,6 +238,26 @@ def test_a_redraft_keeps_edited_rows_and_carries_design_ids():
     assert (rows["kim"].design_id, rows["kim"].voice_id) == ("0123456789ab", "kim_designed")
 
 
+def test_a_redraft_keeps_the_delivery_direction():
+    # The render reads this block, and for a Breeze voice it is part of the cache key: a
+    # "describe again" that reset it would silently re-record the book.
+    plan = _draft(_report())
+    assert plan.delivery == Delivery()  # a first draft starts from the defaults
+    edited = apply_delivery(plan, DeliveryUpdate(enabled=False, dialogue="Quick and clipped."))
+    assert not any(r.edited for r in edited.rows) and not edited.narrator.edited
+    again = _draft(_report(), existing=edited)
+    assert again.delivery == edited.delivery
+    assert (again.delivery.enabled, again.delivery.dialogue) == (False, "Quick and clipped.")
+
+
+def test_the_saved_plan_is_what_the_render_reads(tmp_path):
+    plan = apply_delivery(_draft(_report()), DeliveryUpdate(inner_voice="  Hushed,  close. "))
+    save_plan(tmp_path, plan)
+    assert load_plan(tmp_path, BOOK) == plan
+    assert load_delivery(tmp_path / BOOK) == plan.delivery
+    assert plan.delivery.inner_voice == "Hushed, close."
+
+
 def test_the_cache_answers_a_rerun_without_the_llm(tmp_path):
     report, llm = _report(), FakeLLM()
     with AttributionCache(tmp_path / "attribution.db") as cache:
@@ -368,6 +397,41 @@ def test_api_describe_then_read_then_edit(client):
     )
     assert bad.status_code == 422
     assert client.put(f"/api/books/{BOOK}/cast-plan", json={"updates": []}).status_code == 422
+
+
+def test_api_edits_the_delivery_direction(client):
+    url = f"/api/books/{BOOK}/cast-plan"
+    job = client.post(f"{url}/describe", json={}).json()
+    assert _wait(client, job["job_id"]).state is JobState.SUCCEEDED
+    before = client.get(url).json()
+    assert before["delivery"] == Delivery().model_dump()
+
+    put = client.put(url, json={"delivery": {"enabled": False, "narration": " Clear,  steady. "}})
+    assert put.status_code == 200, put.text
+    after = put.json()
+    assert after["delivery"]["enabled"] is False
+    assert after["delivery"]["narration"] == "Clear, steady."
+    assert after["delivery"]["dialogue"] == DEFAULT_DIALOGUE  # not named: unchanged
+    assert after["rows"] == before["rows"]  # a delivery edit touches no row
+    assert client.get(url).json()["delivery"] == after["delivery"]  # saved
+
+    both = client.put(
+        url,
+        json={
+            "updates": [{"character_id": "staff", "description": "A tired night clerk."}],
+            "delivery": {"dialogue": ""},
+        },
+    )
+    assert both.status_code == 200, both.text
+    assert both.json()["delivery"]["dialogue"] == ""  # cleared: a plain clone for dialogue
+    assert next(r for r in both.json()["rows"] if r["character_id"] == "staff")["edited"]
+
+    assert client.put(url, json={"delivery": {}}).status_code == 422  # nothing to change
+    assert client.put(url, json={}).status_code == 422
+    assert client.put(url, json={"delivery": {"volume": 3}}).status_code == 422
+    too_long = {"delivery": {"dialogue": "x" * (MAX_INSTRUCTION_CHARS + 1)}}
+    assert client.put(url, json=too_long).status_code == 422
+    assert client.get(url).json()["delivery"] == both.json()["delivery"]  # refusals saved nothing
 
 
 def test_api_describe_refusals(client, monkeypatch):
