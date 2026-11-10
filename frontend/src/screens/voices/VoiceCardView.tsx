@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { VoiceOut } from "../../api/types";
 import { AuditionControl } from "./AuditionControl";
 import { DeleteVoiceDialog } from "./DeleteVoiceDialog";
+import { EngineSwitch } from "./EngineSwitch";
 import { type DuplicateRecipe, recipeOf } from "./helpers";
 import { NameRow } from "./NameRow";
 import { TagEditor } from "./TagEditor";
@@ -66,6 +67,7 @@ export function VoiceCardView({
       ) : (
         <span className="consent invisible">.</span>
       )}
+      <EngineSwitch voice={voice} />
       <TagEditor voice={voice} titleFor={titleFor} />
       <div className="foot">
         <AuditionControl voice={voice} />

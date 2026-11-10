@@ -122,8 +122,14 @@ _PROFILES = {
     # text, so it starts from the same fold. It applies no text cleanup of its own, and it
     # PERFORMS parenthesized sounds such as "(sigh)" or "(laugh)" rather than reading them, so
     # those are left in the text on purpose.
-    "breeze": {"punct": "comma"},
+    # Square brackets are its TAG syntax (a speaker tag "[S0]", sound events "[laugh]"), so text
+    # inside them is not read: a real render (2026-11-10) spoke "[Cover]" as "Four", and dropped
+    # "[Roulette Event]" and "[1st Place]" from the lines they open. A web novel's system
+    # windows are written in exactly that form, so the brackets are removed and the words kept.
+    "breeze": {"punct": "comma", "square_brackets": "drop"},
 }
+
+_SQUARE_BRACKETS = re.compile(r"[\[\]]")
 
 
 def profile_for(engine_id: str | None) -> str:
@@ -146,4 +152,7 @@ def apply_profile(text: str, profile: str, *, lexicon: "CompiledLexicon | None" 
     text = expand_ordinals(text)
     text = expand_numbers(text)
     text = _punctuation(text, mode=opts["punct"])
+    if opts.get("square_brackets") == "drop":
+        # the marks only: every word stays, so the whisper reference is the same word string
+        text = _SQUARE_BRACKETS.sub(" ", text)
     return _collapse_whitespace(text)

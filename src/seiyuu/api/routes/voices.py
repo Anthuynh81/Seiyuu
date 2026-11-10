@@ -41,6 +41,8 @@ from seiyuu.api.schemas import (
     VoiceCreate,
     VoiceDeletedOut,
     VoiceDetailOut,
+    VoiceEngineOut,
+    VoiceEngineSwitch,
     VoiceListOut,
     VoiceOut,
     VoiceReferencesOut,
@@ -53,11 +55,14 @@ from seiyuu.render.models import RenderManifest
 from seiyuu.repository import Job, JobKind, JobState
 from seiyuu.services import ServiceError, delete_voice, voice_references
 from seiyuu.services.clone_transcript import (
-    QWEN_ENGINE,
+    TRANSCRIPT_ENGINES,
+    CloneRefused,
     CloneTranscript,
     bind_transcript,
     choose_transcript,
+    default_clone_engine,
 )
+from seiyuu.services.voice_engine import EngineNotInstalled, switch_engine
 from seiyuu.voices import (
     BlendComponent,
     CloudVoiceError,
@@ -307,8 +312,8 @@ def clone_voice(
     file: Annotated[UploadFile, File()],
     name: Annotated[str, Form(min_length=1)],
     engine: Annotated[
-        str, Form(pattern="^(chatterbox|elevenlabs|indextts2|qwen3tts)$")
-    ] = "qwen3tts",
+        str | None, Form(pattern="^(breeze|chatterbox|elevenlabs|indextts2|qwen3tts)$")
+    ] = None,
     consent: Annotated[bool, Form()] = False,
     attested_by: Annotated[str, Form()] = "",
     seed: Annotated[int, Form()] = 41172,
@@ -334,6 +339,8 @@ def clone_voice(
     library = VoiceLibrary(cfg.voices_dir)
     vid = voice_id or library.new_voice_id(name)
     _check_voice_id(vid)
+    if engine is None:
+        engine = default_clone_engine(cfg)  # Breeze where it is set up, else Qwen
 
     upload_dir = cfg.data_dir / "uploads" / secrets.token_hex(8)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -353,15 +360,22 @@ def clone_voice(
         if size == 0:
             raise ApiError(422, "invalid", "empty reference upload")
 
-        # Qwen clones closer from the clip AND its transcript (ICL). Whisper runs on the shared
-        # CPU aligner, before the voices mutex: it is the slow part and touches no library state.
+        # Qwen clones closer from the clip AND its transcript (ICL); Breeze clones no other
+        # way. Whisper runs on the shared CPU aligner, before the voices mutex: it is the slow
+        # part and touches no library state.
         chosen: CloneTranscript | None = None
-        if engine == QWEN_ENGINE:
+        if engine in TRANSCRIPT_ENGINES:
             aligner = request.app.state.aligner
-            with request.app.state.align_lock:
-                chosen = choose_transcript(
-                    staged, provided=transcript, transcribe=aligner.transcribe_clip
-                )
+            try:
+                with request.app.state.align_lock:
+                    chosen = choose_transcript(
+                        staged,
+                        provided=transcript,
+                        transcribe=aligner.transcribe_clip,
+                        engine=engine,
+                    )
+            except CloneRefused as exc:  # Breeze, and no transcript to bind: nothing is saved
+                raise ApiError(422, "invalid", str(exc)) from exc
 
         with request.app.state.voices_mutex:
             exists = library.meta_path(vid).is_file() or library.reference_path(vid).is_file()
@@ -408,9 +422,13 @@ def clone_voice(
             # embeds the ref hash, so they are unreachable anyway — removing them is hygiene)
             for stale in ref_path.parent.glob("conds_*.pt"):
                 stale.unlink(missing_ok=True)
-            # bound to the PUBLISHED bytes; a non-Qwen re-clone drops an old transcript too
+            # bound to the PUBLISHED bytes, under the engine that will read it; a re-clone on
+            # an engine that takes no transcript drops an old one too
             settings = bind_transcript(
-                ref_path, attestation.reference_sha256, chosen.text if chosen else None
+                ref_path,
+                attestation.reference_sha256,
+                chosen.text if chosen else None,
+                engine=engine,
             )
             library.save(
                 VoiceMeta(
@@ -504,6 +522,49 @@ def references(voice_id: str, cfg: SettingsDep) -> VoiceReferencesOut:
     except ServiceError as exc:  # fail-closed: an unreadable assignments.json
         raise ApiError(500, "corrupt_artifact", str(exc)) from exc
     return VoiceReferencesOut(voice_id=voice_id, references=refs)
+
+
+@router.post("/voices/{voice_id}/engine", response_model=VoiceEngineOut)
+def switch_voice_engine(
+    voice_id: str, body: VoiceEngineSwitch, request: Request, cfg: SettingsDep, store: StoreDep
+) -> VoiceEngineOut:
+    """Move a cloned voice to another local cloning engine, in place: same voice id, same
+    clip and consent, so every book's casting keeps pointing at it. The engine is part of each
+    line's cache key, so nothing recorded on the old engine can be served as the new one, and
+    nothing is deleted. Refused while a render is live (a running render loads each voice once;
+    a switch under it would give one book two engines) and when the target engine is not set
+    up on this machine. A voice with no transcript is transcribed on the CPU when the target
+    needs one."""
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+
+    def transcribe(path: Path) -> tuple[str, float]:
+        with request.app.state.align_lock:  # the shared CPU whisper, one caller at a time
+            return request.app.state.aligner.transcribe_clip(path)
+
+    with request.app.state.voices_mutex:
+        _load_or_404(library, voice_id)
+        _guard_live_render(store, "changing this voice's engine")
+        try:
+            done = switch_engine(
+                library,
+                voice_id,
+                body.engine,
+                cfg=cfg,
+                output_dir=cfg.output_dir,
+                transcribe=transcribe,
+            )
+        except EngineNotInstalled as exc:
+            raise ApiError(503, "not_ready", str(exc)) from exc
+        except ServiceError as exc:
+            message = str(exc)
+            if "cannot verify voice references" in message:
+                raise ApiError(500, "corrupt_artifact", message) from exc
+            raise ApiError(422, "invalid", message) from exc
+    out = _voice_out(library, done.meta)
+    return VoiceEngineOut(
+        **out.model_dump(), previous_engine=done.previous_engine, note=done.note, books=done.books
+    )
 
 
 @router.delete("/voices/{voice_id}", response_model=VoiceDeletedOut)
@@ -740,7 +801,20 @@ def audition(
         # .part.wav, not .wav.part: libsndfile picks the container from the LAST suffix
         tmp = out_path.with_name("audition.part.wav")
         audio.save(tmp)
-        os.replace(tmp, out_path)
+        with request.app.state.voices_mutex:
+            # The voice may have moved to another engine while this take was being spoken (the
+            # switch waits for renders, not auditions). Its card must never play the old
+            # engine's sample as the new engine's: drop the take instead of publishing it.
+            current = _load_or_404(library, voice_id)
+            if current.engine != meta.engine:
+                tmp.unlink(missing_ok=True)
+                raise ApiError(
+                    409,
+                    "conflict",
+                    f"{voice_id!r} moved from {meta.engine} to {current.engine} while this "
+                    "sample was being made; audition it again",
+                )
+            os.replace(tmp, out_path)
         return AuditionOut(
             voice_id=voice_id,
             duration_seconds=round(audio.duration_seconds, 3),

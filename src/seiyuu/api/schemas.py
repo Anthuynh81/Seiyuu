@@ -708,12 +708,30 @@ class BlendVoiceCreate(BaseModel):
 VoiceCreate = Annotated[PresetVoiceCreate | BlendVoiceCreate, Field(discriminator="kind")]
 
 
+class VoiceEngineSwitch(BaseModel):
+    """POST /voices/{id}/engine: move a cloned voice to another local cloning engine."""
+
+    model_config = {"extra": "forbid"}
+    engine: str = Field(min_length=1, max_length=40)
+
+
+class VoiceEngineOut(VoiceOut):
+    """The voice after an engine switch, what it was on before, one plain sentence saying
+    what changed, and the books whose casting uses it (they need recording again to be heard
+    on the new engine; nothing was deleted)."""
+
+    previous_engine: str
+    note: str
+    books: list[str]
+
+
 class VoiceUpdate(BaseModel):
     """PATCH /voices/{id}: rename and/or replace tags. Both are optional and applied
-    independently (omit a field to leave it untouched). Deliberately the ONLY mutable
-    fields — name is a pure label (Characters reference voice_id, and name is in no cache
-    key) and tags are organization-only, so neither can drift a render cache key. Recipe,
-    seed, engine, and consent stay immutable; changing those means a new voice."""
+    independently (omit a field to leave it untouched). Deliberately the ONLY fields this
+    route changes — name is a pure label (Characters reference voice_id, and name is in no
+    cache key) and tags are organization-only, so neither can drift a render cache key.
+    Recipe, seed and consent stay immutable; a cloned voice's engine changes only through
+    POST /voices/{id}/engine, which has its own guards."""
 
     model_config = {"extra": "forbid"}
     name: str | None = Field(default=None, min_length=1)
@@ -807,6 +825,8 @@ class SystemStatus(BaseModel):
     # F2b: the server-default apply_emotion (per-render overridable). The render config reads
     # this to default its toggle.
     apply_emotion: bool
+    # The engine a new clone gets when none is named: Breeze where it is set up, else Qwen.
+    default_clone_engine: str
     engines: list[str]
     version: str
 

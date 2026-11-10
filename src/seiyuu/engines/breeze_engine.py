@@ -50,7 +50,13 @@ from seiyuu.engines.base import EngineVoice, SynthesisError, TTSEngine
 
 # Importing the worker MODULE is safe (its top level is stdlib only; it spawns nothing): the
 # generation recipe, fast configs and protocol version then have one source of truth.
-from seiyuu.engines.breeze_worker import FAST_CONFIGS, GEN_RECIPE, PROTOCOL_VERSION
+from seiyuu.engines.breeze_worker import (
+    FAST_CONFIGS,
+    GEN_RECIPE,
+    PIECE_GAP_SECONDS,
+    PROTOCOL_VERSION,
+    split_long_text,
+)
 from seiyuu.engines.indextts2_engine import (
     _FINGERPRINT_CONTENT_MAX_BYTES,
     _FINGERPRINT_CONTENT_SUFFIXES,
@@ -80,6 +86,22 @@ def breeze_config(cfg: Any) -> dict[str, Any]:
         "checkpoint_dir": getattr(cfg, "breeze_checkpoint_dir", None),
         "fast": getattr(cfg, "breeze_fast", DEFAULT_FAST),
     }
+
+
+def breeze_ready(cfg: Any) -> bool:
+    """Is Breeze set up on this machine: the worker interpreter, the repo checkout and the
+    weights all present? Cheap (a few stat calls), offline, and never raises."""
+    config = breeze_config(cfg)
+    python = config["worker_python"]
+    try:
+        has_python = python is not None and Path(python).is_file()
+    except OSError:
+        has_python = False
+    return (
+        has_python
+        and repo_present(config["repo_dir"])
+        and checkpoint_present(config["checkpoint_dir"])
+    )
 
 
 def worker_env(base: dict[str, str], *, windows: bool | None = None) -> dict[str, str]:
@@ -252,6 +274,7 @@ class BreezeEngine(TTSEngine):
         self.worker_restarts = 0
         self.worker_ooms = 0
         self.capped_lines = 0  # lines that ran into the generation cap (likely runaways)
+        self.split_lines = 0  # lines too long for the model's window, spoken in pieces
 
     # -- catalog facts ------------------------------------------------------------------------
 
@@ -474,13 +497,29 @@ class BreezeEngine(TTSEngine):
         self, text: str, voice: str, settings: dict[str, Any]
     ) -> tuple[np.ndarray, int]:
         reference = self._reference_path(voice)
-        message: dict[str, Any] = {
+        request: dict[str, Any] = {
             "cmd": "synthesize",
-            "text": text,
             "reference_wav": str(reference),
             "reference_sha256": self._reference_sha256(reference),
             "ref_text": self._reference_text(voice, reference, settings),
             "seed": settings.get("seed"),
             **self._direction(voice, settings),
         }
-        return self._run(message, f"voice {voice!r}, text {text[:80]!r}")
+        pieces = split_long_text(text)
+        if len(pieces) == 1:
+            return self._run({**request, "text": text}, f"voice {voice!r}, text {text[:80]!r}")
+        # A line too long for the model's window: one request per piece, the SAME reference,
+        # seed and direction for each (one performance; a validation retry re-seeds the whole
+        # line), joined with a sentence's pause. A piece the worker refuses fails the line.
+        capped_before = self.capped_lines
+        parts: list[np.ndarray] = []
+        rate = BREEZE_SAMPLE_RATE
+        for n, piece in enumerate(pieces, 1):
+            what = f"voice {voice!r}, piece {n} of {len(pieces)}, text {piece[:80]!r}"
+            samples, rate = self._run({**request, "text": piece}, what)
+            if parts:
+                parts.append(np.zeros(round(PIECE_GAP_SECONDS * rate), dtype=np.float32))
+            parts.append(np.asarray(samples, dtype=np.float32))
+        self.capped_lines = capped_before + int(self.capped_lines > capped_before)  # one line
+        self.split_lines += 1
+        return np.concatenate(parts), rate

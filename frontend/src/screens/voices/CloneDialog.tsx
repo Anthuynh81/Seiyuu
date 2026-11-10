@@ -1,21 +1,36 @@
 import { useRef, useState } from "react";
 
 import { ApiError } from "../../api/client";
-import { useBooks, useCloneVoice } from "../../api/hooks";
+import { useBooks, useCloneVoice, useSystem } from "../../api/hooks";
 import { TalkDialog } from "../../components/Dialog";
 import { TalkSelect } from "../../components/Select";
 import { PlainError } from "../../components/PlainError";
 import { explainFailure, failureOf, staleBooks } from "../../lib/glossary";
 import { readStored, writeStored } from "../../lib/storage";
 
+/** Engines that clone from the clip together with its exact words (a transcript). */
+const TRANSCRIPT_ENGINES = new Set(["breeze", "qwen3tts"]);
+
+const ENGINE_LABELS: [string, string][] = [
+  ["breeze", "breeze — local, free, cloning that takes delivery direction"],
+  ["qwen3tts", "qwen3tts — local, free, closest cloning"],
+  ["chatterbox", "chatterbox — local, free"],
+  ["indextts2", "indextts2 — local, emotion + cloning (slow, high quality)"],
+  ["elevenlabs", "elevenlabs — cloud IVC, paid"],
+];
+
 export function CloneDialog({ onClose }: { onClose: () => void }) {
   const clone = useCloneVoice();
+  // the server's default: Breeze where it is set up on that machine, otherwise Qwen
+  const preferred = useSystem().data?.default_clone_engine ?? "qwen3tts";
   const fileInput = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
-  const [engine, setEngine] = useState("qwen3tts");
+  const [picked, setEngine] = useState<string | null>(null);
+  const engine = picked ?? preferred;
+  const usesTranscript = TRANSCRIPT_ENGINES.has(engine);
   const [transcript, setTranscript] = useState("");
-  // a Qwen clone reports which way it clones; keep the dialog open to say so
+  // a Breeze or Qwen clone reports which way it cloned; keep the dialog open to say so
   const [note, setNote] = useState<string | null>(null);
   const [attested, setAttested] = useState(false);
   const [attestedBy, setAttestedBy] = useState(() => readStored("seiyuu.attestedBy") ?? "");
@@ -32,7 +47,7 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
     if (!file) return;
     writeStored("seiyuu.attestedBy", attestedBy);
     clone.mutate(
-      { file, name, engine, attestedBy, replace, transcript: engine === "qwen3tts" ? transcript : undefined },
+      { file, name, engine, attestedBy, replace, transcript: usesTranscript ? transcript : undefined },
       { onSuccess: (voice) => (voice.clone_note ? setNote(voice.clone_note) : onClose()) },
     );
   };
@@ -73,14 +88,12 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
             ariaLabel="engine"
             value={engine}
             onChange={setEngine}
-            options={[
-              { value: "qwen3tts", label: "qwen3tts — local, free, closest cloning (recommended)" },
-              { value: "chatterbox", label: "chatterbox — local, free" },
-              { value: "indextts2", label: "indextts2 — local, emotion + cloning (slow, high quality)" },
-              { value: "elevenlabs", label: "elevenlabs — cloud IVC, paid" },
-            ]}
+            options={ENGINE_LABELS.map(([value, label]) => ({
+              value,
+              label: value === preferred ? `${label} (recommended)` : label,
+            }))}
           />
-          {engine === "qwen3tts" && (
+          {usesTranscript && (
             <>
               <label htmlFor="clone-transcript">what the clip says (optional)</label>
               <textarea
@@ -91,7 +104,9 @@ export function CloneDialog({ onClose }: { onClose: () => void }) {
                 placeholder="leave blank and it's transcribed for you"
               />
               <div className="tag normal-case tracking-[0.02em] text-ink-3">
-                a clip of 5–30 s clones closest: Qwen copies the voice from the clip and its words
+                {engine === "breeze"
+                  ? "Breeze needs a clip of 5–30 s of clear speech: it copies the voice from the clip and its words"
+                  : "a clip of 5–30 s clones closest: Qwen copies the voice from the clip and its words"}
               </div>
             </>
           )}

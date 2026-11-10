@@ -28,6 +28,7 @@ from seiyuu.attribute.providers.local import (
 from seiyuu.gpu import get_gpu_manager
 from seiyuu.render.gate import FULL_RENDER_CONFIRM_BLOCKS
 from seiyuu.repository import JobState
+from seiyuu.services.clone_transcript import default_clone_engine
 
 router = APIRouter(tags=["system"])
 
@@ -112,6 +113,7 @@ def system_status(
             hybrid=cfg.attribution_hybrid,
         ),
         apply_emotion=cfg.apply_emotion,
+        default_clone_engine=default_clone_engine(cfg),
         engines=catalog_ids(),
         version=__version__,
     )

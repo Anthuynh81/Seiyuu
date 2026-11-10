@@ -210,3 +210,165 @@ def test_api_other_engines_skip_whisper(client):
     body = _post_clone(client, engine="chatterbox").json()
     assert body["engine"] == "chatterbox" and body["clone_note"] is None
     assert client.app.state.aligner.calls == 0
+
+
+# -- Breeze: the same transcript step, but no transcript-free fallback ---------------------------
+
+
+@pytest.fixture
+def breeze_set_up(monkeypatch):
+    """This machine has the Breeze environment: it becomes the default cloning engine."""
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+
+
+def test_the_default_engine_is_breeze_only_where_it_is_set_up(monkeypatch):
+    from seiyuu.services.clone_transcript import default_clone_engine
+
+    assert default_clone_engine(object()) == "qwen3tts"  # the suite's baseline: not set up
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    assert default_clone_engine(object()) == "breeze"
+
+
+def test_breeze_ready_needs_the_python_the_checkout_and_the_weights(tmp_path):
+    from types import SimpleNamespace
+
+    from seiyuu.engines.breeze_engine import breeze_ready
+
+    python = tmp_path / "python.exe"
+    repo, ckpt = tmp_path / "repo", tmp_path / "ckpt"
+    cfg = SimpleNamespace(
+        breeze_worker_python=python, breeze_repo_dir=repo, breeze_checkpoint_dir=ckpt
+    )
+    assert not breeze_ready(SimpleNamespace())  # nothing configured
+    assert not breeze_ready(cfg)
+    python.write_bytes(b"")
+    (repo / "breeze_infer").mkdir(parents=True)
+    (repo / "breeze_infer" / "templates.py").write_text("", encoding="utf-8")
+    (repo / "models").mkdir()
+    (repo / "models" / "fast_streaming.py").write_text("", encoding="utf-8")
+    assert not breeze_ready(cfg)  # still no weights
+    (ckpt / "audio_tokenizer").mkdir(parents=True)
+    (ckpt / "config.json").write_text("{}", encoding="utf-8")
+    (ckpt / "model.safetensors").write_bytes(b"")
+    assert breeze_ready(cfg)
+    python.unlink()
+    assert not breeze_ready(cfg)  # the weights alone are not a working engine
+
+
+def test_breeze_binds_the_transcript_under_its_own_key(tmp_path):
+    ref = tmp_path / "reference.wav"
+    ref.write_bytes(b"clip")
+    settings = bind_transcript(ref, "ab" * 32, "Hello there.", engine="breeze")
+    assert settings == {
+        "breeze": {REF_TEXT_DIGEST_KEY: reference_text_digest("ab" * 32, "Hello there.")}
+    }
+    # the digest has no engine in it: the same clip and words bind the same value on Qwen
+    assert settings["breeze"] == bind_transcript(ref, "ab" * 32, "Hello there.")["qwen3tts"]
+
+
+@pytest.mark.parametrize(
+    ("heard", "typed", "why"),
+    [
+        (("some words", 31.0), None, "the clip is 31 s, over 30 s"),
+        (("some words", 45.0), "typed words", "the clip is 45 s"),  # too long even when typed
+        (("   ", 8.0), None, "no speech was heard"),
+    ],
+)
+def test_breeze_refuses_a_clip_it_has_no_transcript_for(tmp_path, heard, typed, why):
+    from seiyuu.services.clone_transcript import CloneRefused
+
+    with pytest.raises(CloneRefused, match=why) as refused:
+        choose_transcript(
+            tmp_path / "c.wav", provided=typed, transcribe=lambda _p: heard, engine="breeze"
+        )
+    assert "qwen3tts" in str(refused.value)  # says what to do instead
+    # the same clip on Qwen is not refused: it clones from the sound alone
+    assert (
+        choose_transcript(tmp_path / "c.wav", provided=typed, transcribe=lambda _p: heard).text
+        is None
+    )
+
+
+def test_breeze_takes_a_typed_transcript_when_whisper_fails(tmp_path):
+    from seiyuu.services.clone_transcript import CloneRefused
+    from seiyuu.validate import ValidationError
+
+    def broken(_path):
+        raise ValidationError("no model")
+
+    import numpy as np
+    import soundfile as sf
+
+    def clip(name: str, seconds: float):
+        sf.write(tmp_path / name, np.zeros(int(seconds * 8000), dtype=np.float32), 8000)
+        return tmp_path / name
+
+    chosen = choose_transcript(
+        clip("c.wav", 6.0), provided=" My  words. ", transcribe=broken, engine="breeze"
+    )
+    assert chosen.text == "My words."
+    # whisper also measures the clip: without it the length rule is still applied for Breeze
+    with pytest.raises(CloneRefused, match="the clip is 40 s"):
+        choose_transcript(clip("long.wav", 40.0), provided="x", transcribe=broken, engine="breeze")
+    (tmp_path / "junk.wav").write_bytes(b"not audio at all")
+    with pytest.raises(CloneRefused, match="could not be read as audio"):
+        choose_transcript(tmp_path / "junk.wav", provided="x", transcribe=broken, engine="breeze")
+    # Qwen is unchanged: a typed transcript is taken on trust when whisper fails
+    assert choose_transcript(tmp_path / "junk.wav", provided="x", transcribe=broken).text == "x"
+    with pytest.raises(CloneRefused, match="couldn't transcribe"):
+        choose_transcript(tmp_path / "c.wav", provided=None, transcribe=broken, engine="breeze")
+
+
+def test_cli_clone_defaults_to_breeze_where_it_is_set_up(tmp_path, fake_whisper, breeze_set_up):
+    result = _cli_clone(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert (
+        "(breeze)" in result.output and "cloned from the clip and its transcript" in result.output
+    )
+    meta = VoiceLibrary(tmp_path / "voices").load("elena_x")
+    assert meta.engine == "breeze"
+    text = "It was a dark and stormy night."
+    assert meta.settings == {
+        "breeze": {REF_TEXT_DIGEST_KEY: reference_text_digest(meta.consent.reference_sha256, text)}
+    }
+
+
+def test_cli_breeze_clone_of_a_long_clip_is_refused_and_saves_nothing(tmp_path, monkeypatch):
+    class Long:
+        def __init__(self, **kw):
+            pass
+
+        def transcribe_clip(self, _path):
+            return "Plenty of words here.", 42.0
+
+    monkeypatch.setattr("seiyuu.validate.Validator", Long)
+    result = _cli_clone(tmp_path, "--engine", "breeze")
+    assert result.exit_code != 0
+    assert "the clip is 42 s" in result.output and "qwen3tts" in result.output
+    assert not (tmp_path / "voices" / "elena_x").exists()  # no half-made voice
+
+
+def test_api_clone_on_breeze_binds_under_breeze_and_refuses_a_long_clip(client):
+    made = _post_clone(client, engine="breeze")
+    assert made.status_code == 201, made.text
+    body = made.json()
+    assert body["engine"] == "breeze" and body["clone_note"].endswith("its transcript")
+    assert list(body["settings"]) == ["breeze"]
+    voices = client.app.state.settings.voices_dir
+    assert (voices / "elena_x" / "reference.txt").is_file()
+
+    client.app.state.aligner = _FakeAligner(text="Plenty of words here.", seconds=42.0)
+    refused = _post_clone(client, engine="breeze", voice_id="too_long")
+    assert refused.status_code == 422, refused.text
+    assert "the clip is 42 s" in refused.json()["error"]["message"]
+    assert not (voices / "too_long").exists()  # nothing saved for a voice that could not speak
+
+
+def test_api_clone_default_follows_the_machine(client, breeze_set_up):
+    assert client.get("/api/system").json()["default_clone_engine"] == "breeze"
+    made = _post_clone(client)  # no engine named
+    assert made.status_code == 201 and made.json()["engine"] == "breeze"
+
+
+def test_api_system_reports_qwen_where_breeze_is_not_set_up(client):
+    assert client.get("/api/system").json()["default_clone_engine"] == "qwen3tts"

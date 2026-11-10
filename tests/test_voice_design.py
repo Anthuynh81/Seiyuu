@@ -172,6 +172,30 @@ def test_keep_a_flagged_take_clones_from_the_sound_alone(tmp_path):
     assert not lib.reference_path(meta.voice_id).with_name("reference.txt").exists()
 
 
+def test_a_kept_take_can_clone_on_breeze_while_qwen_designed_it(tmp_path):
+    # The engine a kept voice clones on is independent of the engine that designed the take.
+    _record, directory = _start(tmp_path)
+    run_design(directory, engine=Designer(), validator=Checker(), gpu=Gpu())
+    lib = VoiceLibrary(tmp_path / "voices")
+    meta = keep_take(directory, 1, library=lib, engine="breeze")
+    assert meta.engine == "breeze" and meta.source == SOURCE  # still a Qwen-designed voice
+    digest = reference_text_digest(meta.consent.reference_sha256, TEXT)
+    assert meta.settings == {"breeze": {REF_TEXT_DIGEST_KEY: digest}}  # where Breeze reads it
+    ref = lib.reference_path(meta.voice_id)
+    assert ref.with_name("reference.txt").read_text(encoding="utf-8") == TEXT + "\n"
+
+
+def test_a_flagged_take_is_never_kept_as_a_breeze_voice(tmp_path):
+    # Breeze cannot clone without a transcript, and a flagged take's text is not known to be
+    # what it says: it stays a Qwen voice cloned from the sound alone, as before.
+    _record, directory = _start(tmp_path, takes=1)
+    run_design(directory, engine=Designer(), validator=Checker((False,)), gpu=Gpu())
+    lib = VoiceLibrary(tmp_path / "voices")
+    meta = keep_take(directory, 1, library=lib, engine="breeze")
+    assert meta.engine == "qwen3tts" and meta.settings == {}
+    assert not lib.reference_path(meta.voice_id).with_name("reference.txt").exists()
+
+
 def test_keep_refuses_a_missing_take_and_an_existing_voice(tmp_path):
     _record, directory = _start(tmp_path, takes=1)
     run_design(directory, engine=Designer(), validator=Checker(), gpu=Gpu())

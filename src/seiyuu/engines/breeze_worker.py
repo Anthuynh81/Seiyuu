@@ -96,13 +96,28 @@ _CAP_FLOOR_SECONDS = 6.0
 _CAP_CHARS_PER_SECOND = 6.0
 _CAP_MIN_FRAMES = 64
 
+# A line longer than SPLIT_OVER_CHARS is spoken in pieces: the ADAPTER splits it with
+# split_long_text (below), sends one request per piece with the same reference, seed and
+# direction, and joins the audio with PIECE_GAP_SECONDS of silence. Why 800: the prompt (the
+# clip's frames, both transcripts, the line's own tokens) and the generated frames share
+# MAX_SEQ_LEN positions. With the longest reference the clone flow binds (30 s = 375 frames,
+# ~130 transcript tokens), 800 characters are ~200 text tokens and, at a slow 12 characters/s,
+# ~835 frames: about 1,540 of 2,047, with room to spare. Whole paragraphs past that were cut
+# short or refused. The longest line of the ghost-story book is 574 characters, so ordinary
+# prose is never split. The gap: Breeze clips end in 0.18-0.30 s of quiet and start within
+# 0.02 s (measured 2026-11-09), so 0.2 s more reads as the pause between two sentences.
+SPLIT_OVER_CHARS = 800
+PIECE_GAP_SECONDS = 0.2
+
 # Everything above decides what a line sounds like or where it is cut, so it is part of the
-# engine's model_version: bump GEN_RECIPE whenever max_frames_for, model_text or a constant in
-# this block changes (FAST_CONFIGS entries, MAX_SEQ_LEN, MAX_NEW_TOKENS, REPETITION_PENALTY, the
-# sampler, ATTN_IMPLEMENTATION, DIRECTION_CFG_SCALE, the cap constants). Audio made under an old
-# recipe is then never served from the cache under a new one. The Breeze checkout's own code
-# (prompt templates, model code) is NOT part of the version: the README pins its revision.
-GEN_RECIPE = 1
+# engine's model_version: bump GEN_RECIPE whenever max_frames_for, model_text, split_long_text
+# or a constant in this block changes (FAST_CONFIGS entries, MAX_SEQ_LEN, MAX_NEW_TOKENS,
+# REPETITION_PENALTY, the sampler, ATTN_IMPLEMENTATION, DIRECTION_CFG_SCALE, the cap constants,
+# the split constants). Audio made under an old recipe is then never served from the cache under
+# a new one. The Breeze checkout's own code (prompt templates, model code) is NOT part of the
+# version: the README pins its revision.
+# 2: long lines are split (recipe 1 cut them at the cap or refused them).
+GEN_RECIPE = 2
 
 # Breeze builds its prompt by joining text segments and re-tokenizing the joined string, so the
 # tokenizer's special-token literals inside a book line, a transcript or an instruction would
@@ -125,6 +140,119 @@ class RequestError(ValueError):
 def model_text(text: str) -> str:
     """The text actually sent to the model: the tokenizer's control-token literals removed."""
     return _CONTROL_TOKENS.sub(" ", text).strip() if _CONTROL_TOKENS.search(text) else text
+
+
+# A sentence end: closing punctuation, any closing quotes or brackets, then whitespace.
+_SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+")
+_CLAUSE_END = re.compile(r"[,;:][\"'”’)\]]*\s+")
+_SPACE = re.compile(r"\s+")
+
+
+def _cut_points(text: str, pattern: re.Pattern[str], *, sentences: bool) -> list[int]:
+    """Offsets where ``text`` may be cut: the start of the unit that follows each match."""
+    points = []
+    for match in pattern.finditer(text):
+        end = match.end()
+        if end >= len(text):
+            continue
+        if sentences:
+            # `“Stop!” he cried.` is one sentence: a lower-case continuation is no boundary.
+            if text[end].islower():
+                continue
+            # an initial ("J. R. R. Tolkien", "U.S. Army"), not the end of a sentence
+            dot = match.start()
+            if (
+                text[dot] == "."
+                and dot >= 1
+                and text[dot - 1].isupper()
+                and (dot == 1 or not text[dot - 2].isalpha())
+            ):
+                continue
+        points.append(end)
+    return points
+
+
+def _units(text: str, limit: int) -> list[str]:
+    """``text`` as units no longer than ``limit``, cut at the best boundary that allows it:
+    sentence ends first, then clause punctuation, then spaces, then (a run with no space at
+    all) wherever the limit falls."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    for pattern, sentences in ((_SENTENCE_END, True), (_CLAUSE_END, False), (_SPACE, False)):
+        points = _cut_points(text, pattern, sentences=sentences)
+        if points:
+            edges = [0, *points, len(text)]
+            out: list[str] = []
+            for start, end in zip(edges, edges[1:], strict=False):
+                out.extend(_units(text[start:end], limit))
+            return out
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
+
+
+def _has_words(text: str) -> bool:
+    return any(ch.isalnum() for ch in text)
+
+
+def _fill(units: list[str], limit: int) -> list[str]:
+    """Pack units into pieces, each filled as far as ``limit`` allows."""
+    pieces: list[str] = []
+    current = ""
+    for unit in units:
+        joined = f"{current} {unit}" if current else unit
+        if current and len(joined) > limit:
+            pieces.append(current)
+            current = unit
+        else:
+            current = joined
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def split_long_text(text: str, limit: int = SPLIT_OVER_CHARS) -> list[str]:
+    """The pieces a line is spoken in. A line of at most ``limit`` characters is returned as it
+    is, in one piece. A longer one is cut at sentence ends (see :func:`_units` for a sentence
+    that is itself too long) and packed into the fewest pieces that fit, of even length, none
+    over ``limit``. Every word is kept, in order; only the whitespace at a cut is dropped. A
+    unit with nothing to say (no letter or digit) rides with its neighbour, so no request is
+    ever made for a stray quote mark."""
+    if len(text) <= limit:
+        return [text]
+    units: list[str] = []
+    for unit in _units(text, limit):
+        if units and not (_has_words(unit) and _has_words(units[-1])):
+            units[-1] = f"{units[-1]} {unit}"
+        else:
+            units.append(unit)
+    count = len(_fill(units, limit))  # the fewest pieces these units allow
+    # Same count, evened out: each piece aims at an equal share of what is left, so a paragraph
+    # does not end in one short orphan sentence spoken by itself.
+    pieces: list[str] = []
+    i = 0
+    for slots in range(count, 0, -1):
+        left = units[i:]
+        if not left:
+            break
+        if slots == 1:
+            pieces.extend(_fill(left, limit))  # whatever is left (more than one only if uneven)
+            break
+        share = (sum(len(u) for u in left) + len(left) - 1) / slots
+        current = left[0]
+        i += 1
+        while i < len(units):
+            joined = f"{current} {units[i]}"
+            if len(joined) > limit:
+                break
+            # Stop at the even share only when the rest still fits the slots that are left:
+            # stopping early must never cost an extra piece (and an orphan to go with it).
+            nearer = abs(len(joined) - share) > abs(len(current) - share)
+            if nearer and len(_fill(units[i:], limit)) <= slots - 1:
+                break
+            current = joined
+            i += 1
+        pieces.append(current)
+    return pieces
 
 
 def max_frames_for(text: str, prompt_len: int) -> int:

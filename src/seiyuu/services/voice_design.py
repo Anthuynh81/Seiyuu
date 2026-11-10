@@ -30,7 +30,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from seiyuu.repository import atomic_write_text
-from seiyuu.services.clone_transcript import bind_transcript
+from seiyuu.services.clone_transcript import TRANSCRIPT_REQUIRED, bind_transcript
 from seiyuu.services.common import ServiceError
 from seiyuu.voices import VoiceLibrary
 from seiyuu.voices.library import sha256_file
@@ -271,8 +271,15 @@ def keep_take(
     name: str | None = None,
     voice_id: str | None = None,
     tags: list[str] | None = None,
+    engine: str = DESIGN_ENGINE,
 ) -> VoiceMeta:
     """Make take ``take`` of the design a library voice; returns its meta.
+
+    ``engine`` is the engine the kept voice CLONES on (callers pass the default cloning engine);
+    it is independent of the engine that designed the take. An engine that cannot clone without
+    a transcript (Breeze) is only used when the take passed the speech check, because only then
+    is the take's text known to be what it says; a flagged take stays a ``DESIGN_ENGINE`` voice
+    cloned from the sound alone, as before.
 
     Copy, hash the COPY, publish atomically, then save the meta (the clone ordering), so the
     consent record describes exactly the bytes the library serves. Never overwrites a voice."""
@@ -290,13 +297,15 @@ def keep_take(
     shutil.copyfile(src, tmp)
     sha = sha256_file(tmp)
     os.replace(tmp, ref)
-    # a take that passed the speech check said exactly record.text: bind it (ICL mode)
-    settings = bind_transcript(ref, sha, record.text if chosen.ok else None)
+    if not chosen.ok and engine in TRANSCRIPT_REQUIRED:
+        engine = DESIGN_ENGINE
+    # a take that passed the speech check said exactly record.text: bind it
+    settings = bind_transcript(ref, sha, record.text if chosen.ok else None, engine=engine)
     meta = VoiceMeta(
         voice_id=vid,
         name=(name or record.name).strip(),
         kind=VoiceKind.CLONED,
-        engine=DESIGN_ENGINE,
+        engine=engine,
         reference_audio="reference.wav",
         seed=chosen.seed,
         consent_attested=True,

@@ -72,6 +72,21 @@ local engine where that works without a numeric knob.
   between local cloning engines. See decision D2.
 - README: setup section for the Breeze env.
 
+**As built (PR 3):**
+- Default: `default_clone_engine(cfg)` is `breeze` when the worker python, checkout and weights
+  are all present, else `qwen3tts`. Clone (CLI, API, dialog) and design "keep" use it.
+- Breeze has no transcript-free mode: a clone with nothing to bind is refused; a design take
+  that failed the speech check stays a Qwen voice.
+- D2 (decided 2026-11-09: allow): `POST /voices/{id}/engine`, `seiyuu voice use-engine`, a card
+  action. The binding is copied, never moved. Nothing cached is deleted.
+- Long lines (added to PR 3 on the owner's word): a line over 800 characters is spoken in
+  pieces cut at sentence ends and joined with a 0.2 s pause; `GEN_RECIPE` 2.
+- D3: design takes are still made by Qwen VoiceDesign. A trial of Breeze's own design mode
+  (6 characters, 12 takes, all passed the speech check) is in `output/_breeze_design/` for the
+  owner to compare by ear; the decision is open.
+- Not built: a banner for "this book was recorded before a voice changed engine". The switch
+  names the books instead. A part-book re-render after a switch mixes engines across chapters.
+
 ## PRs
 
 1. **Engine**: adapter + worker + settings + registry/bench/health wiring, fake-transport tests,

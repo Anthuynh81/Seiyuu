@@ -26,7 +26,12 @@ from seiyuu.engines.breeze_engine import (
     repo_present,
     worker_env,
 )
-from seiyuu.engines.breeze_worker import GEN_RECIPE, PROTOCOL_VERSION
+from seiyuu.engines.breeze_worker import (
+    GEN_RECIPE,
+    PIECE_GAP_SECONDS,
+    PROTOCOL_VERSION,
+    SPLIT_OVER_CHARS,
+)
 from seiyuu.engines.indextts2_engine import SubprocessTransport, WorkerError
 from seiyuu.engines.qwen3tts_engine import REF_TEXT_DIGEST_KEY, reference_text_digest
 from seiyuu.gpu import GpuResourceManager
@@ -138,6 +143,29 @@ def test_text_profile_is_explicit_and_folds_dashes_like_the_default():
     assert normalize_text(line, profile="breeze") == normalize_text(line, profile="default")
     # a parenthesized sound is something Breeze performs: the profile leaves it in the text
     assert "(sigh)" in normalize_text("(sigh) Fine.", profile="breeze")
+
+
+def test_text_profile_drops_square_brackets_and_keeps_their_words():
+    # Square brackets are Breeze's tag syntax: it does not read what is inside them. A real
+    # render spoke "[Cover]" as "Four" and dropped "[Roulette Event]" from the line it opens.
+    def spoken(text: str) -> str:
+        return normalize_text(text, profile="breeze")
+
+    assert spoken("[Cover]") == "Cover"
+    assert spoken("[Roulette Event] : Create your own character.") == (
+        "Roulette Event : Create your own character."
+    )
+    assert spoken("He said [quietly] that (sigh) it was over.") == (
+        "He said quietly that (sigh) it was over."
+    )
+    assert spoken("[Welcome, explorer.][Stage 2]") == "Welcome, explorer. Stage two"
+    # the words are the same as every other engine's, so whisper scores against the same text
+    line = "[1st Place] : A <Real> Merch Box"
+    words = lambda t: t.replace("[", " ").replace("]", " ").split()  # noqa: E731
+    assert spoken(line).split() == words(normalize_text(line, profile="qwen3tts"))
+    # only Breeze: the other engines read bracketed text and keep their cache keys
+    for profile in ("default", "kokoro", "chatterbox", "indextts2", "qwen3tts"):
+        assert "[Cover]" in normalize_text("[Cover] page", profile=profile)
 
 
 def test_config_defaults_and_settings():
@@ -632,3 +660,104 @@ def test_unload_terminates_the_worker_and_the_next_line_reloads(tmp_path):
     engine.unload()  # idempotent
     engine.prepare_voice("hero_1a2b")
     assert len(transports) == 2 and transports[1].requests == [{"cmd": "load"}]
+
+
+# -- long lines ----------------------------------------------------------------------------------
+
+SENTENCE = "The rain kept falling on the old slate roof all through the night."
+LONG_LINE = " ".join([SENTENCE] * 30)  # 2,039 characters: three pieces
+
+
+def _by_length(message):
+    """A worker that speaks 0.01 s per character, so a join can be checked to the sample."""
+    if message["cmd"] == "synthesize":
+        _write_wav(message["out_path"], seconds=0.01 * len(message["text"]))
+        return {"ok": True, "path": message["out_path"], "sample_rate": 24000, "hit_cap": False}
+    return _happy(message)
+
+
+def test_a_long_line_is_spoken_in_pieces_and_joined(tmp_path):
+    _voice(tmp_path)
+    transport = FakeTransport(_by_length)
+    engine = _engine(tmp_path, lambda: transport)
+    settings = _bound(tmp_path, instruction="Calm and dry.", cfg_scale=3.0)
+    audio = engine.synthesize(LONG_LINE, "hero_1a2b", settings)
+
+    spoken = [r for r in transport.requests if r["cmd"] == "synthesize"]
+    assert len(spoken) == 3
+    assert " ".join(r["text"] for r in spoken).split() == LONG_LINE.split()  # every word, in order
+    assert all(len(r["text"]) <= SPLIT_OVER_CHARS for r in spoken)
+    # one performance: the same reference, transcript, seed and direction for every piece
+    for field in ("reference_wav", "reference_sha256", "ref_text", "seed", "instruction"):
+        assert len({r[field] for r in spoken}) == 1, field
+    assert {r["cfg_scale"] for r in spoken} == {3.0}
+    assert len({r["out_path"] for r in spoken}) == 3
+
+    sr = BREEZE_SAMPLE_RATE
+    expected = sum(int(0.01 * len(r["text"]) * sr) for r in spoken) + 2 * round(
+        PIECE_GAP_SECONDS * sr
+    )
+    assert audio.samples.size == expected and audio.sample_rate == sr
+    first = int(0.01 * len(spoken[0]["text"]) * sr)
+    gap = audio.samples[first : first + round(PIECE_GAP_SECONDS * sr)]
+    assert not gap.any()  # a silent pause between the pieces
+    assert engine.split_lines == 1 and engine.capped_lines == 0
+
+
+def test_a_line_at_the_limit_is_still_one_request_with_its_text_untouched(tmp_path):
+    _voice(tmp_path)
+    transport = FakeTransport(_happy)
+    engine = _engine(tmp_path, lambda: transport)
+    line = ("word " * 160).strip()  # 799 characters
+    engine.synthesize(line, "hero_1a2b", _bound(tmp_path))
+    spoken = [r for r in transport.requests if r["cmd"] == "synthesize"]
+    assert [r["text"] for r in spoken] == [line] and engine.split_lines == 0
+
+
+def test_a_capped_piece_counts_the_line_once(tmp_path):
+    _voice(tmp_path)
+
+    def capped(message):
+        reply = _by_length(message)
+        if message["cmd"] == "synthesize":
+            reply["hit_cap"] = True
+        return reply
+
+    engine = _engine(tmp_path, lambda: FakeTransport(capped))
+    engine.synthesize(LONG_LINE, "hero_1a2b", _bound(tmp_path))
+    assert engine.capped_lines == 1  # three capped pieces, one line
+
+
+def test_a_refused_piece_fails_the_whole_line_and_names_the_piece(tmp_path):
+    _voice(tmp_path)
+    seen = {"n": 0}
+
+    def refuse_second(message):
+        if message["cmd"] == "synthesize":
+            seen["n"] += 1
+            if seen["n"] == 2:
+                return {"ok": False, "error": "prompt too long", "request_error": True}
+        return _by_length(message)
+
+    transport = FakeTransport(refuse_second)
+    engine = _engine(tmp_path, lambda: transport)
+    with pytest.raises(SynthesisError, match="piece 2 of 3"):
+        engine.synthesize(LONG_LINE, "hero_1a2b", _bound(tmp_path))
+    assert engine.worker_restarts == 0 and not transport.closed  # no partial audio is returned
+
+
+def test_an_empty_piece_is_a_loud_failure(tmp_path):
+    _voice(tmp_path)
+    seen = {"n": 0}
+
+    def silent_third(message):
+        if message["cmd"] == "synthesize":
+            seen["n"] += 1
+            if seen["n"] == 3:
+                sf.write(message["out_path"], np.zeros(0, dtype=np.float32), 24000)
+                return {"ok": True, "path": message["out_path"], "sample_rate": 24000}
+        return _by_length(message)
+
+    engine = _engine(tmp_path, lambda: FakeTransport(silent_third))
+    with pytest.raises(SynthesisError, match="empty audio.*piece 3 of 3"):
+        engine.synthesize(LONG_LINE, "hero_1a2b", _bound(tmp_path))
