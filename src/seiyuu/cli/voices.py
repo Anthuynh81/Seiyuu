@@ -498,3 +498,107 @@ def voice_design(
     except ServiceError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"kept take {chosen} as voice {meta.voice_id} ({meta.engine})")
+
+
+@voice.command("use-engine")
+@click.argument("engine")
+@click.argument("voice_ids", nargs=-1)
+@click.option(
+    "--book",
+    "book_id",
+    default=None,
+    help="Switch every cloned voice this book's casting uses (instead of naming voices).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+@_voices_dir_option
+def voice_use_engine(
+    engine: str,
+    voice_ids: tuple[str, ...],
+    book_id: str | None,
+    output_dir: Path | None,
+    voices_dir: Path | None,
+) -> None:
+    """Move cloned voices to another local cloning engine, in place.
+
+    ENGINE is breeze, qwen3tts, chatterbox or indextts2. Name the voices, or pass --book to
+    switch every cloned voice a book's casting uses. A voice keeps its id, its reference clip
+    and its consent, so no casting changes. Lines already recorded stay in the cache under the
+    old engine (switching back reuses them); record the books again to hear the new engine.
+
+    Breeze needs the clip's transcript: a voice that binds none is transcribed by whisper on
+    the CPU, and refused when that is not possible (a clip over 30 s, no speech heard).
+    Do not run this while a render is in progress.
+    """
+    from seiyuu.services import ServiceError, load_existing_assignment
+    from seiyuu.services.voice_engine import switch_engine, switchable_engines
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError
+
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    out_root = output_dir or cfg.output_dir
+    if engine not in switchable_engines():
+        raise click.ClickException(
+            f"{engine!r} is not a local cloning engine; choose one of "
+            f"{', '.join(switchable_engines())}"
+        )
+    if bool(voice_ids) == bool(book_id):
+        raise click.ClickException("name the voices to switch, or pass --book (not both)")
+    targets = list(dict.fromkeys(voice_ids))
+    if book_id:
+        try:
+            assignment = load_existing_assignment(out_root, book_id)
+        except (ValueError, OSError) as exc:
+            raise click.ClickException(f"{book_id}: its casting is unreadable: {exc}") from exc
+        if assignment is None:
+            raise click.ClickException(f"{book_id} has no saved casting under {out_root}")
+        cast = [assignment.narrator_voice_id, *assignment.assignments.values()]
+        if assignment.thought_voice_id:
+            cast.append(assignment.thought_voice_id)
+        for voice_id in dict.fromkeys(cast):
+            try:
+                meta = lib.load(voice_id)
+            except VoiceLibraryError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if meta.kind is VoiceKind.CLONED and meta.engine != engine:
+                targets.append(voice_id)
+        if not targets:
+            click.echo(f"every cloned voice of {book_id} already uses {engine}")
+            return
+
+    whisper = None
+
+    def transcribe(path: Path) -> tuple[str, float]:
+        nonlocal whisper
+        if whisper is None:  # only loaded when a voice actually needs a transcript
+            from seiyuu.validate import Validator
+
+            whisper = Validator(
+                model_size=cfg.validation_model_size, device="cpu", compute_type="int8"
+            )
+        return whisper.transcribe_clip(path)
+
+    switched, books, failures = 0, set(), []
+    for voice_id in targets:
+        try:
+            done = switch_engine(
+                lib, voice_id, engine, cfg=cfg, output_dir=out_root, transcribe=transcribe
+            )
+        except ServiceError as exc:
+            failures.append(f"{voice_id}: {exc}")
+            continue
+        switched += 1
+        books.update(done.books)
+        click.echo(f"  {voice_id}: {done.previous_engine} -> {engine}")
+    for failure in failures:
+        click.echo(f"  NOT switched: {failure}", err=True)
+    click.echo(f"{switched} voice(s) now clone on {engine}")
+    if books:
+        click.echo(f"record again to hear them: {', '.join(sorted(books))}")
+    if failures:
+        raise click.ClickException(f"{len(failures)} voice(s) could not be switched")

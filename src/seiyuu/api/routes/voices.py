@@ -41,6 +41,8 @@ from seiyuu.api.schemas import (
     VoiceCreate,
     VoiceDeletedOut,
     VoiceDetailOut,
+    VoiceEngineOut,
+    VoiceEngineSwitch,
     VoiceListOut,
     VoiceOut,
     VoiceReferencesOut,
@@ -60,6 +62,7 @@ from seiyuu.services.clone_transcript import (
     choose_transcript,
     default_clone_engine,
 )
+from seiyuu.services.voice_engine import EngineNotInstalled, switch_engine
 from seiyuu.voices import (
     BlendComponent,
     CloudVoiceError,
@@ -519,6 +522,49 @@ def references(voice_id: str, cfg: SettingsDep) -> VoiceReferencesOut:
     except ServiceError as exc:  # fail-closed: an unreadable assignments.json
         raise ApiError(500, "corrupt_artifact", str(exc)) from exc
     return VoiceReferencesOut(voice_id=voice_id, references=refs)
+
+
+@router.post("/voices/{voice_id}/engine", response_model=VoiceEngineOut)
+def switch_voice_engine(
+    voice_id: str, body: VoiceEngineSwitch, request: Request, cfg: SettingsDep, store: StoreDep
+) -> VoiceEngineOut:
+    """Move a cloned voice to another local cloning engine, in place: same voice id, same
+    clip and consent, so every book's casting keeps pointing at it. The engine is part of each
+    line's cache key, so nothing recorded on the old engine can be served as the new one, and
+    nothing is deleted. Refused while a render is live (a running render loads each voice once;
+    a switch under it would give one book two engines) and when the target engine is not set
+    up on this machine. A voice with no transcript is transcribed on the CPU when the target
+    needs one."""
+    _check_voice_id(voice_id)
+    library = VoiceLibrary(cfg.voices_dir)
+
+    def transcribe(path: Path) -> tuple[str, float]:
+        with request.app.state.align_lock:  # the shared CPU whisper, one caller at a time
+            return request.app.state.aligner.transcribe_clip(path)
+
+    with request.app.state.voices_mutex:
+        _load_or_404(library, voice_id)
+        _guard_live_render(store, "changing this voice's engine")
+        try:
+            done = switch_engine(
+                library,
+                voice_id,
+                body.engine,
+                cfg=cfg,
+                output_dir=cfg.output_dir,
+                transcribe=transcribe,
+            )
+        except EngineNotInstalled as exc:
+            raise ApiError(503, "not_ready", str(exc)) from exc
+        except ServiceError as exc:
+            message = str(exc)
+            if "cannot verify voice references" in message:
+                raise ApiError(500, "corrupt_artifact", message) from exc
+            raise ApiError(422, "invalid", message) from exc
+    out = _voice_out(library, done.meta)
+    return VoiceEngineOut(
+        **out.model_dump(), previous_engine=done.previous_engine, note=done.note, books=done.books
+    )
 
 
 @router.delete("/voices/{voice_id}", response_model=VoiceDeletedOut)
