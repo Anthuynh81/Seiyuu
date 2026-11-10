@@ -32,6 +32,7 @@ from seiyuu.services.cast_plan import (
     CastPlan,
     PlanRow,
     RowUpdate,
+    apply_delivery,
     apply_updates,
     cached_sketcher,
     draft_plan,
@@ -40,6 +41,15 @@ from seiyuu.services.cast_plan import (
     is_first_person,
     load_plan,
     run_describe_cast,
+    save_plan,
+    save_run_plan,
+)
+from seiyuu.voices.delivery import (
+    DEFAULT_DIALOGUE,
+    MAX_INSTRUCTION_CHARS,
+    Delivery,
+    DeliveryUpdate,
+    load_delivery,
 )
 from seiyuu.voices.describer import CharacterEvidence, VoiceSketch, clean_sketch, sketch_character
 from test_api_m6b1 import make_settings
@@ -229,6 +239,59 @@ def test_a_redraft_keeps_edited_rows_and_carries_design_ids():
     assert (rows["kim"].design_id, rows["kim"].voice_id) == ("0123456789ab", "kim_designed")
 
 
+def test_a_redraft_keeps_the_delivery_direction():
+    # The render reads this block, and for a Breeze voice it is part of the cache key: a
+    # "describe again" that reset it would silently re-record the book.
+    plan = _draft(_report())
+    assert plan.delivery == Delivery()  # a first draft starts from the defaults
+    edited = apply_delivery(plan, DeliveryUpdate(enabled=False, dialogue="Quick and clipped."))
+    assert not any(r.edited for r in edited.rows) and not edited.narrator.edited
+    again = _draft(_report(), existing=edited)
+    assert again.delivery == edited.delivery
+    assert (again.delivery.enabled, again.delivery.dialogue) == (False, "Quick and clipped.")
+
+
+def test_the_saved_plan_is_what_the_render_reads(tmp_path):
+    plan = apply_delivery(_draft(_report()), DeliveryUpdate(inner_voice="  Hushed,  close. "))
+    save_plan(tmp_path, plan)
+    assert load_plan(tmp_path, BOOK) == plan
+    assert load_delivery(tmp_path / BOOK) == plan.delivery
+    assert plan.delivery.inner_voice == "Hushed, close."
+
+
+def test_a_long_run_never_writes_back_a_stale_delivery_block(tmp_path):
+    # describe-cast and design-cast load the plan, work for minutes, then save it. A delivery
+    # edit made meanwhile (the CLI can) must survive that save: the render reads this block.
+    run_copy = _draft(_report())  # what the run loaded at its start
+    save_plan(tmp_path, run_copy)
+    edited = apply_delivery(load_plan(tmp_path, BOOK), DeliveryUpdate(enabled=False))
+    save_plan(tmp_path, edited)  # the edit lands while the run is still working
+
+    run_copy.rows[0].design_id = "0123456789ab"  # the run's own work
+    save_run_plan(tmp_path, run_copy)
+    saved = load_plan(tmp_path, BOOK)
+    assert saved.delivery.enabled is False  # the edit survived
+    assert saved.rows[0].design_id == "0123456789ab"  # and so did the run's row
+
+    # a file damaged mid-run is repaired from the run's copy rather than failing the job
+    (tmp_path / BOOK / "cast_plan.json").write_text("{broken", encoding="utf-8")
+    save_run_plan(tmp_path, run_copy)
+    assert load_plan(tmp_path, BOOK) == run_copy
+
+
+def test_describe_again_keeps_a_delivery_edit_made_while_it_ran(tmp_path):
+    cfg = make_settings(tmp_path)
+    _write(cfg, _report())
+    run_describe_cast(cfg, BOOK, provider=FakeLLM())
+
+    def edit_mid_run(_message: str) -> None:
+        plan = load_plan(cfg.output_dir, BOOK)
+        save_plan(cfg.output_dir, apply_delivery(plan, DeliveryUpdate(dialogue="Clipped.")))
+
+    run_describe_cast(cfg, BOOK, provider=FakeLLM(), progress=edit_mid_run)
+    assert load_delivery(cfg.output_dir / BOOK).dialogue == "Clipped."
+
+
 def test_the_cache_answers_a_rerun_without_the_llm(tmp_path):
     report, llm = _report(), FakeLLM()
     with AttributionCache(tmp_path / "attribution.db") as cache:
@@ -370,6 +433,42 @@ def test_api_describe_then_read_then_edit(client):
     assert client.put(f"/api/books/{BOOK}/cast-plan", json={"updates": []}).status_code == 422
 
 
+def test_api_edits_the_delivery_direction(client):
+    url = f"/api/books/{BOOK}/cast-plan"
+    job = client.post(f"{url}/describe", json={}).json()
+    assert _wait(client, job["job_id"]).state is JobState.SUCCEEDED
+    before = client.get(url).json()
+    assert before["delivery"] == Delivery().model_dump()
+
+    put = client.put(url, json={"delivery": {"enabled": False, "narration": " Clear,  steady. "}})
+    assert put.status_code == 200, put.text
+    after = put.json()
+    assert after["delivery"]["enabled"] is False
+    assert after["delivery"]["narration"] == "Clear, steady."
+    assert after["delivery"]["dialogue"] == DEFAULT_DIALOGUE  # not named: unchanged
+    assert after["rows"] == before["rows"]  # a delivery edit touches no row
+    assert client.get(url).json()["delivery"] == after["delivery"]  # saved
+
+    both = client.put(
+        url,
+        json={
+            "updates": [{"character_id": "staff", "description": "A tired night clerk."}],
+            "delivery": {"dialogue": ""},
+        },
+    )
+    assert both.status_code == 200, both.text
+    assert both.json()["delivery"]["dialogue"] == ""  # cleared: a plain clone for dialogue
+    assert next(r for r in both.json()["rows"] if r["character_id"] == "staff")["edited"]
+
+    assert client.put(url, json={"delivery": {}}).status_code == 422  # nothing to change
+    assert client.put(url, json={"delivery": {"enabled": None}}).status_code == 422  # the same
+    assert client.put(url, json={}).status_code == 422
+    assert client.put(url, json={"delivery": {"volume": 3}}).status_code == 422
+    too_long = {"delivery": {"dialogue": "x" * (MAX_INSTRUCTION_CHARS + 1)}}
+    assert client.put(url, json=too_long).status_code == 422
+    assert client.get(url).json()["delivery"] == both.json()["delivery"]  # refusals saved nothing
+
+
 def test_api_describe_refusals(client, monkeypatch):
     assert client.post("/api/books/nope/cast-plan/describe", json={}).status_code == 404
 
@@ -450,3 +549,65 @@ def test_wordless_lines_are_never_filler():
     from seiyuu.services.cast_plan import _character_lines
 
     assert _character_lines(["…!", "?!", "“…”", "Y-Yes, let’s!", "I"]) == ["Y-Yes, let’s!", "I"]
+
+
+def test_cli_delivery_shows_and_edits(tmp_path, monkeypatch):
+    from seiyuu.services import save_assignment
+    from seiyuu.voices import VoiceAssignment
+
+    for var, sub in (("BOOKS_DIR", "books"), ("OUTPUT_DIR", "output"), ("DATA_DIR", "data")):
+        monkeypatch.setenv(var, str(tmp_path / sub))
+    from seiyuu.settings import get_settings
+
+    get_settings.cache_clear()
+    out = tmp_path / "output"
+    try:
+        _write(get_settings(), _report(first_person=True))
+        run = CliRunner().invoke
+
+        bare = run(main, ["delivery", BOOK])  # no plan, no assignment: the built-in settings
+        assert bare.exit_code == 0, bare.output
+        assert "no cast plan yet" in bare.output and "delivery direction: on" in bare.output
+        assert "first person or not is unknown" in bare.output
+        refused = run(main, ["delivery", BOOK, "--off"])  # nowhere to keep an edit yet
+        assert refused.exit_code != 0 and "describe-cast" in refused.output
+
+        save_plan(out, _draft(_report(first_person=True)))
+        shared = VoiceAssignment(
+            book_id=BOOK, narrator_voice_id="kim_v", assignments={"kim": "kim_v"}
+        )
+        save_assignment(shared, out)
+        edit = run(main, ["delivery", BOOK, "--off", "--dialogue", "  Quick  and clipped. "])
+        assert edit.exit_code == 0, edit.output
+        assert "delivery direction: off" in edit.output
+        assert "dialogue: Quick and clipped." in edit.output
+        assert "first person: the narrator shares a character's voice" in edit.output
+        saved = load_delivery(out / BOOK)
+        assert (saved.enabled, saved.dialogue) == (False, "Quick and clipped.")
+
+        cleared = run(main, ["delivery", BOOK, "--on", "--narration", ""])
+        assert cleared.exit_code == 0 and "narration: (none: plain clone)" in cleared.output
+        assert load_delivery(out / BOOK).enabled
+
+        save_assignment(shared.model_copy(update={"narrator_voice_id": "narrator_v"}), out)
+        assert "third person" in run(main, ["delivery", BOOK]).output
+        too_long = run(main, ["delivery", BOOK, "--dialogue", "x" * (MAX_INSTRUCTION_CHARS + 1)])
+        assert too_long.exit_code != 0
+        assert load_delivery(out / BOOK).dialogue == "Quick and clipped."  # nothing saved
+
+        plan_file = out / BOOK / "cast_plan.json"
+        stamp = plan_file.stat().st_mtime_ns
+        same = run(main, ["delivery", BOOK, "--on"])  # already on: nothing to record again
+        assert same.exit_code == 0 and "no change" in same.output
+        assert "recorded again" not in same.output and plan_file.stat().st_mtime_ns == stamp
+
+        for broken in (b"{broken", "{}".encode("utf-16")):  # bad JSON, then not UTF-8
+            (out / BOOK / "assignments.json").write_bytes(broken)
+            bad = run(main, ["delivery", BOOK])
+            assert bad.exit_code != 0 and "assignments.json is unreadable" in bad.output
+            assert "Traceback" not in bad.output
+        plan_file.write_bytes("{}".encode("utf-16"))
+        bad = run(main, ["delivery", BOOK, "--off"])
+        assert bad.exit_code != 0 and "cast_plan.json is unreadable" in bad.output
+    finally:
+        get_settings.cache_clear()

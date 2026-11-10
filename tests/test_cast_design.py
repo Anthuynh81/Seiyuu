@@ -329,3 +329,24 @@ def test_cli_design_cast(tmp_path, monkeypatch):
     assert "designing 3 voices, 5 takes" in result.output
     assert "New Employee: shares kim's voice" in result.output
     assert "assignment saved" in result.output
+
+
+def test_a_plan_edit_is_refused_while_the_cast_is_being_designed(client):
+    """Design-cast loads the plan once and saves it after every row, so an edit accepted
+    meanwhile would be written over; and the delivery block is what the render reads."""
+    from seiyuu.repository import JobKind
+
+    store = client.app.state.store
+    job = store.create(book_id=BOOK, kind=JobKind.DESIGN_CAST, params={})
+    url = f"/api/books/{BOOK}/cast-plan"
+    before = client.get(url).json()
+    for body in (
+        {"delivery": {"enabled": False}},
+        {"updates": [{"character_id": "staff", "description": "A tired night clerk."}]},
+    ):
+        resp = client.put(url, json=body)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["error"]["code"] == "conflict"
+    assert client.get(url).json() == before
+    store.request_cancel(job.job_id)  # never enqueued: canceled on the spot
+    assert client.put(url, json={"delivery": {"enabled": False}}).status_code == 200

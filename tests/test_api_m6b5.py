@@ -484,6 +484,27 @@ def test_multivoice_render_end_to_end(client, monkeypatch) -> None:
     assert est2["assignment_hash"] != summary["rendered_assignment_hash"]
 
 
+def test_an_unreadable_cast_plan_is_a_500_naming_the_file(client, monkeypatch) -> None:
+    """The multivoice estimate reads the book's delivery direction from cast_plan.json. A file
+    it cannot read is a server data fault (500 corrupt_artifact, like a corrupt assignment),
+    never a guess: guessing would re-record or mis-deliver the book."""
+    _patch_engines(monkeypatch, FakeEngine())
+    cfg = client.app.state.settings
+    book_id = client.book_id
+    _write_attribution(cfg, book_id)
+    assert client.post(f"/api/books/{book_id}/assignment/draft", json={}).status_code == 201
+    url = f"/api/books/{book_id}/cost-estimate?mode=multivoice"
+    assert client.get(url).status_code == 200  # no plan: the built-in defaults
+
+    (cfg.output_dir / book_id / "cast_plan.json").write_text("{broken", encoding="utf-8")
+    resp = client.get(url)
+    assert resp.status_code == 500, resp.text
+    assert _error(resp)["code"] == "corrupt_artifact"
+    assert "cast_plan.json" in _error(resp)["message"]
+    queued = client.post(f"/api/books/{book_id}/render", json={"chapters": [1]})
+    assert queued.status_code == 500 and _error(queued)["code"] == "corrupt_artifact"
+
+
 # -- review-workflow regression fixes (M6b-5 findings) --------------------------------------
 
 

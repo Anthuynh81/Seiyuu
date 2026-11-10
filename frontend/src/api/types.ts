@@ -518,7 +518,23 @@ export interface CastPlan {
   narrator: PlanRow;
   rows: PlanRow[];
   notes: string[];
+  delivery: Delivery;
 }
+
+/** How a book's lines are spoken on a Breeze voice: an instruction per kind of line. The
+    multivoice render reads it, and it is part of a Breeze line's cache key. An empty text
+    means the plain voice for that kind of line. */
+export interface Delivery {
+  enabled: boolean;
+  inner_voice: string; // narration in a first-person book, and thoughts
+  narration: string; // narration in a third-person book
+  dialogue: string;
+}
+
+export type DeliveryUpdate = Partial<Delivery>;
+
+/** Longest instruction the server accepts (voices/delivery.py MAX_INSTRUCTION_CHARS). */
+export const MAX_INSTRUCTION_CHARS = 300;
 
 export interface RowUpdate {
   character_id: string;

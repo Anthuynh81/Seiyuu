@@ -3,14 +3,20 @@
 For every character with lines, the local LLM drafts how they should sound: a voice-only
 description, an age band, a sample line chosen from their own lines, and possibly "same person
 as" another character. The user then edits it in the Review table. The plan lives in
-``output/{book}/cast_plan.json``. It is a working file for that table and for the design-cast
-job (part 2), never read by render, and in no cache key.
+``output/{book}/cast_plan.json``. The rows are a working file for that table and for the
+design-cast job (part 2): the render never reads them and they are in no cache key.
+
+One block IS read by the render: ``delivery``, the book's delivery direction (three instruction
+texts and an on/off switch, :mod:`seiyuu.voices.delivery`). The multivoice render and the cost
+estimate load it from this file, and for a Breeze voice the instruction is part of the segment's
+cache key, so editing it re-records the lines it directs.
 
 Rules that keep it honest:
 
 - the narrator is its own row (id ``__narrator__``) with an editable default description; for a
   first-person book the plan also suggests the protagonist, whose voice the narrator can share;
-- a row the user edited survives a re-draft untouched; design ids and voice ids always carry over;
+- a row the user edited survives a re-draft untouched; design ids and voice ids always carry over,
+  and so does the delivery block (a re-draft must never re-record a book);
 - "same voice as" links are flattened to one hop and never form a cycle;
 - characters with fewer than ``SMALL_PART_LINES`` lines get 1 take, everyone else 2.
 """
@@ -26,6 +32,14 @@ from seiyuu.attribute.genders import name_patterns, narration_texts, sentences
 from seiyuu.attribute.models import AttributionReport, SegmentType
 from seiyuu.repository import atomic_write_text
 from seiyuu.services.common import ServiceError
+from seiyuu.voices.delivery import (
+    CAST_PLAN_NAME,
+    Delivery,
+    DeliveryError,
+    DeliveryUpdate,
+    apply_delivery_update,
+    load_delivery,
+)
 from seiyuu.voices.describer import (
     AGES,
     CharacterEvidence,
@@ -37,7 +51,6 @@ from seiyuu.voices.describer import (
     sketch_character,
 )
 
-CAST_PLAN_NAME = "cast_plan.json"
 NARRATOR_ROW = "__narrator__"
 SMALL_PART_LINES = 5
 TAKES_FULL = 2
@@ -84,6 +97,9 @@ class CastPlan(BaseModel):
     narrator: PlanRow
     rows: list[PlanRow] = []  # busiest first
     notes: list[str] = []
+    # Read by the render (voices/delivery.py). A plan written before it existed loads with the
+    # defaults, which is also what a book with no plan renders with.
+    delivery: Delivery = Delivery()
 
 
 class RowUpdate(BaseModel):
@@ -308,6 +324,7 @@ def draft_plan(
         narrator=narrator,
         rows=rows,
         notes=notes,
+        delivery=existing.delivery if existing is not None else Delivery(),
     )
 
 
@@ -394,6 +411,11 @@ def apply_updates(plan: CastPlan, updates: list[RowUpdate]) -> CastPlan:
     return plan
 
 
+def apply_delivery(plan: CastPlan, update: DeliveryUpdate) -> CastPlan:
+    """The plan with its delivery direction edited; rows are untouched (not marked edited)."""
+    return plan.model_copy(update={"delivery": apply_delivery_update(plan.delivery, update)})
+
+
 def plan_path(output_dir: Path, book_id: str) -> Path:
     return Path(output_dir) / book_id / CAST_PLAN_NAME
 
@@ -409,6 +431,20 @@ def save_plan(output_dir: Path, plan: CastPlan) -> Path:
     path = plan_path(output_dir, plan.book_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     return atomic_write_text(path, plan.model_dump_json(indent=2))
+
+
+def save_run_plan(output_dir: Path, plan: CastPlan) -> Path:
+    """Save from a long run (describe-cast, design-cast) that loaded the plan minutes ago.
+
+    The run owns the rows. The delivery block belongs to whoever edited it last, and the CLI
+    can edit it while the run works, so the block on disk NOW wins over the run's copy:
+    writing the stale copy back would silently undo the edit, and the render reads this block.
+    """
+    try:
+        plan.delivery = load_delivery(plan_path(output_dir, plan.book_id).parent)
+    except DeliveryError:
+        pass  # damaged mid-run: the run's own copy (valid when it was loaded) repairs the file
+    return save_plan(output_dir, plan)
 
 
 def run_describe_cast(
@@ -457,5 +493,5 @@ def run_describe_cast(
             )
 
     plan = run_with_provider(cfg, resolved, version, "describe", work, gpu=gpu, provider=provider)
-    save_plan(cfg.output_dir, plan)
+    save_run_plan(cfg.output_dir, plan)
     return plan

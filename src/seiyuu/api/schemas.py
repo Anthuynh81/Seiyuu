@@ -13,6 +13,7 @@ from seiyuu.services.cast_plan import CastPlan, RowUpdate
 from seiyuu.services.voices import VoiceReference
 from seiyuu.validate import SegmentWords
 from seiyuu.voices import VoiceAssignment, VoiceMeta
+from seiyuu.voices.delivery import DeliveryUpdate
 
 
 class HealthOut(BaseModel):
@@ -645,8 +646,17 @@ class DescribeCastRequest(BaseModel):
 
 
 class CastPlanUpdate(BaseModel):
+    """Row edits, an edit of the book's delivery direction, or both; never neither."""
+
     model_config = {"extra": "forbid"}
-    updates: list[RowUpdate] = Field(min_length=1)
+    updates: list[RowUpdate] = []
+    delivery: DeliveryUpdate | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> "CastPlanUpdate":
+        if not self.updates and (self.delivery is None or self.delivery.is_empty()):
+            raise ValueError("nothing to change: send row updates, a delivery edit, or both")
+        return self
 
 
 class UnreadableVoice(BaseModel):

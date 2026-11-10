@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   useCastPlan,
@@ -8,18 +8,47 @@ import {
   useDesignCast,
   useLiveJobs,
   useUpdateCastPlan,
+  useUpdateDelivery,
 } from "../../api/hooks";
-import type { CastPlan, JobOut, PlanRow, RowUpdate } from "../../api/types";
-import { NARRATOR_ROW } from "../../api/types";
+import type {
+  CastPlan,
+  Delivery,
+  DeliveryUpdate,
+  JobOut,
+  PlanRow,
+  RowUpdate,
+  VoiceAssignment,
+} from "../../api/types";
+import { MAX_INSTRUCTION_CHARS, NARRATOR_ROW } from "../../api/types";
 import { PlainError } from "../../components/PlainError";
 import { takeVerdict } from "../voices/helpers";
-import { designMinutes, planRows, rowFacts, rowName, rowStatus, rowsToDesign, shareTargets } from "./castPlan";
+import {
+  designMinutes,
+  narrationNote,
+  oneLine,
+  planRows,
+  rowFacts,
+  rowName,
+  rowStatus,
+  rowsToDesign,
+  shareTargets,
+} from "./castPlan";
 
 const NO_SHARE = "__own__";
 
 /** Qwen-first casting in the Review screen: describe the cast (local LLM), edit the plan,
-    design every voice (Qwen3-TTS, GPU), then listen and swap takes per character. */
-export function CastPlanPanel({ bookId, onClose }: { bookId: string; onClose: () => void }) {
+    design every voice (Qwen3-TTS, GPU), then listen and swap takes per character. The plan
+    also holds how lines are spoken on Breeze voices; `assignment` (the book's saved cast, when
+    there is one) tells that section which text the narration uses. */
+export function CastPlanPanel({
+  bookId,
+  onClose,
+  assignment = null,
+}: {
+  bookId: string;
+  onClose: () => void;
+  assignment?: VoiceAssignment | null;
+}) {
   const plan = useCastPlan(bookId);
   const live = useLiveJobs();
   const describe = useDescribeCast(bookId);
@@ -43,6 +72,7 @@ export function CastPlanPanel({ bookId, onClose }: { bookId: string; onClose: ()
         <PlanTable
           bookId={bookId}
           plan={plan.data}
+          assignment={assignment}
           onRedescribe={() => describe.mutate()}
           onDesign={() => design.mutate()}
           busy={describe.isPending || design.isPending}
@@ -80,12 +110,14 @@ function JobLine({ job }: { job: JobOut }) {
 function PlanTable({
   bookId,
   plan,
+  assignment,
   onRedescribe,
   onDesign,
   busy,
 }: {
   bookId: string;
   plan: CastPlan;
+  assignment: VoiceAssignment | null;
   onRedescribe: () => void;
   onDesign: () => void;
   busy: boolean;
@@ -118,6 +150,7 @@ function PlanTable({
         </p>
       ))}
       {update.error && <PlainError className="mt-2" error={update.error} title="couldn't save that change" />}
+      <DeliverySection bookId={bookId} delivery={plan.delivery} assignment={assignment} />
       <div className="mt-3 flex items-center gap-2">
         {todo.length > 0 ? (
           <button className="key" disabled={busy || update.isPending} onClick={onDesign}>
@@ -131,6 +164,134 @@ function PlanTable({
         </button>
         <span className="text-[11px] text-ink-3">your edited rows are kept</span>
       </div>
+    </>
+  );
+}
+
+/** How lines are spoken on Breeze voices: a switch and three instruction texts, saved on
+    blur like the row descriptions. The render reads them from the cast plan. The switch and
+    each text save on their own, so a refused save stays marked on the field it belongs to. */
+function DeliverySection({
+  bookId,
+  delivery,
+  assignment,
+}: {
+  bookId: string;
+  delivery: Delivery;
+  assignment: VoiceAssignment | null;
+}) {
+  const toggle = useUpdateDelivery(bookId);
+  return (
+    <div className="mt-3 border-t border-hairline pt-2" role="group" aria-label="how lines are spoken">
+      <div className="flex flex-wrap items-center gap-2">
+        <b>How lines are spoken</b>
+        <span className="text-xs text-ink-3">Breeze voices only; other voices ignore this</span>
+        <label className="ml-auto flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            checked={delivery.enabled}
+            onChange={(e) => toggle.mutate({ enabled: e.target.checked })}
+          />
+          direct the delivery
+        </label>
+      </div>
+      {toggle.error && <PlainError className="mt-2" error={toggle.error} title="couldn't switch it" />}
+      {!delivery.enabled && (
+        <p className="m-0 mt-1 text-[11px] text-ink-3">
+          Off: every line is spoken in the voice as it is. The texts below are kept for when it is on again.
+        </p>
+      )}
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-inner"
+        label="Inner voice"
+        hint="narration in a first-person book, and thoughts"
+        value={delivery.inner_voice}
+        toUpdate={(inner_voice) => ({ inner_voice })}
+      />
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-narration"
+        label="Narration"
+        hint="third-person books; leave empty for the voice as it is"
+        value={delivery.narration}
+        toUpdate={(narration) => ({ narration })}
+      />
+      <DeliveryText
+        bookId={bookId}
+        id="delivery-dialogue"
+        label="Dialogue"
+        hint="lines spoken out loud"
+        value={delivery.dialogue}
+        toUpdate={(dialogue) => ({ dialogue })}
+      />
+      <p className="m-0 mt-1 text-[11px] text-ink-3">
+        {narrationNote(assignment)} Chapter titles are never directed. A change here records the lines it affects
+        again on the next render.
+      </p>
+    </div>
+  );
+}
+
+function DeliveryText({
+  bookId,
+  id,
+  label,
+  hint,
+  value,
+  toUpdate,
+}: {
+  bookId: string;
+  id: string;
+  label: string;
+  hint: string;
+  value: string; // the saved text
+  toUpdate: (text: string) => DeliveryUpdate;
+}) {
+  const update = useUpdateDelivery(bookId);
+  const [draft, setDraft] = useState(value);
+  // A reply (this field's or another's) replaces the box only while the box still shows what
+  // was saved or what was sent; anything typed since stays, and saves on the next blur.
+  const shown = useRef(draft);
+  shown.current = draft;
+  const saved = useRef(value);
+  const sent = useRef<string | null>(null);
+  useEffect(() => {
+    const typed = oneLine(shown.current);
+    if (typed === saved.current || typed === sent.current) setDraft(value);
+    saved.current = value;
+  }, [value]);
+
+  const text = oneLine(draft);
+  const save = () => {
+    if (text === value) return;
+    sent.current = text;
+    update.mutate(toUpdate(text));
+  };
+  // a refused save stays on show until this text is saved (or typed back to the saved one)
+  const refused = update.error !== null && !update.isPending && text !== value;
+  return (
+    <>
+      <label className="mt-2 block text-xs" htmlFor={id}>
+        {label} <span className="text-ink-3">({hint})</span>
+      </label>
+      <textarea
+        id={id}
+        rows={2}
+        maxLength={MAX_INSTRUCTION_CHARS}
+        className="mt-1 w-full"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+      />
+      {refused && (
+        <div className="mt-1" role="group" aria-label={`${label} text not saved`}>
+          <PlainError error={update.error} title="not saved" />
+          <button className="link mt-1 text-xs" onClick={save}>
+            save the {label.toLowerCase()} text again
+          </button>
+        </div>
+      )}
     </>
   );
 }

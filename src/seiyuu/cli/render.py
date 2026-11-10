@@ -361,6 +361,7 @@ def estimate_cost(
         assignment_hash = None
     else:
         from seiyuu.render import estimate_render_cost, hash_assignment
+        from seiyuu.voices.delivery import DeliveryError
 
         report, book, lib, assignment, out_book_dir, lexicon = _load_multivoice_inputs(
             cfg, book_id, books_dir, output_dir, voices_dir, chapter_indices
@@ -370,8 +371,9 @@ def estimate_cost(
                 report, book, lib, assignment, out_book_dir,
                 chapters=chapter_indices, lexicon=lexicon,
             )  # fmt: skip
-        # a voice assigned to indextts2 without checkpoints raises here — clean error.
-        except SynthesisError as exc:
+        # a voice assigned to indextts2 without checkpoints raises here, and so does an
+        # unreadable cast_plan.json (the book's delivery direction) — clean errors.
+        except (SynthesisError, DeliveryError) as exc:
             raise click.ClickException(str(exc)) from exc
         assignment_hash = hash_assignment(assignment)
     click.echo(

@@ -24,7 +24,13 @@ from typing import Any
 
 from seiyuu.normalize import normalize_text
 from seiyuu.services.assignment import draft_assignment, load_existing_assignment, save_assignment
-from seiyuu.services.cast_plan import CastPlan, PlanRow, load_plan, save_plan
+from seiyuu.services.cast_plan import (
+    CastPlan,
+    PlanRow,
+    load_plan,
+    save_plan,
+    save_run_plan,
+)
 from seiyuu.services.common import ServiceError
 from seiyuu.services.voice_design import (
     DESIGN_ENGINE,
@@ -199,9 +205,9 @@ def run_design_cast(
                 progress=progress,
                 check_cancel=check_cancel,
             )
-            save_plan(cfg.output_dir, plan)  # resume point: this row is done
+            save_run_plan(cfg.output_dir, plan)  # resume point: this row is done
     finally:
-        save_plan(cfg.output_dir, plan)  # keep a half-designed row's design id too
+        save_run_plan(cfg.output_dir, plan)  # keep a half-designed row's design id too
         if todo:
             gpu.free_all()  # VoiceDesign was held across rows; nothing renders with it
 

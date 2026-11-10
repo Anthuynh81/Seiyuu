@@ -12,6 +12,7 @@ import type {
   CastStrategy,
   CastDesignedOut,
   CastPlan,
+  DeliveryUpdate,
   ClonedVoiceOut,
   DesignCreate,
   DesignOut,
@@ -869,10 +870,16 @@ export function useDescribeCast(bookId: string) {
   });
 }
 
+/** Every save of a book's cast plan replies with the whole plan, which replaces the cached
+    one. Saves therefore run one at a time per book (a mutation scope): two replies landing out
+    of order would leave the older snapshot on screen. */
+const planScope = (bookId: string) => ({ id: `castPlan-${bookId}` });
+
 /** Save Review-table edits; the server's plan replaces the cached one. */
 export function useUpdateCastPlan(bookId: string) {
   const qc = useQueryClient();
   return useMutation({
+    scope: planScope(bookId),
     mutationFn: (updates: RowUpdate[]) =>
       api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
         method: "PUT",
@@ -880,6 +887,25 @@ export function useUpdateCastPlan(bookId: string) {
         body: JSON.stringify({ updates }),
       }),
     onSuccess: (plan) => qc.setQueryData(["castPlan", bookId], plan),
+  });
+}
+
+/** Save the book's delivery direction (same PUT as the row edits). The instruction is part of
+    a Breeze line's cache key, so the estimate's "already recorded" counts move: refresh it. */
+export function useUpdateDelivery(bookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    scope: planScope(bookId),
+    mutationFn: (delivery: DeliveryUpdate) =>
+      api<CastPlan>(`/api/books/${bookId}/cast-plan`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delivery }),
+      }),
+    onSuccess: (plan) => {
+      qc.setQueryData(["castPlan", bookId], plan);
+      qc.invalidateQueries({ queryKey: ["estimate", bookId] });
+    },
   });
 }
 

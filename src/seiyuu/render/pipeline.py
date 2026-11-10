@@ -52,6 +52,7 @@ from seiyuu.voices import (
     render_voice_args,
     resolve_voice,
 )
+from seiyuu.voices.delivery import delivery_settings, load_instructions
 from seiyuu.voices.models import VoiceMeta
 
 MANIFEST_NAME = "manifest.json"
@@ -1150,6 +1151,8 @@ def render_book_multivoice(
     )
     if merge_base is not None:
         _check_multivoice_merge_identity(merge_base, assignment, book_id=book.book_meta.book_id)
+    # The book's delivery direction (cast_plan.json), read once: instruction per segment type.
+    instructions = load_instructions(book_output_dir, assignment)
     engines: dict[str, TTSEngine] = {}
     metas: dict[str, VoiceMeta] = {}
     voices_used: dict[str, VoiceUse] = {}
@@ -1232,6 +1235,16 @@ def render_book_multivoice(
                     # (and before synthesis), so it rides settings_hash. No-op when apply_emotion
                     # is off / neutral / Kokoro — key stays byte-identical to today.
                     settings = _emotion_settings(settings, meta.engine, emotion, apply_emotion)
+                    # Delivery direction by segment type, same rule: before the key, so it
+                    # rides settings_hash. The same dict comes back for every engine that
+                    # takes no instruction (all but Breeze), for direction off and for headings.
+                    settings = delivery_settings(
+                        settings,
+                        meta.engine,
+                        seg.type,
+                        instructions,
+                        heading=block.type is BlockType.HEADING,
+                    )
                     key = SegmentKey.build(
                         engine=meta.engine,
                         engine_model_version=engine.model_version,
@@ -1510,6 +1523,7 @@ def estimate_render_cost(
     cache = SegmentCache(book_output_dir / "cache")
     wanted = set(chapters)
     attributed = {ch.index: ch for ch in report.chapters}
+    instructions = load_instructions(book_output_dir, assignment)  # same read as the render
     engines: dict[str, TTSEngine] = {}
     metas: dict[str, VoiceMeta] = {}
 
@@ -1549,6 +1563,14 @@ def estimate_render_cost(
                 # F2 parity: identical emotion merge as render_book_multivoice, so the gate
                 # authorizes exactly the SegmentKeys render will bill.
                 settings = _emotion_settings(settings, meta.engine, emotion, apply_emotion)
+                # Delivery parity: the identical merge, from the same file, as the render.
+                settings = delivery_settings(
+                    settings,
+                    meta.engine,
+                    seg.type,
+                    instructions,
+                    heading=block.type is BlockType.HEADING,
+                )
                 key = SegmentKey.build(
                     engine=meta.engine,
                     engine_model_version=engine.model_version,

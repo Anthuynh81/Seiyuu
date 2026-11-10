@@ -257,8 +257,18 @@ Then in `.env`: `BREEZE_WORKER_PYTHON=...\breeze-tts\.venv\Scripts\python.exe`,
   clip is at most 30 s.
 - **Voice direction**: the engine speaks a line with a given delivery when its settings carry an
   `instruction`, using classifier-free guidance (`cfg_scale`, default 4), which costs about 20 %
-  more time. Both are part of the segment cache key. Renders do not pass an instruction yet:
-  choosing one per segment (narration, thought, dialogue) is the next step.
+  more time. Both are part of the segment cache key.
+- **Delivery by kind of line**: a multi-voice render picks the instruction from the segment.
+  Narration in a first-person book and thoughts get the *inner voice* text; narration in a
+  third-person book gets the *narration* text (empty by default, a plain clone); spoken lines
+  get the *dialogue* text. Chapter titles are never directed, and voices on other engines are
+  untouched (their cached audio stays valid). A book counts as first person when the narrator's
+  voice is also a character's voice, which is what "Narrate in X's voice" in the cast plan sets
+  up. The three texts and an on/off switch are per book, in the `delivery` block of
+  `output/<book_id>/cast_plan.json`: edit them under *Design voices* in Review or with
+  `seiyuu delivery <book_id>` (`--off`, `--inner-voice`, `--narration`, `--dialogue`). An edit
+  re-records the Breeze lines it directs on the next render. A book with no cast plan uses the
+  built-in texts with direction on; single-voice renders are never directed.
 - **Long paragraphs**: the clip, both transcripts and the generated audio share a window of 2048
   positions, and one line is capped at 120 s. A paragraph of more than roughly 1,500 characters
   is cut short (and flagged by whisper); one of several thousand characters is refused, which

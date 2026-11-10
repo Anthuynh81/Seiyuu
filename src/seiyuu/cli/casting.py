@@ -563,3 +563,117 @@ def design_cast(book_id: str) -> None:
             state = row.voice_id or "not designed"
         click.echo(f"  {row.name}: {state}")
     click.echo(f"narrator: {assignment.narrator_voice_id}; assignment saved")
+
+
+@main.command("delivery")
+@click.argument("book_id")
+@click.option(
+    "--on/--off",
+    "enabled",
+    default=None,
+    help="Turn delivery direction on or off for this book (off = every line a plain clone).",
+)
+@click.option(
+    "--inner-voice",
+    default=None,
+    help="Instruction for narration in a first-person book and for thoughts ('' = plain clone).",
+)
+@click.option(
+    "--narration",
+    default=None,
+    help="Instruction for narration in a third-person book ('' = plain clone, the default).",
+)
+@click.option("--dialogue", default=None, help="Instruction for spoken lines ('' = plain clone).")
+def delivery(
+    book_id: str,
+    enabled: bool | None,
+    inner_voice: str | None,
+    narration: str | None,
+    dialogue: str | None,
+) -> None:
+    """Show or edit how a book's lines are delivered (Breeze voice direction).
+
+    A Breeze voice takes a spoken-style instruction per line. The render picks it from the kind
+    of line: the inner-voice text for narration in a first-person book and for thoughts, the
+    narration text for third-person narration, the dialogue text for spoken lines. Chapter
+    titles and voices on other engines are never directed. A book counts as first person when
+    the narrator's voice is also a character's voice.
+
+    With no option, prints the current settings. An edit is saved to output/BOOK/cast_plan.json
+    and re-records the Breeze lines it directs on the next render (their cache key changes).
+    Do not edit while a render of this book is running.
+    """
+    from pydantic import ValidationError
+
+    from seiyuu.attribute import ATTRIBUTION_NAME
+    from seiyuu.services import load_existing_assignment
+    from seiyuu.services.assignment import assignment_path
+    from seiyuu.services.cast_plan import apply_delivery, load_plan, plan_path, save_plan
+    from seiyuu.settings import get_settings
+    from seiyuu.voices.delivery import Delivery, DeliveryUpdate, narrator_shares_a_voice
+
+    cfg = get_settings()
+    book_dir = _resolve_book_dir(
+        cfg.books_dir, book_id, ATTRIBUTION_NAME, "Run `seiyuu attribute` first."
+    )
+    book_id = book_dir.name
+    given = {
+        name: value
+        for name, value in (
+            ("enabled", enabled),
+            ("inner_voice", inner_voice),
+            ("narration", narration),
+            ("dialogue", dialogue),
+        )
+        if value is not None
+    }
+    try:
+        update = DeliveryUpdate(**given)
+    except ValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:  # bad JSON or a wrong shape (ValidationError), bad UTF-8 (ValueError), unreadable
+        plan = load_plan(cfg.output_dir, book_id)
+    except (ValueError, OSError) as exc:
+        unreadable = plan_path(cfg.output_dir, book_id)
+        raise click.ClickException(f"{unreadable} is unreadable: {exc}") from exc
+    try:
+        assignment = load_existing_assignment(cfg.output_dir, book_id)
+    except (ValueError, OSError) as exc:
+        unreadable = assignment_path(cfg.output_dir, book_id)
+        raise click.ClickException(f"{unreadable} is unreadable: {exc}") from exc
+    if given:
+        if plan is None:
+            raise click.ClickException(
+                "no cast plan yet, and the delivery settings are kept in it; run "
+                "`seiyuu describe-cast` first. Until then the book renders with the built-in "
+                "texts, direction on."
+            )
+        edited = apply_delivery(plan, update)
+        if edited.delivery == plan.delivery:
+            click.echo("no change: the delivery direction already is what you asked for")
+        else:
+            plan = edited
+            save_plan(cfg.output_dir, plan)
+            click.echo("saved; the Breeze lines this directs are recorded again on the next render")
+    current = plan.delivery if plan is not None else Delivery()
+    if plan is None:
+        click.echo("no cast plan yet: these are the built-in settings the book renders with")
+    click.echo(f"delivery direction: {'on' if current.enabled else 'off'}")
+    for label, text in (
+        ("inner voice", current.inner_voice),
+        ("narration", current.narration),
+        ("dialogue", current.dialogue),
+    ):
+        click.echo(f"  {label}: {text or '(none: plain clone)'}")
+    if assignment is None:
+        click.echo("no voices assigned yet, so first person or not is unknown")
+    elif narrator_shares_a_voice(assignment):
+        click.echo(
+            "first person: the narrator shares a character's voice, so narration uses the "
+            "inner-voice text"
+        )
+    else:
+        click.echo(
+            "third person: the narrator has a voice of its own, so narration uses the "
+            "narration text"
+        )
