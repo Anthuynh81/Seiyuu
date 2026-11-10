@@ -167,9 +167,8 @@ whisper validation and per-segment cost/cache paths as every other engine.
 #### Qwen3-TTS (voice design, and the cloning engine where Breeze is not set up)
 
 Qwen3-TTS 1.7B (Apache-2.0) clones a voice from a short clip and can also **design** one from a
-written description. It designs every voice's takes, and it is the default engine for new clones
-(the Clone dialog and `seiyuu voice clone`) on a machine where Breeze TTS 2 (below) is not set
-up; pick `--engine breeze` / `chatterbox` / `indextts2` / `elevenlabs` for the others. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
+written description. On a machine where Breeze TTS 2 (below) is not set up it designs the
+voices and is the default engine for new clones (the Clone dialog and `seiyuu voice clone`); pick `--engine breeze` / `chatterbox` / `indextts2` / `elevenlabs` for the others. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
 2.8/cu128 and transformers 5.15.1), through [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts):
 
 ```bash
@@ -202,9 +201,12 @@ uv run seiyuu voice clone "Elena" elena.wav --consent --transcript "Call me Elen
 ```
 
 **Describe a voice.** On the Voices screen, "describe a voice" designs one from a written
-description: Qwen3-TTS VoiceDesign speaks a line in a new voice a few times (a `design` job on the
-GPU: about a minute to load the model, then ~5 s per take), each take is scored for clarity and pace, and the one you keep becomes a
-normal Qwen clone in your library. From the CLI:
+description: the design engine (Breeze TTS 2 where it is set up, otherwise Qwen3-TTS VoiceDesign)
+speaks a line in a new voice a few times (a `design` job on the GPU: about a minute to load the
+model, then ~5 s per take). Each take is checked by whisper (did it say exactly its line?) and
+for pace, and the best one is recommended; if none passes, more takes are made, up to five. The
+take you keep becomes a normal cloned voice in your library. You do not have to listen: the
+recommended take is the one a cast design keeps by itself. From the CLI:
 
 ```bash
 uv run seiyuu voice design "Old janitor" --description "a gruff man in his sixties, slow and tired"
@@ -285,8 +287,17 @@ Then in `.env`: `BREEZE_WORKER_PYTHON=...\breeze-tts\.venv\Scripts\python.exe`,
 
 **Breeze is the default cloning engine once it is set up.** When `BREEZE_WORKER_PYTHON`, the
 checkout and the weights are all present, a new clone (`seiyuu voice clone`, the Clone dialog)
-and a kept design take become Breeze voices; Qwen3-TTS still designs the takes and stays
-selectable. Without the Breeze environment nothing changes: the default stays Qwen3-TTS.
+and a designed voice are Breeze voices, and Breeze also designs the takes (its reference-free
+"voice design" mode: the same checkpoint, so nothing is swapped between designing a cast and
+rendering with it). Qwen3-TTS stays selectable for clones. Without the Breeze environment
+nothing changes: Qwen3-TTS designs and clones as before.
+
+A cast that was designed on Qwen can be made all-Breeze in one run. Voices Breeze already
+designed are kept, the replaced ones stay in your library, and only the book's casting moves:
+
+```bash
+uv run seiyuu design-cast <book_id> --redesign
+```
 Breeze clones only from a clip with its words, so it refuses a clip of more than 30 s or one
 with no speech heard (Qwen clones those from the sound alone).
 

@@ -81,9 +81,15 @@ local engine where that works without a numeric knob.
   action. The binding is copied, never moved. Nothing cached is deleted.
 - Long lines (added to PR 3 on the owner's word): a line over 800 characters is spoken in
   pieces cut at sentence ends and joined with a 0.2 s pause; `GEN_RECIPE` 2.
-- D3: design takes are still made by Qwen VoiceDesign. A trial of Breeze's own design mode
-  (6 characters, 12 takes, all passed the speech check) is in `output/_breeze_design/` for the
-  owner to compare by ear; the decision is open.
+- D3 (DECIDED 2026-11-10: Breeze designs). The owner compared six characters by ear: "Breeze
+  samples are a lot better", and wants one engine for everything with no per-character picking.
+  So `design_engine(cfg)` is the default cloning engine (Breeze where set up); the worker has a
+  `design` command; the recommended take is kept without listening, and more takes are made
+  when none passes the speech check. `seiyuu design-cast --redesign` moves an existing cast.
+  Tried and dropped: a pitch check ("does it sound male/female"). Median pitch would have
+  rejected two of the takes the owner preferred.
+- Found on the first real render: Breeze does not read text in square brackets (its tag
+  syntax). The Breeze text profile now drops the bracket marks and keeps the words.
 - Not built: a banner for "this book was recorded before a voice changed engine". The switch
   names the books instead. A part-book re-render after a switch mixes engines across chapters.
 

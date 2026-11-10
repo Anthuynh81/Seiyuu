@@ -60,7 +60,7 @@ export function CastPlanPanel({
   return (
     <div className="paper mt-2 p-3" role="region" aria-label="design voices">
       <div className="mb-2 flex items-center gap-2">
-        <b>Design voices (Qwen)</b>
+        <b>Design voices</b>
         <span className="text-xs text-ink-3">a voice made for every character from how the book describes them</span>
         <button className="key quiet ml-auto px-2 py-[2px]" onClick={onClose}>
           close

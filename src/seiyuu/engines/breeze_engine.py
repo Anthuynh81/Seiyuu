@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
+from seiyuu.engines.audio import AudioFile, to_canonical
 from seiyuu.engines.base import EngineVoice, SynthesisError, TTSEngine
 
 # Importing the worker MODULE is safe (its top level is stdlib only; it spawns nothing): the
@@ -490,6 +491,36 @@ class BreezeEngine(TTSEngine):
             f"breeze: {message['cmd']} failed after {self._max_restarts + 1} attempt(s) "
             f"({what}): {last_error}"
         ) from last_error
+
+    # -- voice design -------------------------------------------------------------------------
+
+    def design_voice(
+        self,
+        text: str,
+        description: str,
+        *,
+        seed: int,
+        settings: dict[str, Any] | None = None,
+    ) -> AudioFile:
+        """Speak ``text`` in a NEW voice described by ``description`` (no reference clip).
+
+        The one-off voice-creation step: the take is saved as a voice's reference clip and
+        cloned from then on. It is the same checkpoint that renders, so nothing is swapped or
+        reloaded between designing a cast and rendering with it. Callers hold the GPU through
+        the GpuResourceManager exactly as for synthesis. ``settings`` may carry ``cfg_scale``."""
+        if not text.strip() or not description.strip():
+            raise SynthesisError("breeze: voice design needs both text and a description")
+        message: dict[str, Any] = {
+            "cmd": "design",
+            "text": text,
+            "instruction": description.strip(),
+            "seed": int(seed),
+        }
+        scale = (settings or {}).get(CFG_SCALE_KEY)
+        if scale is not None:
+            message["cfg_scale"] = float(scale)
+        samples, sample_rate = self._run(message, f"design {description[:60]!r}")
+        return to_canonical(samples, sample_rate)
 
     # -- synthesis ----------------------------------------------------------------------------
 

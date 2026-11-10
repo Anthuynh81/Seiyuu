@@ -704,7 +704,7 @@ export function Review() {
                     applying
                   </span>
                 )}
-                <Tip content="design a voice for every character from how the book describes them (Qwen3-TTS) — you review the descriptions first">
+                <Tip content="design a voice for every character from how the book describes them — the best take is picked for you, and you can review the descriptions first">
                   <button
                     className={casting ? "key px-[9px] py-[3px]" : "key ml-auto px-3 py-[3px]"}
                     disabled={designOpen}
@@ -713,7 +713,7 @@ export function Review() {
                       setDesignOpen(true);
                     }}
                   >
-                    Design voices (Qwen)
+                    Design voices
                   </button>
                 </Tip>
                 <Tip

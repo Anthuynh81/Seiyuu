@@ -761,3 +761,54 @@ def test_an_empty_piece_is_a_loud_failure(tmp_path):
     engine = _engine(tmp_path, lambda: FakeTransport(silent_third))
     with pytest.raises(SynthesisError, match="empty audio.*piece 3 of 3"):
         engine.synthesize(LONG_LINE, "hero_1a2b", _bound(tmp_path))
+
+
+# -- voice design ---------------------------------------------------------------------------------
+
+
+def _designs(message):
+    if message["cmd"] == "design":
+        _write_wav(message["out_path"], seconds=0.5)
+        return {"ok": True, "path": message["out_path"], "sample_rate": 24000, "hit_cap": False}
+    return _happy(message)
+
+
+def test_design_voice_sends_a_reference_free_request(tmp_path):
+    transport = FakeTransport(_designs)
+    engine = _engine(tmp_path, lambda: transport)
+    audio = engine.design_voice("Hello there.", "  A warm, low voice. ", seed=77)
+    assert audio.sample_rate == 24_000 and audio.samples.size == 12_000
+    load, design = transport.requests
+    assert load["cmd"] == "load"
+    assert {k: v for k, v in design.items() if k != "out_path"} == {
+        "cmd": "design",
+        "text": "Hello there.",
+        "instruction": "A warm, low voice.",
+        "seed": 77,
+    }  # no voice, no clip, no transcript
+    engine.design_voice("Hi.", "Bright.", seed=1, settings={"cfg_scale": 2})
+    assert transport.requests[-1]["cfg_scale"] == 2.0
+
+
+def test_design_voice_needs_text_and_a_description(tmp_path):
+    engine = _engine(tmp_path, lambda: FakeTransport(_designs))
+    for text, description in (("", "Warm."), ("Hello.", "  ")):
+        with pytest.raises(SynthesisError, match="needs both text and a description"):
+            engine.design_voice(text, description, seed=1)
+
+
+def test_a_design_survives_a_worker_restart_like_a_line(tmp_path):
+    transports = []
+
+    def flaky(message):
+        if message["cmd"] == "design" and len(transports) == 1:
+            return {"ok": False, "error": "CUDA out of memory", "oom": True}
+        return _designs(message)
+
+    def factory():
+        transports.append(FakeTransport(flaky))
+        return transports[-1]
+
+    engine = _engine(tmp_path, factory)
+    assert engine.design_voice("Hello there.", "Warm.", seed=3).samples.size > 0
+    assert engine.worker_restarts == 1 and engine.worker_ooms == 1 and transports[0].closed
