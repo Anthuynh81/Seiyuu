@@ -31,6 +31,7 @@ from seiyuu.services.cast_plan import (
     save_plan,
     save_run_plan,
 )
+from seiyuu.services.clone_transcript import default_clone_engine
 from seiyuu.services.common import ServiceError
 from seiyuu.services.voice_design import (
     DESIGN_ENGINE,
@@ -114,8 +115,10 @@ def _design_row(
     gpu: Any,
     progress: Callable[[str], None],
     check_cancel: Callable[[], None],
+    keep_engine: str = DESIGN_ENGINE,
 ) -> None:
-    """Design (or finish designing) one row and keep its recommended take; mutates ``row``."""
+    """Design (or finish designing) one row and keep its recommended take; mutates ``row``.
+    ``keep_engine`` is the engine the kept voice clones on (the default cloning engine)."""
     if row.design_id is None or not design_dir(data_dir, row.design_id).is_dir():
         text = normalize_text(design_text(row), profile=DESIGN_ENGINE)
         record = start_design(
@@ -140,6 +143,7 @@ def _design_row(
         library=library,
         name=row.name,
         tags=["designed", book_id],
+        engine=keep_engine,
     )
     row.voice_id = meta.voice_id
 
@@ -185,6 +189,7 @@ def run_design_cast(
     if plan is None:
         raise ServiceError(f"no cast plan for {book_id!r}; describe the cast first")
     library = VoiceLibrary(cfg.voices_dir)
+    keep_engine = default_clone_engine(cfg)  # Breeze where it is set up, else Qwen
     todo = [
         r
         for r in designing_rows(plan)
@@ -204,6 +209,7 @@ def run_design_cast(
                 gpu=gpu,
                 progress=progress,
                 check_cancel=check_cancel,
+                keep_engine=keep_engine,
             )
             save_run_plan(cfg.output_dir, plan)  # resume point: this row is done
     finally:
@@ -248,7 +254,12 @@ def keep_other_take(
         row.voice_id = kept  # this take is already a voice: reuse it
     else:
         meta = keep_take(
-            directory, take, library=library, name=row.name, tags=["designed", book_id]
+            directory,
+            take,
+            library=library,
+            name=row.name,
+            tags=["designed", book_id],
+            engine=default_clone_engine(cfg),
         )
         row.voice_id = meta.voice_id
     save_plan(cfg.output_dir, plan)

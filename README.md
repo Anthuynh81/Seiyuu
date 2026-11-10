@@ -164,11 +164,12 @@ reclaimed by process death and the single-GPU discipline holds. Once configured,
 `--engine indextts2` (or the Voice Studio engine picker) and render as usual; output rides the same
 whisper validation and per-segment cost/cache paths as every other engine.
 
-#### Qwen3-TTS (the default cloning engine)
+#### Qwen3-TTS (voice design, and the cloning engine where Breeze is not set up)
 
 Qwen3-TTS 1.7B (Apache-2.0) clones a voice from a short clip and can also **design** one from a
-written description. It is the default engine for new clones (the Clone dialog and
-`seiyuu voice clone`); pick `--engine chatterbox` / `indextts2` / `elevenlabs` for the others. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
+written description. It designs every voice's takes, and it is the default engine for new clones
+(the Clone dialog and `seiyuu voice clone`) on a machine where Breeze TTS 2 (below) is not set
+up; pick `--engine breeze` / `chatterbox` / `indextts2` / `elevenlabs` for the others. Like IndexTTS-2 it runs as a worker in its **own** env (it pins torch
 2.8/cu128 and transformers 5.15.1), through [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts):
 
 ```bash
@@ -270,16 +271,41 @@ Then in `.env`: `BREEZE_WORKER_PYTHON=...\breeze-tts\.venv\Scripts\python.exe`,
   re-records the Breeze lines it directs on the next render. A book with no cast plan uses the
   built-in texts with direction on; single-voice renders are never directed.
 - **Long paragraphs**: the clip, both transcripts and the generated audio share a window of 2048
-  positions, and one line is capped at 120 s. A paragraph of more than roughly 1,500 characters
-  is cut short (and flagged by whisper); one of several thousand characters is refused, which
-  stops the render with the block named.
+  positions, so a whole long paragraph does not fit in one request. A line of more than 800
+  characters is spoken in pieces: it is cut at sentence ends into pieces of even length, each
+  spoken with the same clip, seed and delivery instruction, and the audio is joined with a short
+  pause. Shorter lines are sent whole, which covers ordinary prose (the longest line of a
+  68,000-line web novel here is 574 characters). The whole line is still one cached segment and
+  is checked by whisper as one. A piece that still does not fit (a very long reference clip) is
+  refused, which stops the render with the block named.
 - **Safety net**: like the other worker engines it is validated by whisper, a line that never
   stops is cut at a per-line cap, and a CUDA out-of-memory or a dead or hung worker is killed,
   restarted and retried before the segment fails loudly. `unload()` terminates the worker, which
   frees all its VRAM.
 
-Until the clone and design flows offer Breeze, try it on a voice that already binds a transcript.
-A single-voice render becomes the book's active render, so send the trial to a scratch folder:
+**Breeze is the default cloning engine once it is set up.** When `BREEZE_WORKER_PYTHON`, the
+checkout and the weights are all present, a new clone (`seiyuu voice clone`, the Clone dialog)
+and a kept design take become Breeze voices; Qwen3-TTS still designs the takes and stays
+selectable. Without the Breeze environment nothing changes: the default stays Qwen3-TTS.
+Breeze clones only from a clip with its words, so it refuses a clip of more than 30 s or one
+with no speech heard (Qwen clones those from the sound alone).
+
+**Moving existing voices.** A cloned voice can move between local cloning engines in place, from
+its card in the Voices screen ("use Breeze" / "use Qwen") or from the command line:
+
+```bash
+uv run seiyuu voice use-engine breeze <voice_id> [<voice_id> ...]
+uv run seiyuu voice use-engine breeze --book <book_id>   # every cloned voice the book's cast uses
+```
+
+The voice keeps its id, clip and consent, so no casting changes. Its transcript binding is
+copied to the new engine (a voice that has none is transcribed by whisper on the CPU, or the
+switch is refused). Nothing recorded is deleted, and the engine is part of every line's cache
+key: record the book again to hear the new engine, and switching back reuses the old audio.
+A switch is refused while a render is running and when the target engine is not set up.
+
+To try Breeze on one chapter without touching a book's active render, send a single-voice trial
+to a scratch folder:
 
 ```bash
 uv run seiyuu render <book_id> --engine breeze --voice <voice_id> --chapter 1 --output-dir <scratch dir>

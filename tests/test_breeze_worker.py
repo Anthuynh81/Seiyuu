@@ -77,9 +77,11 @@ def test_gen_recipe_is_bumped_with_the_recipe():
         (w._CAP_FLOOR_SECONDS, w._CAP_CHARS_PER_SECOND, w._CAP_MIN_FRAMES),
         w.max_frames_for("x" * 473, 300),
         w.model_text("[S0]<ins_bos>a<ins_eos><eos>"),
+        (w.SPLIT_OVER_CHARS, w.PIECE_GAP_SECONDS),
+        w.split_long_text("One. Two! “Three?” four, five. " * 3, 40),
     )
     assert (w.GEN_RECIPE, pinned) == (
-        1,
+        2,
         (
             {
                 "decode": {
@@ -95,8 +97,111 @@ def test_gen_recipe_is_bumped_with_the_recipe():
             (6.0, 6.0, 64),
             1061,
             "a",
+            (800, 0.2),
+            [
+                "One. Two! “Three?” four, five.",
+                "One. Two! “Three?” four, five.",
+                "One. Two! “Three?” four, five.",
+            ],
         ),
     )
+
+
+# -- long lines: the split the adapter applies ---------------------------------------------------
+
+
+def _same_words(text: str, pieces: list[str]) -> bool:
+    return " ".join(pieces).split() == text.split()
+
+
+def test_a_line_that_fits_is_one_piece_exactly_as_it_is():
+    line = "  A short line.  It stays whole, spaces and all. "
+    assert w.split_long_text(line) == [line]
+    assert w.split_long_text("x" * w.SPLIT_OVER_CHARS) == ["x" * w.SPLIT_OVER_CHARS]
+    assert w.split_long_text("") == [""]
+
+
+def test_a_long_line_is_cut_at_sentence_ends_into_even_pieces():
+    sentence = "The rain kept falling on the old slate roof all through the night."  # 67 chars
+    text = " ".join([sentence] * 30)  # 2,039 characters
+    pieces = w.split_long_text(text)
+    assert _same_words(text, pieces)
+    assert len(pieces) == 3  # the fewest that fit under 800
+    assert all(len(p) <= w.SPLIT_OVER_CHARS for p in pieces)
+    assert all(p.endswith("night.") and p.startswith("The rain") for p in pieces)
+    assert max(map(len, pieces)) - min(map(len, pieces)) <= len(sentence) + 1  # even
+
+
+def test_uneven_sentences_never_cost_an_extra_piece():
+    # 400 + 100 + 700 + 100 characters: three pieces fit. Evening the lengths must not stop the
+    # first piece at 400 and leave two 100-character sentences to be spoken alone.
+    def sentence(n: int) -> str:
+        return ("Word " + "word " * (n // 5))[: n - 1].rstrip().ljust(n - 1, "s") + "."
+
+    lengths = (400, 100, 700, 100)
+    units = [sentence(n) for n in lengths]
+    text = " ".join(units)
+    pieces = w.split_long_text(text)
+    assert _same_words(text, pieces)
+    assert [len(p) for p in pieces] == [501, 700, 100]
+    assert len(pieces) == len(w._fill(units, w.SPLIT_OVER_CHARS))  # the fewest that fit
+
+    import random
+
+    rng = random.Random(11)
+    for _ in range(300):
+        units = [sentence(rng.randint(20, 400)) for _ in range(rng.randint(4, 40))]
+        text = " ".join(units)
+        pieces = w.split_long_text(text)
+        assert _same_words(text, pieces)
+        assert all(len(p) <= w.SPLIT_OVER_CHARS for p in pieces)
+        if len(text) > w.SPLIT_OVER_CHARS:
+            assert len(pieces) == len(w._fill(units, w.SPLIT_OVER_CHARS))
+
+
+def test_a_quoted_exclamation_and_an_initial_do_not_end_the_sentence():
+    text = (
+        "“Stop!” he cried, and J. R. Hartley of the U.S. Army stopped. "
+        "Nobody moved. “Why?” she asked at last. Then the lamp went out."
+    )
+    pieces = w.split_long_text(text, 70)
+    assert _same_words(text, pieces)
+    assert pieces[0] == "“Stop!” he cried, and J. R. Hartley of the U.S. Army stopped."
+    assert pieces[1] == "Nobody moved. “Why?” she asked at last. Then the lamp went out."
+
+
+def test_a_sentence_too_long_by_itself_falls_back_to_clauses_then_words():
+    clause = "and the letter went on about the entail, the estate and the family"
+    sentence = ", ".join([clause] * 6) + "."  # one sentence, ~410 characters
+    pieces = w.split_long_text(sentence, 150)
+    assert _same_words(sentence, pieces) and all(len(p) <= 150 for p in pieces)
+    assert all(p.endswith((",", ".")) for p in pieces)  # cut at clause ends, not mid-clause
+
+    words = " ".join(["word"] * 100)  # no punctuation at all
+    pieces = w.split_long_text(words, 60)
+    assert _same_words(words, pieces) and all(len(p) <= 60 for p in pieces)
+
+    solid = "x" * 130  # not even a space
+    assert w.split_long_text(solid, 50) == ["x" * 50, "x" * 50, "x" * 30]
+
+
+def test_a_piece_with_nothing_to_say_is_folded_into_its_neighbour():
+    text = "He waited at the door for a long while. ... “—” ... Then he knocked twice."
+    pieces = w.split_long_text(text, 45)
+    assert _same_words(text, pieces)
+    assert all(any(ch.isalnum() for ch in p) for p in pieces)
+
+
+def test_real_paragraph_lengths_always_fit():
+    # the shape of the worst real block (Pride and Prejudice ch036_b0006: 14,104 characters)
+    sentence = "It was a truth she had long suspected, and now could no longer deny; yet "
+    sentence += "she read the letter again, slowly, with her whole attention fixed upon it."
+    text = " ".join([sentence] * 96)
+    pieces = w.split_long_text(text)
+    assert len(text) > 14_000 and _same_words(text, pieces)
+    assert all(len(p) <= w.SPLIT_OVER_CHARS for p in pieces)
+    assert len(pieces) == 20  # five such sentences fit a piece, and 96 need 20 pieces
+    assert {len(p) for p in pieces} == {591, 739}  # four or five each: no orphan at the end
 
 
 def test_compile_env_is_a_windows_fix(monkeypatch):

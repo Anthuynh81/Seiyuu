@@ -350,3 +350,16 @@ def test_a_plan_edit_is_refused_while_the_cast_is_being_designed(client):
     assert client.get(url).json() == before
     store.request_cancel(job.job_id)  # never enqueued: canceled on the spot
     assert client.put(url, json={"delivery": {"enabled": False}}).status_code == 200
+
+
+def test_designed_voices_clone_on_breeze_where_it_is_set_up(described, monkeypatch):
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    cfg = described
+    plan, assignment = run_design_cast(cfg, BOOK, engine=Designer(), validator=Checker(), gpu=Gpu())
+    lib = VoiceLibrary(cfg.voices_dir)
+    designed = [r.voice_id for r in [plan.narrator, *plan.rows] if r.same_as is None]
+    # Qwen designed the takes; the kept voices clone on Breeze
+    assert {lib.load(v).engine for v in designed} == {"breeze"}
+    assert assignment.narrator_voice_id == plan.narrator.voice_id
+    kim = lib.load(next(r for r in plan.rows if r.character_id == "kim").voice_id)
+    assert list(kim.settings) == ["breeze"] and kim.source == "qwen_design"

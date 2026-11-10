@@ -294,15 +294,16 @@ def voice_delete(
 @click.argument("reference", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--engine",
-    type=click.Choice(["qwen3tts", "chatterbox", "indextts2", "elevenlabs"]),
-    default="qwen3tts",
-    show_default=True,
-    help="Cloning engine: qwen3tts/chatterbox/indextts2 (local) or elevenlabs (cloud IVC).",
+    type=click.Choice(["breeze", "qwen3tts", "chatterbox", "indextts2", "elevenlabs"]),
+    default=None,
+    help="Cloning engine: breeze/qwen3tts/chatterbox/indextts2 (local) or elevenlabs (cloud "
+    "IVC). Default: breeze when it is set up on this machine, otherwise qwen3tts.",
 )
 @click.option(
     "--transcript",
     default=None,
-    help="qwen3tts: exactly what the clip says (default: whisper transcribes it on the CPU).",
+    help="breeze/qwen3tts: exactly what the clip says (default: whisper transcribes it on "
+    "the CPU).",
 )
 @click.option(
     "--consent", is_flag=True, help="Attest you have the rights/consent to clone this voice."
@@ -316,16 +317,24 @@ def voice_delete(
 @click.option("--voice-id", default=None, help="Explicit voice_id (default: slug + random).")
 @_voices_dir_option
 def voice_clone(
-    name: str, reference: Path, engine: str, consent: bool, consent_by: str | None,
+    name: str, reference: Path, engine: str | None, consent: bool, consent_by: str | None,
     seed: int, voice_id: str | None, voices_dir: Path | None, transcript: str | None,
 ) -> None:  # fmt: skip
-    """Create a cloned voice from a reference clip (qwen3tts/chatterbox/indextts2 local,
-    elevenlabs IVC). A qwen3tts clone of a clip up to 30 s also binds the clip's transcript, so
-    Qwen clones from the clip and its words (closer to the speaker)."""
+    """Create a cloned voice from a reference clip (breeze/qwen3tts/chatterbox/indextts2
+    local, elevenlabs IVC). A breeze or qwen3tts clone of a clip up to 30 s binds the clip's
+    transcript and clones from the clip and its words. Breeze has no other way to clone, so it
+    refuses a clip with no transcript to bind (over 30 s, or no speech heard); Qwen then clones
+    from the sound alone."""
     import getpass
     import shutil
 
-    from seiyuu.services.clone_transcript import QWEN_ENGINE, bind_transcript, choose_transcript
+    from seiyuu.services.clone_transcript import (
+        TRANSCRIPT_ENGINES,
+        CloneRefused,
+        bind_transcript,
+        choose_transcript,
+        default_clone_engine,
+    )
     from seiyuu.settings import get_settings
     from seiyuu.voices import (
         ConsentAttestation,
@@ -345,15 +354,20 @@ def voice_clone(
     cfg = get_settings()
     lib = VoiceLibrary(voices_dir or cfg.voices_dir)
     vid = voice_id or lib.new_voice_id(name)
+    if engine is None:
+        engine = default_clone_engine(cfg)
     chosen = None
-    if engine == QWEN_ENGINE:
+    if engine in TRANSCRIPT_ENGINES:
         from seiyuu.validate import Validator
 
         # CPU/int8 like the API's aligner: never a second model on the GPU
         whisper = Validator(model_size=cfg.validation_model_size, device="cpu", compute_type="int8")
-        chosen = choose_transcript(
-            reference, provided=transcript, transcribe=whisper.transcribe_clip
-        )
+        try:
+            chosen = choose_transcript(
+                reference, provided=transcript, transcribe=whisper.transcribe_clip, engine=engine
+            )
+        except CloneRefused as exc:  # before anything is copied: no half-made voice
+            raise click.ClickException(str(exc)) from exc
     # Order matters: copy first, hash the COPY, publish it atomically, THEN save the meta.
     # The attestation provably describes the exact bytes the library will serve — a failed
     # copy can't leave an attested meta pointing at missing/partial audio, and the source
@@ -372,7 +386,7 @@ def voice_clone(
     for stale in ref_path.parent.glob("conds_*.pt"):
         stale.unlink(missing_ok=True)
     settings = bind_transcript(
-        ref_path, attestation.reference_sha256, chosen.text if chosen else None
+        ref_path, attestation.reference_sha256, chosen.text if chosen else None, engine=engine
     )
     try:
         lib.save(
@@ -426,6 +440,7 @@ def voice_design(
     from seiyuu.gpu import GpuBusyError, get_gpu_manager
     from seiyuu.normalize import normalize_text
     from seiyuu.services import ServiceError
+    from seiyuu.services.clone_transcript import default_clone_engine
     from seiyuu.services.voice_design import (
         DEFAULT_SAMPLE_TEXT,
         DESIGN_ENGINE,
@@ -477,7 +492,118 @@ def voice_design(
         return
     chosen = record.recommended if keep == "best" else int(keep)
     try:
-        meta = keep_take(directory, chosen, library=lib, name=name)
+        meta = keep_take(
+            directory, chosen, library=lib, name=name, engine=default_clone_engine(cfg)
+        )
     except ServiceError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"kept take {chosen} as voice {meta.voice_id} ({meta.engine})")
+
+
+@voice.command("use-engine")
+@click.argument("engine")
+@click.argument("voice_ids", nargs=-1)
+@click.option(
+    "--book",
+    "book_id",
+    default=None,
+    help="Switch every cloned voice this book's casting uses (instead of naming voices).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Render output root (default: settings.output_dir).",
+)
+@_voices_dir_option
+def voice_use_engine(
+    engine: str,
+    voice_ids: tuple[str, ...],
+    book_id: str | None,
+    output_dir: Path | None,
+    voices_dir: Path | None,
+) -> None:
+    """Move cloned voices to another local cloning engine, in place.
+
+    ENGINE is breeze, qwen3tts, chatterbox or indextts2. Name the voices, or pass --book to
+    switch every cloned voice a book's casting uses. A voice keeps its id, its reference clip
+    and its consent, so no casting changes. Lines already recorded stay in the cache under the
+    old engine (switching back reuses them); record the books again to hear the new engine.
+
+    Breeze needs the clip's transcript: a voice that binds none is transcribed by whisper on
+    the CPU, and refused when that is not possible (a clip over 30 s, no speech heard).
+    Do not run this while a render is in progress.
+    """
+    from seiyuu.services import ServiceError, load_existing_assignment
+    from seiyuu.services.voice_engine import switch_engine, switchable_engines
+    from seiyuu.settings import get_settings
+    from seiyuu.voices import VoiceKind, VoiceLibrary, VoiceLibraryError
+
+    cfg = get_settings()
+    lib = VoiceLibrary(voices_dir or cfg.voices_dir)
+    out_root = output_dir or cfg.output_dir
+    if engine not in switchable_engines():
+        raise click.ClickException(
+            f"{engine!r} is not a local cloning engine; choose one of "
+            f"{', '.join(switchable_engines())}"
+        )
+    if bool(voice_ids) == bool(book_id):
+        raise click.ClickException("name the voices to switch, or pass --book (not both)")
+    targets = list(dict.fromkeys(voice_ids))
+    if book_id:
+        try:
+            assignment = load_existing_assignment(out_root, book_id)
+        except (ValueError, OSError) as exc:
+            raise click.ClickException(f"{book_id}: its casting is unreadable: {exc}") from exc
+        if assignment is None:
+            raise click.ClickException(f"{book_id} has no saved casting under {out_root}")
+        cast = [assignment.narrator_voice_id, *assignment.assignments.values()]
+        if assignment.thought_voice_id:
+            cast.append(assignment.thought_voice_id)
+        for voice_id in dict.fromkeys(cast):
+            try:
+                meta = lib.load(voice_id)
+            except VoiceLibraryError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if meta.kind is not VoiceKind.CLONED or meta.engine == engine:
+                continue
+            if meta.engine not in switchable_engines():
+                # a clone kept in the cloud: not a failure, just not something that can move
+                click.echo(f"  {voice_id}: left on {meta.engine} (not a local cloning engine)")
+                continue
+            targets.append(voice_id)
+        if not targets:
+            click.echo(f"every cloned voice of {book_id} already uses {engine}")
+            return
+
+    whisper = None
+
+    def transcribe(path: Path) -> tuple[str, float]:
+        nonlocal whisper
+        if whisper is None:  # only loaded when a voice actually needs a transcript
+            from seiyuu.validate import Validator
+
+            whisper = Validator(
+                model_size=cfg.validation_model_size, device="cpu", compute_type="int8"
+            )
+        return whisper.transcribe_clip(path)
+
+    switched, books, failures = 0, set(), []
+    for voice_id in targets:
+        try:
+            done = switch_engine(
+                lib, voice_id, engine, cfg=cfg, output_dir=out_root, transcribe=transcribe
+            )
+        except ServiceError as exc:
+            failures.append(f"{voice_id}: {exc}")
+            continue
+        switched += 1
+        books.update(done.books)
+        click.echo(f"  {voice_id}: {done.previous_engine} -> {engine}")
+    for failure in failures:
+        click.echo(f"  NOT switched: {failure}", err=True)
+    click.echo(f"{switched} voice(s) now clone on {engine}")
+    if books:
+        click.echo(f"record again to hear them: {', '.join(sorted(books))}")
+    if failures:
+        raise click.ClickException(f"{len(failures)} voice(s) could not be switched")

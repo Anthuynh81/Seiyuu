@@ -29,6 +29,16 @@ def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
 
 
 @pytest.fixture(autouse=True)
+def _breeze_not_installed(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default cloning engine is Breeze where it is set up, else Qwen3-TTS. CLI tests read
+    the real settings (and so this machine's .env), which would make the default differ between
+    a box with the Breeze environment and CI. Every non-GPU test therefore sees "not set up";
+    a test of the rule itself patches the same seam to True."""
+    if request.node.get_closest_marker("gpu") is None:
+        monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: False)
+
+
+@pytest.fixture(autouse=True)
 def _ollama_preflight_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the default suite offline: run_attribution and POST /attribute pre-flight
     Ollama (GET /api/tags) before any work. Stub that one seam to pass so tests that

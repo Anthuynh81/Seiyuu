@@ -481,6 +481,14 @@ export interface VoiceOut {
   has_audition: boolean;
 }
 
+/** POST /api/voices/{id}/engine: the voice on its new engine, what it was on, one plain
+    sentence, and the books whose casting uses it (record them again to hear the new engine). */
+export interface VoiceEngineOut extends VoiceOut {
+  previous_engine: string;
+  note: string;
+  books: string[];
+}
+
 /** POST /api/voices/clone: a Qwen clone also says, in one sentence, whether it bound the clip's
     transcript (closer cloning) or clones from the sound alone, and why. */
 export interface ClonedVoiceOut extends VoiceOut {
@@ -648,6 +656,9 @@ export interface SystemStatusOut {
   attribution: AttributionDefaults;
   keys: { anthropic_configured: boolean; elevenlabs_configured: boolean };
   apply_emotion: boolean; // F2b: server default for the per-render emotion toggle
+  // the engine a new clone gets when none is picked: "breeze" where it is set up on the
+  // server, else "qwen3tts"; optional only so slim test fixtures can omit it
+  default_clone_engine?: string;
   // server limits; optional only so slim test fixtures can omit it (the server always sends it)
   limits?: {
     // a whole-book render over this many speakable paragraphs needs confirm_full=true
