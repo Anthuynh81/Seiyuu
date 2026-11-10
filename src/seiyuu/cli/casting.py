@@ -607,7 +607,8 @@ def delivery(
 
     from seiyuu.attribute import ATTRIBUTION_NAME
     from seiyuu.services import load_existing_assignment
-    from seiyuu.services.cast_plan import apply_delivery, load_plan, save_plan
+    from seiyuu.services.assignment import assignment_path
+    from seiyuu.services.cast_plan import apply_delivery, load_plan, plan_path, save_plan
     from seiyuu.settings import get_settings
     from seiyuu.voices.delivery import Delivery, DeliveryUpdate, narrator_shares_a_voice
 
@@ -627,11 +628,19 @@ def delivery(
         if value is not None
     }
     try:
-        plan = load_plan(cfg.output_dir, book_id)
-        assignment = load_existing_assignment(cfg.output_dir, book_id)
         update = DeliveryUpdate(**given)
     except ValidationError as exc:
         raise click.ClickException(str(exc)) from exc
+    try:  # bad JSON or a wrong shape (ValidationError), bad UTF-8 (ValueError), unreadable
+        plan = load_plan(cfg.output_dir, book_id)
+    except (ValueError, OSError) as exc:
+        unreadable = plan_path(cfg.output_dir, book_id)
+        raise click.ClickException(f"{unreadable} is unreadable: {exc}") from exc
+    try:
+        assignment = load_existing_assignment(cfg.output_dir, book_id)
+    except (ValueError, OSError) as exc:
+        unreadable = assignment_path(cfg.output_dir, book_id)
+        raise click.ClickException(f"{unreadable} is unreadable: {exc}") from exc
     if given:
         if plan is None:
             raise click.ClickException(
@@ -639,9 +648,13 @@ def delivery(
                 "`seiyuu describe-cast` first. Until then the book renders with the built-in "
                 "texts, direction on."
             )
-        plan = apply_delivery(plan, update)
-        save_plan(cfg.output_dir, plan)
-        click.echo("saved; the Breeze lines this directs are recorded again on the next render")
+        edited = apply_delivery(plan, update)
+        if edited.delivery == plan.delivery:
+            click.echo("no change: the delivery direction already is what you asked for")
+        else:
+            plan = edited
+            save_plan(cfg.output_dir, plan)
+            click.echo("saved; the Breeze lines this directs are recorded again on the next render")
     current = plan.delivery if plan is not None else Delivery()
     if plan is None:
         click.echo("no cast plan yet: these are the built-in settings the book renders with")

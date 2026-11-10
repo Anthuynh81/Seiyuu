@@ -42,6 +42,7 @@ from seiyuu.services.cast_plan import (
     load_plan,
     run_describe_cast,
     save_plan,
+    save_run_plan,
 )
 from seiyuu.voices.delivery import (
     DEFAULT_DIALOGUE,
@@ -258,6 +259,39 @@ def test_the_saved_plan_is_what_the_render_reads(tmp_path):
     assert plan.delivery.inner_voice == "Hushed, close."
 
 
+def test_a_long_run_never_writes_back_a_stale_delivery_block(tmp_path):
+    # describe-cast and design-cast load the plan, work for minutes, then save it. A delivery
+    # edit made meanwhile (the CLI can) must survive that save: the render reads this block.
+    run_copy = _draft(_report())  # what the run loaded at its start
+    save_plan(tmp_path, run_copy)
+    edited = apply_delivery(load_plan(tmp_path, BOOK), DeliveryUpdate(enabled=False))
+    save_plan(tmp_path, edited)  # the edit lands while the run is still working
+
+    run_copy.rows[0].design_id = "0123456789ab"  # the run's own work
+    save_run_plan(tmp_path, run_copy)
+    saved = load_plan(tmp_path, BOOK)
+    assert saved.delivery.enabled is False  # the edit survived
+    assert saved.rows[0].design_id == "0123456789ab"  # and so did the run's row
+
+    # a file damaged mid-run is repaired from the run's copy rather than failing the job
+    (tmp_path / BOOK / "cast_plan.json").write_text("{broken", encoding="utf-8")
+    save_run_plan(tmp_path, run_copy)
+    assert load_plan(tmp_path, BOOK) == run_copy
+
+
+def test_describe_again_keeps_a_delivery_edit_made_while_it_ran(tmp_path):
+    cfg = make_settings(tmp_path)
+    _write(cfg, _report())
+    run_describe_cast(cfg, BOOK, provider=FakeLLM())
+
+    def edit_mid_run(_message: str) -> None:
+        plan = load_plan(cfg.output_dir, BOOK)
+        save_plan(cfg.output_dir, apply_delivery(plan, DeliveryUpdate(dialogue="Clipped.")))
+
+    run_describe_cast(cfg, BOOK, provider=FakeLLM(), progress=edit_mid_run)
+    assert load_delivery(cfg.output_dir / BOOK).dialogue == "Clipped."
+
+
 def test_the_cache_answers_a_rerun_without_the_llm(tmp_path):
     report, llm = _report(), FakeLLM()
     with AttributionCache(tmp_path / "attribution.db") as cache:
@@ -427,6 +461,7 @@ def test_api_edits_the_delivery_direction(client):
     assert next(r for r in both.json()["rows"] if r["character_id"] == "staff")["edited"]
 
     assert client.put(url, json={"delivery": {}}).status_code == 422  # nothing to change
+    assert client.put(url, json={"delivery": {"enabled": None}}).status_code == 422  # the same
     assert client.put(url, json={}).status_code == 422
     assert client.put(url, json={"delivery": {"volume": 3}}).status_code == 422
     too_long = {"delivery": {"dialogue": "x" * (MAX_INSTRUCTION_CHARS + 1)}}
@@ -559,5 +594,20 @@ def test_cli_delivery_shows_and_edits(tmp_path, monkeypatch):
         too_long = run(main, ["delivery", BOOK, "--dialogue", "x" * (MAX_INSTRUCTION_CHARS + 1)])
         assert too_long.exit_code != 0
         assert load_delivery(out / BOOK).dialogue == "Quick and clipped."  # nothing saved
+
+        plan_file = out / BOOK / "cast_plan.json"
+        stamp = plan_file.stat().st_mtime_ns
+        same = run(main, ["delivery", BOOK, "--on"])  # already on: nothing to record again
+        assert same.exit_code == 0 and "no change" in same.output
+        assert "recorded again" not in same.output and plan_file.stat().st_mtime_ns == stamp
+
+        for broken in (b"{broken", "{}".encode("utf-16")):  # bad JSON, then not UTF-8
+            (out / BOOK / "assignments.json").write_bytes(broken)
+            bad = run(main, ["delivery", BOOK])
+            assert bad.exit_code != 0 and "assignments.json is unreadable" in bad.output
+            assert "Traceback" not in bad.output
+        plan_file.write_bytes("{}".encode("utf-16"))
+        bad = run(main, ["delivery", BOOK, "--off"])
+        assert bad.exit_code != 0 and "cast_plan.json is unreadable" in bad.output
     finally:
         get_settings.cache_clear()

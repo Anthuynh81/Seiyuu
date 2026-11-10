@@ -99,30 +99,6 @@ def get_cast_plan(book_id: str, cfg: SettingsDep) -> CastPlanOut:
     return CastPlanOut(**_plan_or_404(cfg, book_id).model_dump())
 
 
-@router.put("/books/{book_id}/cast-plan", response_model=CastPlanOut)
-def update_cast_plan(
-    book_id: str, body: CastPlanUpdate, request: Request, cfg: SettingsDep, store: StoreDep
-) -> CastPlanOut:
-    status_or_404(cfg, book_id)
-    guard_render_active(store, book_id)
-    with request.app.state.enqueue_mutex:  # never interleave with a draft finishing
-        live = store.list_jobs(book_id=book_id)
-        if any(j.kind is JobKind.DESCRIBE_CAST and not j.is_terminal for j in live):
-            raise ApiError(
-                409, "conflict", "the cast is still being described; edit it when that finishes"
-            )
-        updated = _plan_or_404(cfg, book_id)
-        if body.updates:
-            try:
-                updated = apply_updates(updated, body.updates)
-            except ServiceError as exc:
-                raise ApiError(422, "invalid", str(exc)) from exc
-        if body.delivery is not None:
-            updated = apply_delivery(updated, body.delivery)
-        save_plan(cfg.output_dir, updated)
-    return CastPlanOut(**updated.model_dump())
-
-
 def _refuse_while_casting(store, book_id: str) -> None:
     live = store.list_jobs(book_id=book_id)
     for job in live:
@@ -133,6 +109,28 @@ def _refuse_while_casting(store, book_id: str) -> None:
                 f"a {job.kind.value} job for this book is still {job.state.value}; wait for it",
                 detail=JobOut.from_job(job).model_dump(mode="json"),
             )
+
+
+@router.put("/books/{book_id}/cast-plan", response_model=CastPlanOut)
+def update_cast_plan(
+    book_id: str, body: CastPlanUpdate, request: Request, cfg: SettingsDep, store: StoreDep
+) -> CastPlanOut:
+    status_or_404(cfg, book_id)
+    guard_render_active(store, book_id)
+    with request.app.state.enqueue_mutex:  # never interleave with a cast job starting
+        # Both cast jobs load the plan once and save it later: an edit accepted while one
+        # runs would be written over (a row edit) or, for the delivery block, raced.
+        _refuse_while_casting(store, book_id)
+        updated = _plan_or_404(cfg, book_id)
+        if body.updates:
+            try:
+                updated = apply_updates(updated, body.updates)
+            except ServiceError as exc:
+                raise ApiError(422, "invalid", str(exc)) from exc
+        if body.delivery is not None:
+            updated = apply_delivery(updated, body.delivery)
+        save_plan(cfg.output_dir, updated)
+    return CastPlanOut(**updated.model_dump())
 
 
 @router.post("/books/{book_id}/cast-plan/design", response_model=JobOut, status_code=202)

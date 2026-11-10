@@ -64,8 +64,12 @@ def _one_line(value: Any) -> Any:
 
 
 class Delivery(BaseModel):
-    """A book's delivery direction. An empty text means a plain clone for that kind of line."""
+    """A book's delivery direction. An empty text means a plain clone for that kind of line.
 
+    Unknown keys are refused: a misspelled key in a hand-edited file ("enable": false) must
+    stop the render, not render the book with the defaults."""
+
+    model_config = {"extra": "forbid"}
     enabled: bool = True
     inner_voice: str = Field(default=DEFAULT_INNER_VOICE, max_length=MAX_INSTRUCTION_CHARS)
     narration: str = Field(default=DEFAULT_NARRATION, max_length=MAX_INSTRUCTION_CHARS)
@@ -86,7 +90,8 @@ class DeliveryUpdate(BaseModel):
     _normalize = field_validator(*_TEXT_FIELDS, mode="before")(_one_line)
 
     def is_empty(self) -> bool:
-        return not self.model_fields_set
+        """Names nothing to change (an explicit null is "leave it", the same as omitting it)."""
+        return all(getattr(self, name) is None for name in self.model_fields_set)
 
 
 def apply_delivery_update(delivery: Delivery, update: DeliveryUpdate) -> Delivery:

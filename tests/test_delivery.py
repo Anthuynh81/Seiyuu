@@ -81,6 +81,8 @@ def test_an_update_changes_only_what_it_names_and_can_clear_a_text():
     cleared = apply_delivery_update(base, DeliveryUpdate(dialogue="", narration=" steady  read "))
     assert cleared.dialogue == "" and cleared.narration == "steady read" and cleared.enabled
     assert DeliveryUpdate().is_empty() and not DeliveryUpdate(enabled=True).is_empty()
+    assert DeliveryUpdate(enabled=None, dialogue=None).is_empty()  # null = leave it
+    assert not DeliveryUpdate(dialogue="").is_empty()  # "" clears the text: a change
     with pytest.raises(ValueError):
         DeliveryUpdate(volume=3)
 
@@ -138,7 +140,16 @@ def test_the_block_is_read_from_the_cast_plan(tmp_path):
     assert d.inner_voice == DEFAULT_INNER_VOICE  # an omitted text keeps its default
 
 
-@pytest.mark.parametrize("body", ["{not json", '{"delivery": {"enabled": "maybe"}}', "[]"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "{not json",
+        '{"delivery": {"enabled": "maybe"}}',
+        "[]",
+        '{"delivery": null}',
+        '{"delivery": {"enable": false}}',  # a misspelled key must not mean "the defaults"
+    ],
+)
 def test_an_unreadable_plan_fails_loudly_and_names_the_file(tmp_path, body):
     (tmp_path / CAST_PLAN_NAME).write_text(body, encoding="utf-8")
     with pytest.raises(DeliveryError, match=CAST_PLAN_NAME):

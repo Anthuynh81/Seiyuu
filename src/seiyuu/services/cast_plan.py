@@ -35,8 +35,10 @@ from seiyuu.services.common import ServiceError
 from seiyuu.voices.delivery import (
     CAST_PLAN_NAME,
     Delivery,
+    DeliveryError,
     DeliveryUpdate,
     apply_delivery_update,
+    load_delivery,
 )
 from seiyuu.voices.describer import (
     AGES,
@@ -431,6 +433,20 @@ def save_plan(output_dir: Path, plan: CastPlan) -> Path:
     return atomic_write_text(path, plan.model_dump_json(indent=2))
 
 
+def save_run_plan(output_dir: Path, plan: CastPlan) -> Path:
+    """Save from a long run (describe-cast, design-cast) that loaded the plan minutes ago.
+
+    The run owns the rows. The delivery block belongs to whoever edited it last, and the CLI
+    can edit it while the run works, so the block on disk NOW wins over the run's copy:
+    writing the stale copy back would silently undo the edit, and the render reads this block.
+    """
+    try:
+        plan.delivery = load_delivery(plan_path(output_dir, plan.book_id).parent)
+    except DeliveryError:
+        pass  # damaged mid-run: the run's own copy (valid when it was loaded) repairs the file
+    return save_plan(output_dir, plan)
+
+
 def run_describe_cast(
     cfg,
     book_id: str,
@@ -477,5 +493,5 @@ def run_describe_cast(
             )
 
     plan = run_with_provider(cfg, resolved, version, "describe", work, gpu=gpu, provider=provider)
-    save_plan(cfg.output_dir, plan)
+    save_run_plan(cfg.output_dir, plan)
     return plan
