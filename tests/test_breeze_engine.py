@@ -145,6 +145,29 @@ def test_text_profile_is_explicit_and_folds_dashes_like_the_default():
     assert "(sigh)" in normalize_text("(sigh) Fine.", profile="breeze")
 
 
+def test_text_profile_drops_square_brackets_and_keeps_their_words():
+    # Square brackets are Breeze's tag syntax: it does not read what is inside them. A real
+    # render spoke "[Cover]" as "Four" and dropped "[Roulette Event]" from the line it opens.
+    def spoken(text: str) -> str:
+        return normalize_text(text, profile="breeze")
+
+    assert spoken("[Cover]") == "Cover"
+    assert spoken("[Roulette Event] : Create your own character.") == (
+        "Roulette Event : Create your own character."
+    )
+    assert spoken("He said [quietly] that (sigh) it was over.") == (
+        "He said quietly that (sigh) it was over."
+    )
+    assert spoken("[Welcome, explorer.][Stage 2]") == "Welcome, explorer. Stage two"
+    # the words are the same as every other engine's, so whisper scores against the same text
+    line = "[1st Place] : A <Real> Merch Box"
+    words = lambda t: t.replace("[", " ").replace("]", " ").split()  # noqa: E731
+    assert spoken(line).split() == words(normalize_text(line, profile="qwen3tts"))
+    # only Breeze: the other engines read bracketed text and keep their cache keys
+    for profile in ("default", "kokoro", "chatterbox", "indextts2", "qwen3tts"):
+        assert "[Cover]" in normalize_text("[Cover] page", profile=profile)
+
+
 def test_config_defaults_and_settings():
     assert breeze_config(SimpleNamespace()) == {
         "worker_python": None,
