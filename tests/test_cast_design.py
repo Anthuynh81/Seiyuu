@@ -400,3 +400,62 @@ def test_redesign_moves_a_qwen_designed_cast_to_the_breeze_designer(described, m
     again = BreezeDesigner()
     run_design_cast(cfg, BOOK, engine=again, validator=Checker(), gpu=Gpu(), redesign=True)
     assert again.designs == []  # its own voices are kept: resumable, never a loop
+
+
+def test_a_redesign_that_cannot_start_leaves_the_cast_linked(described, monkeypatch):
+    """--redesign with the GPU held by another process designs nothing. It must not unlink the
+    rows either: the cast keeps its voices AND its "hear takes" links, and a plain design-cast
+    afterwards still has nothing to do."""
+    from seiyuu.gpu import GpuBusyError
+    from test_voice_design import BreezeDesigner
+
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    cfg = described
+    run_design_cast(cfg, BOOK, engine=Designer(), validator=Checker(), gpu=Gpu())
+    before = load_plan(cfg.output_dir, BOOK)
+
+    class Busy(Gpu):
+        def acquire(self, engine, label):
+            raise GpuBusyError("another seiyuu process holds the GPU")
+
+    with pytest.raises(GpuBusyError):
+        run_design_cast(
+            cfg, BOOK, engine=BreezeDesigner(), validator=Checker(), gpu=Busy(), redesign=True
+        )
+    after = load_plan(cfg.output_dir, BOOK)
+    linked = lambda p: [(r.character_id, r.voice_id) for r in [p.narrator, *p.rows]]  # noqa: E731
+    # only the row whose turn had come let go of its old voice; the rest are untouched
+    assert linked(after)[1:] == linked(before)[1:]
+    assert [r.design_id for r in after.rows] == [r.design_id for r in before.rows]
+    idle = Designer()
+    run_design_cast(cfg, BOOK, engine=idle, validator=Checker(), gpu=Gpu())
+    assert len(idle.designs) == 2  # just the one interrupted row (its 2 takes), not the cast
+
+
+def test_a_cancelled_redesign_resumes_the_half_made_design(described, monkeypatch):
+    from test_voice_design import BreezeDesigner
+
+    monkeypatch.setattr("seiyuu.services.clone_transcript.breeze_ready", lambda _cfg: True)
+    cfg = described
+    run_design_cast(cfg, BOOK, engine=Designer(), validator=Checker(), gpu=Gpu())
+    calls = {"n": 0}
+
+    def cancel_after_first_take():
+        calls["n"] += 1
+        if calls["n"] == 3:  # the row's check, take 1's check, then take 2's
+            raise RuntimeError("canceled")
+
+    first = BreezeDesigner()
+    with pytest.raises(RuntimeError, match="canceled"):
+        run_design_cast(
+            cfg, BOOK, engine=first, validator=Checker(), gpu=Gpu(), redesign=True,
+            check_cancel=cancel_after_first_take,
+        )  # fmt: skip
+    assert len(first.designs) == 1
+    half = load_plan(cfg.output_dir, BOOK).narrator.design_id
+    rest = BreezeDesigner()
+    plan, _cast = run_design_cast(
+        cfg, BOOK, engine=rest, validator=Checker(), gpu=Gpu(), redesign=True
+    )
+    assert plan.narrator.design_id == half  # the same design, finished
+    assert len(rest.designs) == 4  # 5 takes in all, 1 already made

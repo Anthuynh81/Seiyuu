@@ -128,7 +128,8 @@ function Takes({
       <p className="mono mt-1 text-[12px] text-ink-3">“{design.text}”</p>
       {live && (
         <p role="status" className="mt-2 text-ink-2">
-          {progress || "waiting for the graphics card…"} ({design.takes.length} of {design.takes_requested} ready)
+          {progress || "waiting for the graphics card…"} ({design.takes.length} of{" "}
+          {Math.max(design.takes_requested, design.takes.length + 1)} ready)
         </p>
       )}
       {failed && (

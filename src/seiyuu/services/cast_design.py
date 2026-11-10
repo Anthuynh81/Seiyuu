@@ -206,25 +206,32 @@ def run_design_cast(
         raise ServiceError(f"no cast plan for {book_id!r}; describe the cast first")
     library = VoiceLibrary(cfg.voices_dir)
     keep_engine = default_clone_engine(cfg)  # Breeze where it is set up, else Qwen
+    # Rows to design AGAIN: those whose voice another designer made. Nothing is unlinked here:
+    # a run that is refused (GPU busy), fails or is cancelled must leave every row it never
+    # reached pointing at its existing design and voice.
+    redo: set[str] = set()
     if redesign:
         mine = SOURCES.get(getattr(engine, "engine_id", DESIGN_ENGINE))
-        for row in designing_rows(plan):
-            made_here = (
-                row.voice_id is not None
-                and library.meta_path(row.voice_id).is_file()
-                and library.load(row.voice_id).source == mine
-            )
-            if not made_here:
-                row.design_id, row.voice_id = None, None
+        redo = {
+            row.character_id
+            for row in designing_rows(plan)
+            if row.voice_id is not None
+            and library.meta_path(row.voice_id).is_file()
+            and library.load(row.voice_id).source != mine
+        }
     todo = [
         r
         for r in designing_rows(plan)
-        if not (r.voice_id and library.meta_path(r.voice_id).is_file())
+        if r.character_id in redo or not (r.voice_id and library.meta_path(r.voice_id).is_file())
     ]
     try:
         for i, row in enumerate(todo, 1):
             check_cancel()
             progress(f"designing {row.name} ({i} of {len(todo)})")
+            if row.character_id in redo:
+                # its own turn: let go of the other designer's design and voice now. A row
+                # with no voice keeps its design id, so a half-made design is resumed.
+                row.design_id, row.voice_id = None, None
             _design_row(
                 row,
                 book_id=book_id,
